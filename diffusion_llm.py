@@ -1,9 +1,20 @@
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Tokenizer
 
-# Fixed sequence length for both conditioning and target.
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# Fixed sequence length.
 MAX_SEQ_LEN = 32
 
 class DiffusionTransformerLLM(nn.Module):
@@ -12,7 +23,7 @@ class DiffusionTransformerLLM(nn.Module):
         # Shared token embedding and fixed positional embedding.
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
         self.pos_embedding = nn.Parameter(torch.randn(1, MAX_SEQ_LEN, embed_dim))
-        # Time conditioning: maps a scalar (normalized in [0,1]) to an embedding.
+        # Time conditioning: maps a normalized scalar [0,1] to an embedding.
         self.time_mlp = nn.Sequential(
             nn.Linear(1, embed_dim),
             nn.ReLU(),
@@ -21,16 +32,16 @@ class DiffusionTransformerLLM(nn.Module):
         # Denoising transformer branch.
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads)
         self.denoise_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        # Cross-attention branch to integrate conditioning.
+        # Cross-attention to inject conditioning.
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads)
-        # Final linear layer that now predicts the clean latent (x₀) instead of noise.
+        # Instead of predicting the entire clean latent, we predict a residual.
+        # This residual will be added to the fixed positional encoding.
         self.out_layer = nn.Linear(embed_dim, embed_dim)
         # A learned decoder: projects the predicted latent into token logits.
         self.vocab_decoder = nn.Linear(embed_dim, vocab_size)
-        # A separate transformer to encode the conditioning prompt.
+        # A separate transformer to encode the prompt.
         cond_encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads)
         self.cond_transformer = nn.TransformerEncoder(cond_encoder_layer, num_layers=1)
-        # Optional normalization on the latent.
         self.norm = nn.LayerNorm(embed_dim)
 
     def get_condition_encoding(self, cond_ids):
@@ -41,7 +52,7 @@ class DiffusionTransformerLLM(nn.Module):
         cond_embed = self.token_embedding(cond_ids)  # [batch, seq_len, embed_dim]
         pos = self.pos_embedding[:, :cond_ids.size(1), :]
         cond_embed = cond_embed + pos
-        cond_enc = self.cond_transformer(cond_embed.transpose(0,1))  # [seq_len, batch, embed_dim]
+        cond_enc = self.cond_transformer(cond_embed.transpose(0, 1))  # [seq_len, batch, embed_dim]
         return cond_enc
 
     def forward(self, cond_ids, target_ids, time_cond):
@@ -65,29 +76,32 @@ class DiffusionTransformerLLM(nn.Module):
           latent_clean: [batch, seq_len, embed_dim] – reference clean latent.
         """
         batch = target_ids.size(0)
-        # (1) Compute clean latent.
+        # Compute clean latent: content + pos.
         target_embed = self.token_embedding(target_ids)
-        latent_clean = target_embed + self.pos_embedding[:, :target_ids.size(1), :]  # [B, L, D]
-        # (2) Add noise.
+        latent_clean = target_embed + self.pos_embedding[:, :target_ids.size(1), :]
+        # Add noise only to the content (implicitly, noise affects full latent).
         noise = torch.randn_like(latent_clean) * time_cond
         latent_noisy = latent_clean + noise
-        # (3) Time embedding.
+        # Time embedding.
         t_tensor = torch.tensor([[time_cond]], device=latent_noisy.device, dtype=latent_noisy.dtype)
-        time_emb = self.time_mlp(t_tensor)  # [1, D]
+        time_emb = self.time_mlp(t_tensor)  # [1, embed_dim]
         time_emb = time_emb.unsqueeze(1).expand(batch, latent_noisy.size(1), -1)
-        # (4) Combine noisy latent with time embedding.
         latent_input = latent_noisy + time_emb
-        # (5) Process via denoising transformer.
-        x = latent_input.transpose(0, 1)   # [L, B, D]
+        # Process via Transformer.
+        x = latent_input.transpose(0, 1)
         x = self.denoise_transformer(x)
-        # Inject the conditioning (cross-attention).
-        cond_enc = self.get_condition_encoding(cond_ids)  # [L, B, D]
+        # Cross-attention with condition.
+        cond_enc = self.get_condition_encoding(cond_ids)
         x, _ = self.cross_attn(query=x, key=cond_enc, value=cond_enc)
-        x = x.transpose(0,1)  # [B, L, D]
-        # (6) Predict the clean latent.
-        predicted_x0 = self.out_layer(x)
-        predicted_x0 = self.norm(predicted_x0)
-        # (7) Decode to token logits.
+        x = x.transpose(0, 1)
+        # Predict the residual – to be added to the fixed positional encoding.
+        predicted_residual = self.out_layer(x)
+        predicted_residual = self.norm(predicted_residual)
+        # Reconstruct predicted clean latent by adding the fixed positional encoding.
+        # (This enforces that the positions are preserved.)
+        fixed_pos = self.pos_embedding[:, :x.size(1), :]
+        predicted_x0 = predicted_residual + fixed_pos
+        # Decode.
         logits = self.vocab_decoder(predicted_x0)
         return predicted_x0, logits, latent_clean
 
@@ -113,8 +127,10 @@ class DiffusionTransformerLLM(nn.Module):
         cond_enc = self.get_condition_encoding(cond_ids)
         x, _ = self.cross_attn(query=x, key=cond_enc, value=cond_enc)
         x = x.transpose(0, 1)
-        predicted_x0 = self.out_layer(x)
-        predicted_x0 = self.norm(predicted_x0)
+        predicted_residual = self.out_layer(x)
+        predicted_residual = self.norm(predicted_residual)
+        fixed_pos = self.pos_embedding[:, :x.size(1), :]
+        predicted_x0 = predicted_residual + fixed_pos
         return predicted_x0
 
 def train(model, tokenizer, dataset, num_steps=1000, lambda_ce=1.0, lambda_mse=1.0):
@@ -152,33 +168,35 @@ def train(model, tokenizer, dataset, num_steps=1000, lambda_ce=1.0, lambda_mse=1
 def inference(model, tokenizer, cond_text, num_steps=10, noise_scale=1.0, gamma=0.2):
     """
     Inference procedure:
-      1. Given a conditioning prompt, initialize the latent as pure noise.
-      2. For each denoising step, predict the clean latent (x₀) and update the current latent
-         via an interpolation:
-             new_latent = (1 - gamma) * latent + gamma * predicted_x0
-      3. Decode the current latent via the dedicated vocab_decoder.
-    The idea is that over several steps the latent will gradually move from noise toward a latent
-    that decodes to the desired SQL query.
+        1. Start from pure noise.
+        2. At each step, predict the clean latent (x₀), update latent via interpolation.
+        3. Add back the fixed positional encoding to ensure correct word order.
+        4. Decode tokens via the dedicated vocab_decoder.
     """
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
         cond_inputs = tokenizer(cond_text, return_tensors="pt", padding="max_length",
-                                  max_length=MAX_SEQ_LEN, truncation=True)
+                                    max_length=MAX_SEQ_LEN, truncation=True)
         cond_ids = cond_inputs.input_ids.to(device)  # [1, L]
 
         embed_dim = model.token_embedding.embedding_dim
         # Initialize latent as pure noise.
         latent = torch.randn(1, MAX_SEQ_LEN, embed_dim, device=device) * noise_scale
+        pos_enc = model.pos_embedding[:, :MAX_SEQ_LEN, :]  # fixed positional encoding
+
         print("---- Inference: Iterative Denoising ----")
         for step in range(num_steps):
-            # Linearly vary the time condition from 1 down to 0.
+            # Vary the time condition (e.g., linearly from 1 to 0).
             t_normalized = 1 - (step / (num_steps - 1))
             predicted_x0 = model.denoise_step(latent, cond_ids, t_normalized)
-            # Update latent using interpolation.
+            # Update latent via interpolation.
             latent = (1 - gamma) * latent + gamma * predicted_x0
-            # Decode tokens.
-            logits = model.vocab_decoder(latent)  # [1, L, vocab_size]
+            # FIX: Re-add the fixed positional encoding.
+            latent_with_pos = latent + pos_enc
+
+            # Decode tokens using the dedicated vocab_decoder.
+            logits = model.vocab_decoder(latent_with_pos)  # [1, L, vocab_size]
             token_ids = torch.argmax(logits, dim=-1)  # [1, L]
             decoded = tokenizer.decode(token_ids[0], skip_special_tokens=True)
             print(f"Step {step+1:02d}: {decoded}")
@@ -200,7 +218,7 @@ if __name__ == "__main__":
         ("Count the rows of cars", "SELECT COUNT(*) FROM cars")
     ]
     print("====== Training ======")
-    train(model, tokenizer, dataset, num_steps=800)
+    train(model, tokenizer, dataset, num_steps=500)
     torch.save(model.state_dict(), "model.pth")
     print("Model saved as model.pth")
 
