@@ -104,38 +104,38 @@ class MaskedDiffusionLM(nn.Module):
         return logits, corruption_mask
 
 def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True):
-    """
-    Train on a list of (prompt, response) pairs.
-    Uses cross entropy loss only on the positions that were masked.
-    If mask_prompt is True, the entire combined sequence is masked (pretraining).
-    Otherwise, only response tokens are masked (fine-tuning).
-    """
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # Adding a learning rate scheduler with decay every 50 steps.
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.95)
     model.train()
     for step in range(num_steps):
-        # Cycle through the dataset.
+        # Cycle through dataset.
         prompt_text, response_text = dataset[step % len(dataset)]
-        # Tokenize prompt and response separately.
         prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", padding="max_length", 
                                   max_length=PROMPT_LEN, truncation=True)
         response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length", 
                                     max_length=RESP_LEN, truncation=True)
-        prompt_ids = prompt_inputs.input_ids  # [B, PROMPT_LEN]
-        response_ids = response_inputs.input_ids  # [B, RESP_LEN]
-        # For training, sample noise level uniformly.
+        prompt_ids = prompt_inputs.input_ids
+        response_ids = response_inputs.input_ids
         noise_level = random.uniform(0.1, 1)
         
         logits, corruption_mask = model(prompt_ids, response_ids, noise_level, mask_prompt)
-        # Use loss only on masked positions.
-        # Flatten tokens and choose positions from the combined sequence.
         loss = F.cross_entropy(logits[corruption_mask], torch.cat([prompt_ids, response_ids], dim=1)[corruption_mask])
         
         optimizer.zero_grad()
         loss.backward()
+        
+        # Apply gradient clipping to keep gradients stable.
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
+        scheduler.step()
+        
         if step % 10 == 0:
             stage = "Pretraining" if mask_prompt else "Fine-tuning"
-            print(f"[{stage}] Step {step} - Loss: {loss.item():.4f}")
+            current_lr = scheduler.get_last_lr()[0]
+            print(f"[{stage}] Step {step} - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
+            
 
 def inference(model, tokenizer, prompt_text):
     model.eval()
@@ -149,7 +149,8 @@ def inference(model, tokenizer, prompt_text):
         # Initialize all response tokens as MASK.
         response_ids = torch.full((B, RESP_LEN), MASK_TOKEN_ID, device=device)
         
-        print("---- Inference: Diffusion Inference (Lock in one token per step) ----")
+        print("---- Inference: Diffusion Inference ----")
+        print("PROMPT", prompt_text)
         # Loop until all tokens are locked or we reach RESP_LEN steps.
         for step in range(RESP_LEN):
             # Forward pass. noise_level=0 since we use predictions directly.
@@ -254,7 +255,7 @@ if __name__ == "__main__":
     
     print("====== Pretraining ======")
     # For pretraining, mask_prompt=True (random masking over entire sequence).
-    train(model, tokenizer, dataset, num_steps=200, mask_prompt=True)
+    train(model, tokenizer, dataset, num_steps=400, mask_prompt=True)
     torch.save(model.state_dict(), "model_pretrained.pth")
     print("Model saved as model_pretrained.pth")
     
