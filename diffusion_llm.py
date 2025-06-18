@@ -4,6 +4,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Tokenizer
+from dataset import pretrain_dataset, finetune_dataset
+from time import time
+
+def format_time(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:  # Less than 60 seconds
+        return f"{seconds}s"
+    
+    elif seconds < 3600:  # Less than 1 hour (in minutes and seconds)
+        minutes = seconds // 60
+        seconds %= 60
+        return f"{minutes}m {seconds}s"
+    
+    else:  # Greater than or equal to 1 hour (in hours and minutes)
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}h {minutes}m"
 
 # Set all seeds for reproducibility.
 SEED = 42
@@ -42,7 +59,7 @@ def corrupt_combined(token_ids, noise_level, mask_prompt=True):
       - corruption_mask: boolean tensor indicating which positions were replaced.
     """
     B, L = token_ids.size()
-    corruption_mask = torch.zeros_like(token_ids).bool()
+    corruption_mask = torch.zeros_like(token_ids, device=token_ids.device).bool()
     if mask_prompt:
         # Entire sequence is eligible.
         corruption_mask = torch.bernoulli(torch.full(token_ids.shape, noise_level, device=token_ids.device, dtype=torch.float32)).bool()
@@ -89,7 +106,7 @@ class MaskedDiffusionLM(nn.Module):
         combined_ids = torch.cat([prompt_ids, response_ids], dim=1)  # [B, TOTAL_SEQ_LEN]
         # Step 1: Corrupt tokens.
         corrupted_ids, corruption_mask = corrupt_combined(combined_ids, noise_level, mask_prompt)
-        cids = np.array(corrupted_ids.numpy()[0])
+        cids = np.array(corrupted_ids.cpu().numpy()[0])
         # Step 2: Embed tokens and add positional encoding.
         x = self.token_embedding(corrupted_ids)  # [B, TOTAL_SEQ_LEN, D]
         x = x + self.pos_embedding[:, :TOTAL_SEQ_LEN, :]
@@ -108,15 +125,16 @@ def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True):
     # Adding a learning rate scheduler with decay every 50 steps.
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.95)
     model.train()
+    start = time()
     for step in range(num_steps):
         # Cycle through dataset.
         prompt_text, response_text = dataset[step % len(dataset)]
-        prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", padding="max_length", 
+        prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", padding="max_length",
                                   max_length=PROMPT_LEN, truncation=True)
-        response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length", 
+        response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length",
                                     max_length=RESP_LEN, truncation=True)
-        prompt_ids = prompt_inputs.input_ids
-        response_ids = response_inputs.input_ids
+        prompt_ids = prompt_inputs.input_ids.to(device)
+        response_ids = response_inputs.input_ids.to(device)
         noise_level = random.uniform(0.1, 1)
         
         logits, corruption_mask = model(prompt_ids, response_ids, noise_level, mask_prompt)
@@ -131,136 +149,112 @@ def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True):
         optimizer.step()
         scheduler.step()
         
-        if step % 10 == 0:
+        if step % 100 == 0:
             stage = "Pretraining" if mask_prompt else "Fine-tuning"
             current_lr = scheduler.get_last_lr()[0]
-            print(f"[{stage}] Step {step} - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
-            
+            percent = float(step)*100/float(num_steps)
+            elapsed = time()-start
+            print(f"[{stage}] Step {step}/{num_steps} ({round(percent)}%,{format_time(elapsed)}/{format_time(elapsed/(max(float(percent)/100,0.001)))}) - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
+    print(f"Training took: {round(time()-start)}s")
 
-def inference(model, tokenizer, prompt_text):
+def inference(model, tokenizer, prompt_text, steps=RESP_LEN):
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
-        # Tokenize the prompt.
+        # Tokenize the prompt
         prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding="max_length",
                                   max_length=PROMPT_LEN, truncation=True)
         prompt_ids = prompt_inputs.input_ids.to(device)  # [B, PROMPT_LEN]
         B = prompt_ids.size(0)
-        # Initialize all response tokens as MASK.
+        # Initialize all response tokens as MASK
         response_ids = torch.full((B, RESP_LEN), MASK_TOKEN_ID, device=device)
         
         print("---- Inference: Diffusion Inference ----")
         print("PROMPT", prompt_text)
-        # Loop until all tokens are locked or we reach RESP_LEN steps.
-        for step in range(RESP_LEN):
+        
+        # Number of tokens to unlock per step
+        tokens_per_step = max(1, RESP_LEN // steps)
+        
+        # Loop until all tokens are locked or we finish all steps
+        for step in range(steps):
             # Forward pass. noise_level=0 since we use predictions directly.
             logits, _ = model(prompt_ids, response_ids, noise_level=0, mask_prompt=False)
             logits_resp = logits[:, PROMPT_LEN:, :]  # shape: [B, RESP_LEN, vocab_size]
             
-            # Convert logits to probabilities.
+            # Convert logits to probabilities
             probs = torch.softmax(logits_resp, dim=-1)  # [B, RESP_LEN, vocab_size]
             top_probs, top_ids = probs.max(dim=-1)        # [B, RESP_LEN]
             
-            # Get positions that are still MASK.
+            # Get positions that are still MASK
             masked_positions = response_ids.eq(MASK_TOKEN_ID)  # [B, RESP_LEN]
             
-            # For each example in the batch, lock in one token (the highest confidence among masked ones).
+            # For each example in the batch, lock in `tokens_per_step` tokens
             for b in range(B):
-                # Find indices of response tokens still masked.
+                # Find indices of response tokens still masked
                 candidates = torch.nonzero(masked_positions[b]).squeeze(1)
                 if candidates.numel() == 0:
-                    continue  # All tokens are locked.
-                # Select the candidate with highest confidence.
+                    continue  # All tokens are locked
+                
+                # Limit the number of tokens to unlock in this step
+                num_to_unlock = min(tokens_per_step, candidates.numel())
+                
+                # Select `num_to_unlock` candidates with highest confidence
                 candidate_confidences = top_probs[b, candidates]
-                best_idx = torch.argmax(candidate_confidences).item()
-                best_position = candidates[best_idx].item()
-                # Lock in the token at that position.
-                response_ids[b, best_position] = top_ids[b, best_position]
+                best_indices = torch.topk(candidate_confidences, num_to_unlock).indices
+                best_positions = candidates[best_indices]
+                
+                # Lock in the tokens at those positions
+                response_ids[b, best_positions] = top_ids[b, best_positions]
             
-            # Decode without skipping special tokens.
+            # Decode without skipping special tokens
             decoded = tokenizer.decode(response_ids[0], skip_special_tokens=False)
-            # Remove other undesired special tokens (e.g., eos_token).
+            # Remove other undesired special tokens (e.g., eos_token)
             if tokenizer.eos_token is not None:
                 decoded = decoded.replace(tokenizer.eos_token, "")
-            # Replace mask token with a gray-colored version.
+            # Replace mask token with a gray-colored version
             decoded = decoded.replace(tokenizer.mask_token, "\033[90m" + tokenizer.mask_token + "\033[0m")
             print(f"Inference Step {step+1:02d}: {decoded}")
             
-            # Stop early if no masked tokens remain.
+            # Stop early if no masked tokens remain
             if masked_positions.sum() == 0:
                 break
     return decoded
 
 if __name__ == "__main__":
-    # Define a dataset with (prompt, response) pairs.
-    dataset = [
-        ("Count the rows of cars", "SELECT COUNT(*) FROM cars"),
-        ("Give all cars", "SELECT * FROM cars"),
-        ("Give all cars costing over 10k", "SELECT * FROM cars WHERE price > 10000"),
-        ("List all cars made after 2015", "SELECT * FROM cars WHERE year > 2015"),
-        ("List all red cars", "SELECT * FROM cars WHERE color = 'red'"),
-        ("Show all automatic cars", "SELECT * FROM cars WHERE transmission = 'automatic'"),
-        ("List all diesel cars", "SELECT * FROM cars WHERE fuel_type = 'diesel'"),
-        ("List all cars under $5,000", "SELECT * FROM cars WHERE price < 5000"),
-        ("Count of cars per brand", "SELECT brand, COUNT(*) FROM cars GROUP BY brand"),
-        ("Average price per brand", "SELECT brand, AVG(price) FROM cars GROUP BY brand"),
-        ("Find most expensive car", "SELECT * FROM cars ORDER BY price DESC LIMIT 1"),
-        ("Find cheapest car", "SELECT * FROM cars ORDER BY price ASC LIMIT 1"),
-        ("List top 10 cheapest cars", "SELECT * FROM cars ORDER BY price ASC LIMIT 10"),
-        ("List top 5 newest cars", "SELECT * FROM cars ORDER BY year DESC LIMIT 5"),
-        ("Get all BMW cars", "SELECT * FROM cars WHERE brand = 'BMW'"),
-        ("Get all cars with mileage under 50k", "SELECT * FROM cars WHERE mileage < 50000"),
-        ("List cars between $5k and $15k", "SELECT * FROM cars WHERE price BETWEEN 5000 AND 15000"),
-        ("List cars made between 2010 and 2020", "SELECT * FROM cars WHERE year BETWEEN 2010 AND 2020"),
-        ("Show cars sorted by price descending", "SELECT * FROM cars ORDER BY price DESC"),
-        ("Show cars sorted by mileage ascending", "SELECT * FROM cars ORDER BY mileage ASC"),
-        ("How many electric cars?", "SELECT COUNT(*) FROM cars WHERE fuel_type = 'electric'"),
-        ("List all manual cars", "SELECT * FROM cars WHERE transmission = 'manual'"),
-        ("List cars in black or white", "SELECT * FROM cars WHERE color IN ('black', 'white')"),
-        ("Cars not red", "SELECT * FROM cars WHERE color != 'red'"),
-        ("Cars with 'Toyota' in brand", "SELECT * FROM cars WHERE brand LIKE '%Toyota%'"),
-        ("Cars with model containing 'Civic'", "SELECT * FROM cars WHERE model LIKE '%Civic%'"),
-        ("List unique fuel types", "SELECT DISTINCT fuel_type FROM cars"),
-        ("Average mileage of diesel cars", "SELECT AVG(mileage) FROM cars WHERE fuel_type = 'diesel'"),
-        ("Max mileage for each brand", "SELECT brand, MAX(mileage) FROM cars GROUP BY brand"),
-        ("Cars grouped by transmission", "SELECT transmission, COUNT(*) FROM cars GROUP BY transmission"),
-        ("List all dealers", "SELECT * FROM dealers"),
-        ("Cars sold by dealer ID 3", "SELECT * FROM cars WHERE dealer_id = 3"),
-        ("List all cars from dealer 'AutoMart'", "SELECT * FROM cars JOIN dealers ON cars.dealer_id = dealers.dealer_id WHERE dealers.name = 'AutoMart'"),
-        ("Show average car price per dealer", "SELECT dealer_id, AVG(price) FROM cars GROUP BY dealer_id"),
-        ("Cars newer than 2020 with price below $20k", "SELECT * FROM cars WHERE year > 2020 AND price < 20000"),
-        ("List cars with price per year", "SELECT year, AVG(price) FROM cars GROUP BY year"),
-        ("Get number of cars per color", "SELECT color, COUNT(*) FROM cars GROUP BY color"),
-        ("Count cars with mileage above 100k", "SELECT COUNT(*) FROM cars WHERE mileage > 100000"),
-        ("List cars not from USA", "SELECT * FROM cars JOIN brands ON cars.brand = brands.name WHERE brands.country != 'USA'"),
-        ("Cars with unknown mileage", "SELECT * FROM cars WHERE mileage IS NULL"),
-        ("List cars with a known mileage", "SELECT * FROM cars WHERE mileage IS NOT NULL"),
-        ("Get total car inventory value", "SELECT SUM(price) FROM cars"),
-        ("Find oldest car", "SELECT * FROM cars ORDER BY year ASC LIMIT 1"),
-        ("Find average age of cars", "SELECT AVG(2025 - year) FROM cars"),
-        ("Get all cars with model starting with 'A'", "SELECT * FROM cars WHERE model LIKE 'A%'"),
-        ("List cars by model alphabetically", "SELECT * FROM cars ORDER BY model ASC"),
-        ("Show total cars per year", "SELECT year, COUNT(*) FROM cars GROUP BY year ORDER BY year DESC"),
-        ("List green cars under 15k", "SELECT * FROM cars WHERE color = 'green' AND price < 15000"),
-        ("List electric cars under 10k", "SELECT * FROM cars WHERE fuel_type = 'electric' AND price < 10000"),
-        ("Cars priced above brand average", "SELECT * FROM cars c WHERE price > (SELECT AVG(price) FROM cars WHERE brand = c.brand)"),
-    ]
-
     # Initialize the masked diffusion LM.
     embed_dim = 128
-    num_layers = 2
-    num_heads = 4
+    num_layers = 4
+    num_heads = 8
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device:",device)
     model = MaskedDiffusionLM(VOCAB_SIZE, embed_dim, num_layers, num_heads).to(device)
-    
-    print("====== Pretraining ======")
-    # For pretraining, mask_prompt=True (random masking over entire sequence).
-    train(model, tokenizer, dataset, num_steps=400, mask_prompt=True)
-    torch.save(model.state_dict(), "model_pretrained.pth")
-    print("Model saved as model_pretrained.pth")
-    
+    epochs_pretrain = 1
+    epochs_finetune = 1
+    pretrain = True
+    if pretrain:
+        print("====== Pretraining ======")
+        print(f"Train on {len(pretrain_dataset)} samples")
+        # For pretraining, mask_prompt=True (random masking over entire sequence).
+        train(model, tokenizer, pretrain_dataset, num_steps=len(pretrain_dataset) * epochs_pretrain, mask_prompt=True)
+        torch.save(model.state_dict(), "model_pretrained.pth")
+        print("Model saved as model_pretrained.pth")
+    else:
+        model.load_state_dict(torch.load("model_pretrained.pth", map_location=device))
+        model.to(device)
+    finetune = False
+    if finetune:
+        print("====== Finetuning ======")
+        # For pretraining, mask_prompt=True (random masking over entire sequence).
+        train(model, tokenizer, finetune_dataset, num_steps=len(finetune_dataset) * epochs_finetune, mask_prompt=False)
+        torch.save(model.state_dict(), "model_finetuned.pth")
+        print("Model saved as model_finetuned.pth")
+    elif not finetune and not pretrain:
+        model.load_state_dict(torch.load("model_finetuned.pth", map_location=device))
+        model.to(device)
     print("\n====== Inference ======")
     # During inference, we keep the prompt intact and update only the response.
-    inference(model, tokenizer, "How many cars are there?")
-    inference(model, tokenizer, "Count all cars")
-    inference(model, tokenizer, "Count all cars costing more than 20k")
+    inference(model, tokenizer, "How are you?", steps=1)
+    inference(model, tokenizer, "How are you?", steps=10)
+    inference(model, tokenizer, "How are you?")
+    # inference(model, tokenizer, "Any fitness tips?")
+    # inference(model, tokenizer, "What is the name of our galaxy?")
