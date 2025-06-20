@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Tokenizer
-from dataset import pretrain_dataset, finetune_dataset
+from dataset import pretrain_dataset, finetune_dataset, inference_dataset
 from time import time
 
 def format_time(seconds: float) -> str:
@@ -45,8 +45,8 @@ SEP_TOKEN_ID = tokenizer.convert_tokens_to_ids(tokenizer.sep_token)
 print(SEP_TOKEN_ID)
 VOCAB_SIZE = len(tokenizer)
 
-PROMPT_LEN = 32   # Conditioning prompt length.
-RESP_LEN = 32     # Response length.
+PROMPT_LEN = 128   # Conditioning prompt length.
+RESP_LEN = 128     # Response length.
 TOTAL_SEQ_LEN = PROMPT_LEN + RESP_LEN  # Combined sequence length.
 
 def corrupt_combined(token_ids, noise_level, mask_prompt=True):
@@ -120,34 +120,41 @@ class MaskedDiffusionLM(nn.Module):
         
         return logits, corruption_mask
 
-def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True):
+def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulation_steps=1):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    # Adding a learning rate scheduler with decay every 50 steps.
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.95)
     model.train()
     start = time()
+    
     for step in range(num_steps):
-        # Cycle through dataset.
+        # Only zero gradients at the start of each accumulation cycle
+        if step % accumulation_steps == 0:
+            optimizer.zero_grad()
+        
+        # Process a single sample (or batch)
         prompt_text, response_text = dataset[step % len(dataset)]
+        
         prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", padding="max_length",
-                                  max_length=PROMPT_LEN, truncation=True)
+                                max_length=PROMPT_LEN, truncation=True)
         response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length",
-                                    max_length=RESP_LEN, truncation=True)
+                                  max_length=RESP_LEN, truncation=True)
+        
         prompt_ids = prompt_inputs.input_ids.to(device)
         response_ids = response_inputs.input_ids.to(device)
+        
         noise_level = random.uniform(0.1, 1)
-        
         logits, corruption_mask = model(prompt_ids, response_ids, noise_level, mask_prompt)
-        loss = F.cross_entropy(logits[corruption_mask], torch.cat([prompt_ids, response_ids], dim=1)[corruption_mask])
         
-        optimizer.zero_grad()
+        loss = F.cross_entropy(logits[corruption_mask], 
+                             torch.cat([prompt_ids, response_ids], dim=1)[corruption_mask])
+        loss = loss / accumulation_steps  # Normalize loss
         loss.backward()
         
-        # Apply gradient clipping to keep gradients stable.
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-        scheduler.step()
+        # Only step and clip gradients after accumulation_steps
+        if (step + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
         
         if step % 100 == 0:
             stage = "Pretraining" if mask_prompt else "Fine-tuning"
@@ -155,9 +162,12 @@ def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True):
             percent = float(step)*100/float(num_steps)
             elapsed = time()-start
             print(f"[{stage}] Step {step}/{num_steps} ({round(percent)}%,{format_time(elapsed)}/{format_time(elapsed/(max(float(percent)/100,0.001)))}) - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
+            if round(current_lr*1000000) == 0:
+                print("Learning rate dropped to 0, stopping training")
+                break
     print(f"Training took: {round(time()-start)}s")
 
-def inference(model, tokenizer, prompt_text, steps=RESP_LEN):
+def inference(model, tokenizer, prompt_text, steps=RESP_LEN,debug_print=False):
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
@@ -196,7 +206,10 @@ def inference(model, tokenizer, prompt_text, steps=RESP_LEN):
                     continue  # All tokens are locked
                 
                 # Limit the number of tokens to unlock in this step
-                num_to_unlock = min(tokens_per_step, candidates.numel())
+                if step < (steps -1):
+                    num_to_unlock = min(tokens_per_step, candidates.numel())
+                else:
+                    num_to_unlock = candidates.numel()
                 
                 # Select `num_to_unlock` candidates with highest confidence
                 candidate_confidences = top_probs[b, candidates]
@@ -213,39 +226,42 @@ def inference(model, tokenizer, prompt_text, steps=RESP_LEN):
                 decoded = decoded.replace(tokenizer.eos_token, "")
             # Replace mask token with a gray-colored version
             decoded = decoded.replace(tokenizer.mask_token, "\033[90m" + tokenizer.mask_token + "\033[0m")
-            print(f"Inference Step {step+1:02d}: {decoded}")
+            if debug_print: print(f"Inference Step {step+1:02d}: {decoded}")
             
             # Stop early if no masked tokens remain
             if masked_positions.sum() == 0:
                 break
+    print("RESPONSE:", decoded)
     return decoded
 
 if __name__ == "__main__":
     # Initialize the masked diffusion LM.
-    embed_dim = 128
-    num_layers = 4
-    num_heads = 8
+    embed_dim = 768
+    num_layers = 12
+    num_heads = 12
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:",device)
     model = MaskedDiffusionLM(VOCAB_SIZE, embed_dim, num_layers, num_heads).to(device)
-    epochs_pretrain = 1
-    epochs_finetune = 1
+    epochs_pretrain = 100
+    epochs_finetune = 100
     pretrain = True
+    finetune = True
     if pretrain:
         print("====== Pretraining ======")
         print(f"Train on {len(pretrain_dataset)} samples")
         # For pretraining, mask_prompt=True (random masking over entire sequence).
-        train(model, tokenizer, pretrain_dataset, num_steps=len(pretrain_dataset) * epochs_pretrain, mask_prompt=True)
+        train(model, tokenizer, pretrain_dataset, num_steps=len(pretrain_dataset) * epochs_pretrain, mask_prompt=True, accumulation_steps=1)
         torch.save(model.state_dict(), "model_pretrained.pth")
         print("Model saved as model_pretrained.pth")
     else:
         model.load_state_dict(torch.load("model_pretrained.pth", map_location=device))
         model.to(device)
-    finetune = False
+    
     if finetune:
         print("====== Finetuning ======")
+        print(f"Train on {len(finetune_dataset)} samples")
         # For pretraining, mask_prompt=True (random masking over entire sequence).
-        train(model, tokenizer, finetune_dataset, num_steps=len(finetune_dataset) * epochs_finetune, mask_prompt=False)
+        train(model, tokenizer, finetune_dataset, num_steps=len(finetune_dataset) * epochs_finetune, mask_prompt=False, accumulation_steps=1)
         torch.save(model.state_dict(), "model_finetuned.pth")
         print("Model saved as model_finetuned.pth")
     elif not finetune and not pretrain:
@@ -253,8 +269,16 @@ if __name__ == "__main__":
         model.to(device)
     print("\n====== Inference ======")
     # During inference, we keep the prompt intact and update only the response.
-    inference(model, tokenizer, "How are you?", steps=1)
-    inference(model, tokenizer, "How are you?", steps=10)
-    inference(model, tokenizer, "How are you?")
-    # inference(model, tokenizer, "Any fitness tips?")
-    # inference(model, tokenizer, "What is the name of our galaxy?")
+    variations = [1,10,RESP_LEN]
+    scores = []
+    for variation in variations:
+        scores.append(len(inference_dataset))
+    for pair in inference_dataset:
+        for index, i in enumerate(variations):
+            decoded = inference(model, tokenizer, pair[0], steps=i)
+            if decoded != pair[1]:
+                print("Label:",pair[1],"\n\nVS\n\n",decoded)
+                scores[index] -= 1
+    for index, variation in enumerate(variations):
+        score = scores[index]
+        print(f"Score for {variation} diffusion steps: {score}/{len(inference_dataset)} ({round(float(score)*100/float(len(inference_dataset)))}%)")

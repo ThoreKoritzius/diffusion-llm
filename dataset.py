@@ -1,7 +1,7 @@
 from datasets import load_dataset
 
 ds = load_dataset("stingning/ultrachat")
-n = 10000  # Number of samples to retrieve
+n = 50  # Number of samples to retrieve
 subset = ds['train'].select(range(n))  # Get the first n samples
 
 dialog_data = []
@@ -338,6 +338,8 @@ programming_examples = [
     """from collections import Counter\ndef word_freq(text):\n    words = text.lower().split()\n    return Counter(words)"""),
 ]
 
-pretrain_dataset = dialog_data
+pretrain_dataset = general_knowledge_qna[0:4]
 
-finetune_dataset = general_knowledge_qna + stem_reasoning
+finetune_dataset = general_knowledge_qna[0:4]
+
+inference_dataset = general_knowledge_qna[0:4]
