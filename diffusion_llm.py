@@ -32,11 +32,11 @@ PROMPT_LEN = 32   # Conditioning prompt length.
 RESP_LEN = 32     # Response length.
 TOTAL_SEQ_LEN = PROMPT_LEN + RESP_LEN  # Combined sequence length.
 
-def corrupt_combined(token_ids, noise_level, mask_prompt=True):
+def corrupt_combined(token_ids, noise_level, mask_prompt=True, prompt_length=None):
     """
-    Given token_ids of shape [B, TOTAL_SEQ_LEN],
+    Given token_ids of shape [B, L],
     if mask_prompt is True, randomly replace each token with MASK_TOKEN_ID with probability noise_level.
-    Otherwise, leave the first PROMPT_LEN tokens intact and corrupt only the response tokens.
+    Otherwise, leave the first prompt_length tokens intact and corrupt only the response tokens.
     Returns:
       - corrupted tensor (same shape)
       - corruption_mask: boolean tensor indicating which positions were replaced.
@@ -45,11 +45,18 @@ def corrupt_combined(token_ids, noise_level, mask_prompt=True):
     corruption_mask = torch.zeros_like(token_ids).bool()
     if mask_prompt:
         # Entire sequence is eligible.
-        corruption_mask = torch.bernoulli(torch.full(token_ids.shape, noise_level, device=token_ids.device, dtype=torch.float32)).bool()
+        corruption_mask = torch.bernoulli(
+            torch.full(token_ids.shape, noise_level, device=token_ids.device, dtype=torch.float32)
+        ).bool()
     else:
-        # Only the response tokens (positions PROMPT_LEN:) are eligible.
-        response_mask = torch.bernoulli(torch.full((B, RESP_LEN), noise_level, device=token_ids.device, dtype=torch.float32)).bool()
-        corruption_mask[:, PROMPT_LEN:] = response_mask
+        # Only the response tokens (positions prompt_length:) are eligible.
+        if prompt_length is None:
+            raise ValueError("prompt_length must be provided when mask_prompt is False.")
+        response_len = L - prompt_length
+        response_mask = torch.bernoulli(
+            torch.full((B, response_len), noise_level, device=token_ids.device, dtype=torch.float32)
+        ).bool()
+        corruption_mask[:, prompt_length:] = response_mask
     corrupted = token_ids.clone()
     corrupted[corruption_mask] = MASK_TOKEN_ID
     return corrupted, corruption_mask
@@ -84,23 +91,18 @@ class MaskedDiffusionLM(nn.Module):
           logits: [B, TOTAL_SEQ_LEN, vocab_size]
           corruption_mask: boolean [B, TOTAL_SEQ_LEN] (indicating masked positions).
         """
-        B = prompt_ids.size(0)
-        # Concatenate prompt and response.
-        combined_ids = torch.cat([prompt_ids, response_ids], dim=1)  # [B, TOTAL_SEQ_LEN]
-        # Step 1: Corrupt tokens.
-        corrupted_ids, corruption_mask = corrupt_combined(combined_ids, noise_level, mask_prompt)
-        cids = np.array(corrupted_ids.numpy()[0])
-        # Step 2: Embed tokens and add positional encoding.
-        x = self.token_embedding(corrupted_ids)  # [B, TOTAL_SEQ_LEN, D]
-        x = x + self.pos_embedding[:, :TOTAL_SEQ_LEN, :]
-        # Step 3: Process through transformer.
-        x = self.transformer(x.transpose(0,1))  # [TOTAL_SEQ_LEN, B, D]
-        x = x.transpose(0,1)  # [B, TOTAL_SEQ_LEN, D]
+        prompt_len = prompt_ids.size(1)
+        total_seq_len = prompt_len + response_ids.size(1)
+        combined_ids = torch.cat([prompt_ids, response_ids], dim=1)  # [B, total_seq_len]
+        corrupted_ids, corruption_mask = corrupt_combined(combined_ids, noise_level, mask_prompt, prompt_length=prompt_len)
+        # Embed tokens and add positional encoding.
+        x = self.token_embedding(corrupted_ids)  # [B, total_seq_len, D]
+        x = x + self.pos_embedding[:, :total_seq_len, :]
+        # Process through transformer.
+        x = self.transformer(x.transpose(0, 1)).transpose(0, 1)
         x = self.norm(x)
-        
-        # Step 4: Project to logits.
-        logits = self.vocab_decoder(x)  # [B, TOTAL_SEQ_LEN, vocab_size]
-        
+        # Project to logits.
+        logits = self.vocab_decoder(x)  # [B, total_seq_len, vocab_size]
         return logits, corruption_mask
 
 def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True):
