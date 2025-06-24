@@ -46,8 +46,8 @@ SEP_TOKEN_ID = tokenizer.convert_tokens_to_ids(tokenizer.sep_token)
 print(SEP_TOKEN_ID)
 VOCAB_SIZE = len(tokenizer)
 
-LOCKING = False
-TOTAL_SEQ_LEN = 256
+LOCKING = True
+TOTAL_SEQ_LEN = 64
 
 def corrupt_combined(token_ids, noise_level, mask_prompt=True, prompt_length=None):
     """
@@ -113,15 +113,14 @@ class MaskedDiffusionLM(nn.Module):
         x = self.token_embedding(combined_ids)  # [B, total_seq_len, D]
         x = x + self.pos_embedding[:, :TOTAL_SEQ_LEN, :]
         # Process through transformer.
-        padding_mask = (combined_ids == tokenizer.pad_token_id)
-        x = self.transformer(x.transpose(0,1), src_key_padding_mask=padding_mask).transpose(0,1)
+        x = self.transformer(x.transpose(0,1)).transpose(0,1)
         x = self.norm(x)
         # Project to logits.
         logits = self.vocab_decoder(x)  # [B, total_seq_len, vocab_size]
         return logits
 
 def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulation_steps=1, warmup_steps=500):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-3, weight_decay=0.01)
     
     lr_scheduler = get_scheduler(
         "linear", optimizer=optimizer,
@@ -140,7 +139,7 @@ def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulat
         
         prompt_text, response_text = dataset[step % len(dataset)]
 
-        prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", truncation=False,
+        prompt_inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True,
                                   max_length=(TOTAL_SEQ_LEN -2))
         prompt_ids = prompt_inputs.input_ids.to(device)
         response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length",
@@ -153,7 +152,7 @@ def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulat
 
         noise_level = random.uniform(0.1, 0.9)
         corrupted_ids, corruption_mask = corrupt_combined(combined_ids, noise_level, mask_prompt,
-                                                          prompt_length=response_ids.size(1))
+                                                          prompt_length=prompt_ids.size(1))
 
         logits = model(corrupted_ids)
 
@@ -192,7 +191,7 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False):
     with torch.no_grad():
         # Tokenize the prompt
         prompt_inputs_dummy = tokenizer(prompt_text, return_tensors="pt",
-                                       truncation=False,
+                                       truncation=True,
                                        max_length=TOTAL_SEQ_LEN-2)
         prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding="max_length",
                                   max_length=TOTAL_SEQ_LEN, truncation=True)
@@ -240,7 +239,10 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False):
                         num_to_unlock = candidates.numel()
                 else:
                     candidates = torch.nonzero(response_ids[b]).squeeze(1)
-                    num_to_unlock =  min(tokens_per_step * (step + 1), candidates.numel())
+                    if step < (steps -1):
+                        num_to_unlock =  min(tokens_per_step * (step + 1), candidates.numel())
+                    else:
+                        num_to_unlock = candidates.numel()
                 # Select `num_to_unlock` candidates with highest confidence
                 candidate_confidences = top_probs[b, candidates]
                 best_indices = torch.topk(candidate_confidences, num_to_unlock).indices
