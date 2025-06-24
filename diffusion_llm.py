@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from transformers import GPT2Tokenizer
 from dataset import pretrain_dataset, finetune_dataset, inference_dataset
 from time import time
+from transformers import get_scheduler
 
 def format_time(seconds: float) -> str:
     seconds = int(seconds)
@@ -45,9 +46,8 @@ SEP_TOKEN_ID = tokenizer.convert_tokens_to_ids(tokenizer.sep_token)
 print(SEP_TOKEN_ID)
 VOCAB_SIZE = len(tokenizer)
 
-PROMPT_LEN = 128   # Conditioning prompt length.
-RESP_LEN = 128     # Response length.
-TOTAL_SEQ_LEN = PROMPT_LEN + RESP_LEN  # Combined sequence length.
+LOCKING = False
+TOTAL_SEQ_LEN = 256
 
 def corrupt_combined(token_ids, noise_level, mask_prompt=True, prompt_length=None):
     """
@@ -91,9 +91,10 @@ class MaskedDiffusionLM(nn.Module):
         self.vocab_decoder = nn.Linear(embed_dim, vocab_size)
         self.norm = nn.LayerNorm(embed_dim)
         
-    def forward(self, prompt_ids, response_ids, noise_level, mask_prompt=True):
+    def forward(self, combined_ids):
         """
         Combined forward pass for pretraining or fine-tuning.
+          prompt_len:
           prompt_ids: [B, PROMPT_LEN] tokens for prompt.
           response_ids: [B, RESP_LEN] tokens for response.
           noise_level: scalar in [0,1] (masking probability).
@@ -108,80 +109,104 @@ class MaskedDiffusionLM(nn.Module):
           logits: [B, TOTAL_SEQ_LEN, vocab_size]
           corruption_mask: boolean [B, TOTAL_SEQ_LEN] (indicating masked positions).
         """
-        prompt_len = prompt_ids.size(1)
-        total_seq_len = prompt_len + response_ids.size(1)
-        combined_ids = torch.cat([prompt_ids, response_ids], dim=1)  # [B, total_seq_len]
-        corrupted_ids, corruption_mask = corrupt_combined(combined_ids, noise_level, mask_prompt, prompt_length=prompt_len)
         # Embed tokens and add positional encoding.
-        x = self.token_embedding(corrupted_ids)  # [B, total_seq_len, D]
-        x = x + self.pos_embedding[:, :total_seq_len, :]
+        x = self.token_embedding(combined_ids)  # [B, total_seq_len, D]
+        x = x + self.pos_embedding[:, :TOTAL_SEQ_LEN, :]
         # Process through transformer.
-        x = self.transformer(x.transpose(0, 1)).transpose(0, 1)
+        padding_mask = (combined_ids == tokenizer.pad_token_id)
+        x = self.transformer(x.transpose(0,1), src_key_padding_mask=padding_mask).transpose(0,1)
         x = self.norm(x)
         # Project to logits.
         logits = self.vocab_decoder(x)  # [B, total_seq_len, vocab_size]
-        return logits, corruption_mask
+        return logits
 
-def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulation_steps=1):
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.95)
+def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulation_steps=1, warmup_steps=500):
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.01)
+    
+    lr_scheduler = get_scheduler(
+        "linear", optimizer=optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=num_steps
+    )
+
     model.train()
     start = time()
+    total_loss = 0.0
+    device = next(model.parameters()).device
     
     for step in range(num_steps):
-        # Only zero gradients at the start of each accumulation cycle
         if step % accumulation_steps == 0:
             optimizer.zero_grad()
         
-        # Process a single sample (or batch)
         prompt_text, response_text = dataset[step % len(dataset)]
-        
-        prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", padding="max_length",
-                                max_length=PROMPT_LEN, truncation=True)
-        response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length",
-                                  max_length=RESP_LEN, truncation=True)
-        
+
+        prompt_inputs = tokenizer(prompt_text + "[SEP]", return_tensors="pt", truncation=False,
+                                  max_length=(TOTAL_SEQ_LEN -2))
         prompt_ids = prompt_inputs.input_ids.to(device)
+        response_inputs = tokenizer(response_text, return_tensors="pt", padding="max_length",
+                                    max_length=TOTAL_SEQ_LEN - prompt_ids.size(1), truncation=True)
+
         response_ids = response_inputs.input_ids.to(device)
-        
-        noise_level = random.uniform(0.1, 1)
-        logits, corruption_mask = model(prompt_ids, response_ids, noise_level, mask_prompt)
-        
-        loss = F.cross_entropy(logits[corruption_mask], 
-                             torch.cat([prompt_ids, response_ids], dim=1)[corruption_mask])
-        loss = loss / accumulation_steps  # Normalize loss
+        prompt_attention_mask = prompt_inputs.attention_mask.to(device)
+        response_attention_mask = response_inputs.attention_mask.to(device)
+        combined_ids = torch.cat([prompt_ids, response_ids], dim=1)  # [B, total_seq_len]
+
+        noise_level = random.uniform(0.1, 0.9)
+        corrupted_ids, corruption_mask = corrupt_combined(combined_ids, noise_level, mask_prompt,
+                                                          prompt_length=response_ids.size(1))
+
+        logits = model(corrupted_ids)
+
+        # Combine ids and attention mask
+        combined_attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1).bool()
+
+        # Valid positions: both masked by corruption and not padding
+        valid_mask = corruption_mask & combined_attention_mask
+        if valid_mask.sum() == 0:
+            continue  # Skip if nothing to supervise
+
+        loss = F.cross_entropy(logits[valid_mask], combined_ids[valid_mask])
+        loss = loss / accumulation_steps
         loss.backward()
-        
-        # Only step and clip gradients after accumulation_steps
+        total_loss += loss.item()
+
         if (step + 1) % accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
+            lr_scheduler.step()
         
         if step % 100 == 0:
-            stage = "Pretraining" if mask_prompt else "Fine-tuning"
-            current_lr = scheduler.get_last_lr()[0]
-            percent = float(step)*100/float(num_steps)
-            elapsed = time()-start
-            print(f"[{stage}] Step {step}/{num_steps} ({round(percent)}%,{format_time(elapsed)}/{format_time(elapsed/(max(float(percent)/100,0.001)))}) - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
-            if round(current_lr*1000000) == 0:
-                print("Learning rate dropped to 0, stopping training")
-                break
-    print(f"Training took: {round(time()-start)}s")
+            avg_loss = total_loss / (step + 1)
+            current_lr = lr_scheduler.get_last_lr()[0]
+            percent = 100.0 * step / max(1, num_steps)
+            elapsed = time() - start
+            print(f"[{'Pretraining' if mask_prompt else 'Fine-tuning'}] Step {step}/{num_steps} "
+                  f"({percent:.1f}%, {format_time(elapsed)}/{format_time(elapsed / max(percent / 100, 0.01))}) "
+                  f"- Avg Loss: {avg_loss:.4f} - LR: {current_lr:.6f}")
+    
+    print(f"Training complete in {format_time(time() - start)}")
 
-def inference(model, tokenizer, prompt_text, steps=RESP_LEN,debug_print=False):
+def inference(model, tokenizer, prompt_text, steps=None,debug_print=False):
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
         # Tokenize the prompt
+        prompt_inputs_dummy = tokenizer(prompt_text, return_tensors="pt",
+                                       truncation=False,
+                                       max_length=TOTAL_SEQ_LEN-2)
         prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding="max_length",
-                                  max_length=PROMPT_LEN, truncation=True)
-        prompt_ids = prompt_inputs.input_ids.to(device)  # [B, PROMPT_LEN]
+                                  max_length=TOTAL_SEQ_LEN, truncation=True)
+        prompt_ids = prompt_inputs.input_ids.to(device) 
+        PROMPT_LEN = prompt_inputs_dummy.input_ids.size(1)
         B = prompt_ids.size(0)
+        RESP_LEN = TOTAL_SEQ_LEN -PROMPT_LEN
+        if not steps:
+            steps = RESP_LEN
+        
         # Initialize all response tokens as MASK
         response_ids = torch.full((B, RESP_LEN), MASK_TOKEN_ID, device=device)
         
-        print("---- Inference: Diffusion Inference ----")
+        print(f"---- Inference: Diffusion Inference (steps: {steps}) ----")
         print("PROMPT", prompt_text)
         
         # Number of tokens to unlock per step
@@ -190,8 +215,9 @@ def inference(model, tokenizer, prompt_text, steps=RESP_LEN,debug_print=False):
         # Loop until all tokens are locked or we finish all steps
         for step in range(steps):
             # Forward pass. noise_level=0 since we use predictions directly.
-            logits, _ = model(prompt_ids, response_ids, noise_level=0, mask_prompt=False)
+            logits = model(prompt_ids)
             logits_resp = logits[:, PROMPT_LEN:, :]  # shape: [B, RESP_LEN, vocab_size]
+            # TODO: not hardcode prompt_ids.size(1) as should be dynamic in the batch
             
             # Convert logits to probabilities
             probs = torch.softmax(logits_resp, dim=-1)  # [B, RESP_LEN, vocab_size]
@@ -199,20 +225,22 @@ def inference(model, tokenizer, prompt_text, steps=RESP_LEN,debug_print=False):
             
             # Get positions that are still MASK
             masked_positions = response_ids.eq(MASK_TOKEN_ID)  # [B, RESP_LEN]
-            
             # For each example in the batch, lock in `tokens_per_step` tokens
             for b in range(B):
-                # Find indices of response tokens still masked
-                candidates = torch.nonzero(masked_positions[b]).squeeze(1)
-                if candidates.numel() == 0:
-                    continue  # All tokens are locked
-                
-                # Limit the number of tokens to unlock in this step
-                if step < (steps -1):
-                    num_to_unlock = min(tokens_per_step, candidates.numel())
+                if LOCKING:
+                    # Find indices of response tokens still masked
+                    candidates = torch.nonzero(masked_positions[b]).squeeze(1)
+                    if candidates.numel() == 0:
+                        continue  # All tokens are locked
+                    
+                    # Limit the number of tokens to unlock in this step
+                    if step < (steps -1):
+                        num_to_unlock = min(tokens_per_step, candidates.numel())
+                    else:
+                        num_to_unlock = candidates.numel()
                 else:
-                    num_to_unlock = candidates.numel()
-                
+                    candidates = torch.nonzero(response_ids[b]).squeeze(1)
+                    num_to_unlock =  min(tokens_per_step * (step + 1), candidates.numel())
                 # Select `num_to_unlock` candidates with highest confidence
                 candidate_confidences = top_probs[b, candidates]
                 best_indices = torch.topk(candidate_confidences, num_to_unlock).indices
@@ -238,9 +266,9 @@ def inference(model, tokenizer, prompt_text, steps=RESP_LEN,debug_print=False):
 
 if __name__ == "__main__":
     # Initialize the masked diffusion LM.
-    embed_dim = 768
-    num_layers = 12
-    num_heads = 12
+    embed_dim = 128
+    num_layers = 4
+    num_heads = 4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:",device)
     model = MaskedDiffusionLM(VOCAB_SIZE, embed_dim, num_layers, num_heads).to(device)
@@ -271,7 +299,7 @@ if __name__ == "__main__":
         model.to(device)
     print("\n====== Inference ======")
     # During inference, we keep the prompt intact and update only the response.
-    variations = [1,10,RESP_LEN]
+    variations = [1,10,None]
     scores = []
     for variation in variations:
         scores.append(len(inference_dataset))
