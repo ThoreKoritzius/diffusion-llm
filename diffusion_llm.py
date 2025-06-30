@@ -91,7 +91,7 @@ class MaskedDiffusionLM(nn.Module):
         self.vocab_decoder = nn.Linear(embed_dim, vocab_size)
         self.norm = nn.LayerNorm(embed_dim)
         
-    def forward(self, combined_ids):
+    def forward(self, combined_ids, attention_mask=None):
         """
         Combined forward pass for pretraining or fine-tuning.
           prompt_len:
@@ -110,13 +110,20 @@ class MaskedDiffusionLM(nn.Module):
           corruption_mask: boolean [B, TOTAL_SEQ_LEN] (indicating masked positions).
         """
         # Embed tokens and add positional encoding.
-        x = self.token_embedding(combined_ids)  # [B, total_seq_len, D]
-        x = x + self.pos_embedding[:, :TOTAL_SEQ_LEN, :]
-        # Process through transformer.
-        x = self.transformer(x.transpose(0,1)).transpose(0,1)
+        x = self.token_embedding(combined_ids)  # [B, seq_len, D]
+        seq_len = combined_ids.size(1)
+        x = x + self.pos_embedding[:, :seq_len, :]
+        
+        # If an attention mask is provided, create a key_padding_mask for the transformer.
+        key_padding_mask = None
+        if attention_mask is not None:
+            # Transformer expects True for positions to ignore (i.e., the padded tokens).
+            key_padding_mask = ~attention_mask.bool()
+        
+        # Process through transformer using the key_padding_mask.
+        x = self.transformer(x.transpose(0, 1), src_key_padding_mask=key_padding_mask).transpose(0, 1)
         x = self.norm(x)
-        # Project to logits.
-        logits = self.vocab_decoder(x)  # [B, total_seq_len, vocab_size]
+        logits = self.vocab_decoder(x)  # [B, seq_len, vocab_size]
         return logits
 
 def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulation_steps=1, warmup_steps=500):
@@ -297,8 +304,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:",device)
     model = MaskedDiffusionLM(VOCAB_SIZE, embed_dim, num_layers, num_heads).to(device)
-    epochs_pretrain = 100
-    epochs_finetune = 100
+    epochs_pretrain = 1000
+    epochs_finetune = 1000
     pretrain = True
     finetune = True
     if pretrain:
