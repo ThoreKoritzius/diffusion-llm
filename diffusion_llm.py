@@ -185,18 +185,25 @@ def train(model, tokenizer, dataset, num_steps=1000, mask_prompt=True, accumulat
     
     print(f"Training complete in {format_time(time() - start)}")
 
-def inference(model, tokenizer, prompt_text, steps=None,debug_print=False):
+def apply_repetition_penalty(logits, generated_ids, penalty=1.2):
+    for b in range(logits.size(0)):
+        for t in set(generated_ids[b].tolist()): 
+            if t == MASK_TOKEN_ID: continue
+            logits[b, :, t] /= penalty
+    return logits
+
+def inference(model, tokenizer, prompt_text, steps=None,debug_print=False, locking = True):
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
-        # Tokenize the prompt
-        prompt_inputs_dummy = tokenizer(prompt_text, return_tensors="pt",
-                                       truncation=True,
-                                       max_length=TOTAL_SEQ_LEN-2)
-        prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding="max_length",
-                                  max_length=TOTAL_SEQ_LEN, truncation=True)
+        # # Tokenize the prompt
+        # prompt_inputs_dummy = tokenizer(prompt_text, return_tensors="pt",
+        #                                truncation=True,
+        #                                max_length=TOTAL_SEQ_LEN-2)
+        prompt_inputs = tokenizer(prompt_text, return_tensors="pt",
+                                  max_length=TOTAL_SEQ_LEN-2, truncation=True)
         prompt_ids = prompt_inputs.input_ids.to(device) 
-        PROMPT_LEN = prompt_inputs_dummy.input_ids.size(1)
+        PROMPT_LEN = prompt_inputs.input_ids.size(1)
         B = prompt_ids.size(0)
         RESP_LEN = TOTAL_SEQ_LEN -PROMPT_LEN
         if not steps:
@@ -213,11 +220,27 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False):
         
         # Loop until all tokens are locked or we finish all steps
         for step in range(steps):
-            # Forward pass. noise_level=0 since we use predictions directly.
-            logits = model(prompt_ids)
+            # After updating response_ids with SEP padding
+            combined_ids = torch.cat([prompt_ids, response_ids], dim=1)
+            attention_mask = (combined_ids != tokenizer.pad_token_id).long()
+
+            # Forward pass with updated mask
+            logits = model(combined_ids, attention_mask=attention_mask)
             logits_resp = logits[:, PROMPT_LEN:, :]  # shape: [B, RESP_LEN, vocab_size]
             # TODO: not hardcode prompt_ids.size(1) as should be dynamic in the batch
             
+            # Optional sampling penalty for various tokens
+            if tokenizer.cls_token_id is not None:
+                sep_penalty = -10.0  # you can tune this
+                logits_resp[:, :, tokenizer.cls_token_id] += sep_penalty
+
+            if steps < 5 and tokenizer.sep_token_id is not None:
+                sep_penalty = -10.0  # you can tune this
+                logits_resp[:, :, tokenizer.sep_token_id] += sep_penalty
+
+            # Repition Penalty (Maybe have to check if it works corretly)
+            logits_resp = apply_repetition_penalty(logits_resp, response_ids, penalty=10.0)
+
             # Convert logits to probabilities
             probs = torch.softmax(logits_resp, dim=-1)  # [B, RESP_LEN, vocab_size]
             top_probs, top_ids = probs.max(dim=-1)        # [B, RESP_LEN]
@@ -226,7 +249,7 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False):
             masked_positions = response_ids.eq(MASK_TOKEN_ID)  # [B, RESP_LEN]
             # For each example in the batch, lock in `tokens_per_step` tokens
             for b in range(B):
-                if LOCKING:
+                if locking:
                     # Find indices of response tokens still masked
                     candidates = torch.nonzero(masked_positions[b]).squeeze(1)
                     if candidates.numel() == 0:
