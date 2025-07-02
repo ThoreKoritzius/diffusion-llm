@@ -5,8 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Tokenizer
 from dataset import pretrain_dataset, finetune_dataset, inference_dataset
-from time import time
+from time import time, sleep
 from transformers import get_scheduler
+import argparse, json, os, datetime
+import sys, re
+import shutil
+
+_ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+
+def strip_ansi(s: str) -> str:
+    return _ansi_re.sub('', s)
 
 def format_time(seconds: float) -> str:
     seconds = int(seconds)
@@ -224,6 +232,7 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False, locki
         
         # Number of tokens to unlock per step
         tokens_per_step = max(1, RESP_LEN // steps)
+        prev_vis_len = 0
         
         # Loop until all tokens are locked or we finish all steps
         for step in range(steps):
@@ -287,8 +296,24 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False, locki
             if tokenizer.eos_token is not None:
                 decoded = decoded.replace(tokenizer.eos_token, "")
             # Replace mask token with a gray-colored version
-            decoded = decoded.replace(tokenizer.mask_token, "\033[90m" + tokenizer.mask_token + "\033[0m")
-            if debug_print: print(f"Inference Step {step+1:02d}: {decoded}")
+            #decoded = decoded.replace(tokenizer.mask_token, "\033[90m" + tokenizer.mask_token + "\033[0m")
+            if debug_print:
+                cols = shutil.get_terminal_size().columns
+
+                prefix = f"Inference Step {step+1:02d}: "
+                max_len = cols - len(prefix) - 5  
+                plain = decoded[:max_len]
+                if len(decoded) > max_len:
+                    plain += "..."
+
+                colored = plain.replace(
+                    tokenizer.mask_token,
+                    "\033[90m" + tokenizer.mask_token + "\033[0m"
+                )
+                sys.stdout.write('\033[2K\r')
+                sys.stdout.write(prefix + colored)
+                sys.stdout.flush()
+                sleep(0.2)
             
             # Stop early if no masked tokens remain
             if masked_positions.sum() == 0:
@@ -297,39 +322,67 @@ def inference(model, tokenizer, prompt_text, steps=None,debug_print=False, locki
     return decoded
 
 if __name__ == "__main__":
-    # Initialize the masked diffusion LM.
-    embed_dim = 128
-    num_layers = 4
-    num_heads = 4
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device:",device)
-    model = MaskedDiffusionLM(VOCAB_SIZE, embed_dim, num_layers, num_heads).to(device)
-    epochs_pretrain = 1000
-    epochs_finetune = 1000
-    pretrain = True
-    finetune = True
-    if pretrain:
-        print("====== Pretraining ======")
-        print(f"Train on {len(pretrain_dataset)} samples")
-        # For pretraining, mask_prompt=True (random masking over entire sequence).
-        train(model, tokenizer, pretrain_dataset, num_steps=len(pretrain_dataset) * epochs_pretrain, mask_prompt=True, accumulation_steps=1)
-        torch.save(model.state_dict(), "model_pretrained.pth")
-        print("Model saved as model_pretrained.pth")
-    else:
-        model.load_state_dict(torch.load("model_pretrained.pth", map_location=device))
-        model.to(device)
+    parser = argparse.ArgumentParser(description="Diffusion LLM: Train or run inference.")
+    parser.add_argument("--inference", action="store_true",
+                        help="Run in inference mode (skips training). Provide model PATH as a positional argument.")
+    parser.add_argument("model", nargs="?", default=None,
+                        help="Path to a pretrained model for inference when using --inference.")
+    args = parser.parse_args()
+
+    # Hyperparameters configuration
+    hyperparams = {
+        "embed_dim": 128,
+        "num_layers": 4,
+        "num_heads": 4,
+        "TOTAL_SEQ_LEN": TOTAL_SEQ_LEN,
+        "SEED": SEED,
+        "epochs_pretrain": 100,
+        "epochs_finetune": 100
+    }
     
-    if finetune:
-        print("====== Finetuning ======")
-        print(f"Train on {len(finetune_dataset)} samples")
-        # For pretraining, mask_prompt=True (random masking over entire sequence).
-        train(model, tokenizer, finetune_dataset, num_steps=len(finetune_dataset) * epochs_finetune, mask_prompt=False, accumulation_steps=1)
-        torch.save(model.state_dict(), "model_finetuned.pth")
-        print("Model saved as model_finetuned.pth")
-    elif not finetune and not pretrain:
-        model.load_state_dict(torch.load("model_finetuned.pth", map_location=device))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device:", device)
+    model = MaskedDiffusionLM(VOCAB_SIZE, hyperparams["embed_dim"], hyperparams["num_layers"], hyperparams["num_heads"]).to(device)
+    
+    if args.inference:
+        if args.model is None:
+            raise ValueError("In inference mode please provide a model path. Usage: python3 diffusion_llm.py --inference model_finetuned.pth")
+        print("Loading model from:", args.model)
+        model.load_state_dict(torch.load(args.model, map_location=device))
         model.to(device)
-    print("\n====== Inference ======")
+    else:
+        # Training mode (set booleans as desired)
+        pretrain = True
+        finetune = True
+        
+        if pretrain:
+            print("====== Pretraining ======")
+            print(f"Train on {len(pretrain_dataset)} samples")
+            train(model, tokenizer, pretrain_dataset, num_steps=len(pretrain_dataset) * hyperparams["epochs_pretrain"], mask_prompt=True, accumulation_steps=1)
+        else:
+            model.load_state_dict(torch.load("model_pretrained.pth", map_location=device))
+            model.to(device)
+        
+        if finetune:
+            print("====== Finetuning ======")
+            print(f"Train on {len(finetune_dataset)} samples")
+            train(model, tokenizer, finetune_dataset, num_steps=len(finetune_dataset) * hyperparams["epochs_finetune"], mask_prompt=False, accumulation_steps=1)
+        elif not finetune and not pretrain:
+            model.load_state_dict(torch.load("model_finetuned.pth", map_location=device))
+            model.to(device)
+    
+        # Save model and hyperparameters in a timestamped directory
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join("saved_models", f"model_{timestamp}")
+        os.makedirs(save_dir, exist_ok=True)
+        model_filename = "model_finetuned.pth" if finetune else "model_pretrained.pth"
+        model_path = os.path.join(save_dir, model_filename)
+        torch.save(model.state_dict(), model_path)
+        with open(os.path.join(save_dir, "hyperparams.json"), "w") as fp:
+            json.dump(hyperparams, fp, indent=4)
+        print(f"Model and hyperparameters saved in {save_dir}")
+    
+    print("\n====== Test-Inference ======")
     # During inference, we keep the prompt intact and update only the response.
     variations = [1,10,None]
     scores = []
@@ -344,3 +397,12 @@ if __name__ == "__main__":
     for index, variation in enumerate(variations):
         score = scores[index]
         print(f"Score for {variation} diffusion steps: {score}/{len(inference_dataset)} ({round(float(score)*100/float(len(inference_dataset)))}%)")
+
+    # CLI Inference Mode
+    print("\n====== CLI Inference Mode ======")
+    while True:
+        prompt = input("Enter your prompt (or press enter to exit): ")
+        if not prompt.strip():
+            break
+        decoded = inference(model, tokenizer, prompt, steps=10, debug_print=True)
+        print("Generated Response:", decoded)
