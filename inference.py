@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-inference.py - Flask GUI with live decoding + GIF export
+inference.py - Flask GUI with live decoding + always-generated GIF download
 
-Run:
-    python inference.py         # opens a browser GUI
-    python inference.py --no-open   # do not auto-open browser
-    python inference.py --prompt "..." --context "..."  # prefill GUI
+Usage:
+  python inference.py
+  python inference.py --no-open
+  python inference.py --prompt "..." --context "..." --model-dir "diffusion-sql"
 
-Features:
- - Live decoding (server -> browser) via Server-Sent Events (SSE)
- - Inputs: Prompt, Context, Steps, Max-Len, Top-k, Top-p, SQL mask len, Model dir
- - Live text area (big, responsive) at the top that scales to screen sizes
- - Small live animation preview that cycles incoming snapshots as they arrive
- - Export GIF button (appears when generation finishes and GIF built)
- - Font-size fitting for GIF frames so text is large and readable
- - Preserves original denoising / masking algorithm; minimal internal changes to allow callbacks
+This version:
+ - Always generates a GIF and provides a Download button (no preview image).
+ - Live preview only shows content inside <SQL>...</SQL>.
+ - Live preview uses a large, responsive, easy-to-read monospace display with a light-gray background.
+ - GIF text sizing uses a fitting algorithm for large readable text.
+ - Deterministic runs by default (seed configurable via CLI).
 """
-
 import argparse
 import io
 import os
@@ -26,12 +23,14 @@ import threading
 import uuid
 import textwrap
 import json
+import random
 from typing import List, Dict
 
 from flask import Flask, render_template_string, request, jsonify, Response, send_file, stream_with_context
 import webbrowser
 from PIL import Image, ImageDraw, ImageFont
 
+import numpy as np
 import torch
 from transformers import RobertaTokenizerFast, RobertaForMaskedLM
 
@@ -45,10 +44,13 @@ parser.add_argument("--context", type=str, default="", help="Prefill context (op
 parser.add_argument("--model-dir", type=str, default="diffusion-sql", help="Default model dir (optional)")
 parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--port", type=int, default=7860)
+parser.add_argument("--seed", type=int, default=1234, help="Deterministic seed (default 1234).")
 args = parser.parse_args()
 
 HOST = args.host
 PORT = args.port
+DEFAULT_MODEL_DIR = args.model_dir
+DEFAULT_SEED = 42
 
 # -------------------------
 # Flask app & template
@@ -65,117 +67,121 @@ TEMPLATE = r"""
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     :root{
-      --accent: #2563eb;
+      --accent: #1f6feb;
       --muted: #6b7280;
-      --bg: #fafafa;
+      --bg: #f7fafc;
       --card: #ffffff;
       --mono: 'DejaVu Sans Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
     }
-    html,body { height:100%; margin:0; background:var(--bg); font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; color:#111827; }
-    .container { max-width:1200px; margin:18px auto; padding:12px; }
-    .header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-    h1 { margin:0; font-size:20px; }
-    .layout { display:grid; grid-template-columns: 1fr 360px; gap:18px; margin-top:14px; }
-    .top-live { background:var(--card); border-radius:10px; padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.06); display:flex; flex-direction:column; }
-    .live-text { flex:1; overflow:auto; padding:8px; border-radius:8px; background:#fff; border:1px solid #eee; }
-    .controls { background:var(--card); padding:12px; border-radius:10px; box-shadow:0 6px 18px rgba(15,23,42,0.04); }
-    label { font-weight:600; font-size:13px; color:#111827; display:block; margin-bottom:6px; }
-    input[type=text], textarea, input[type=number], select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #e6e6ee; font-size:14px; box-sizing:border-box; }
-    textarea { min-height:100px; resize:vertical; font-family:inherit; }
+    html,body { height:100%; margin:0; background:var(--bg); font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; color:#0f172a; }
+    .vh { height:100vh; display:flex; flex-direction:column; }
+    .container { width:100%; max-width:1400px; margin:0 auto; padding:12px; box-sizing:border-box; display:flex; flex-direction:column; gap:12px; flex:1 1 auto; }
+    .live-large { background:var(--card); border-radius:12px; padding:18px; box-shadow:0 8px 28px rgba(2,6,23,0.06); display:flex; gap:18px; align-items:stretch; min-height:48vh; }
+    .live-left { flex:1; display:flex; flex-direction:column; gap:10px; }
+    .live-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .live-header .title { font-weight:700; font-size:16px; color:#0b1220; }
+    .step-pill { background:#eef2ff; color:var(--accent); padding:6px 10px; border-radius:999px; font-weight:700; font-size:14px; }
+    /* lighter gray background for live area and nicer padding */
+    .live-box { flex:1; background:#f3f4f6; border-radius:10px; padding:22px; overflow:auto; display:flex; align-items:center; justify-content:center; }
+    .sql-display { font-family:var(--mono); font-weight:700; white-space:pre-wrap; word-break:break-word; color:#021024; margin:0; }
+    .right-col { width:380px; display:flex; flex-direction:column; gap:12px; }
+    .controls { background:var(--card); padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(2,6,23,0.04); }
+    .label { font-weight:700; margin-bottom:6px; font-size:13px; color:#0b1220; display:block; }
+    input[type=text], textarea, input[type=number], select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #e6eef7; font-size:14px; box-sizing:border-box; }
+    textarea { min-height:80px; resize:vertical; font-family:inherit; }
+    .btn { background:var(--accent); color:white; border:none; padding:12px 16px; border-radius:10px; cursor:pointer; font-weight:700; font-size:15px; width:100%; }
+    .btn-ghost { background:transparent; color:var(--accent); border:1px solid #e6eef7; padding:10px 12px; border-radius:8px; cursor:pointer; }
     .small { font-size:13px; color:var(--muted); }
-    .row { display:flex; gap:8px; align-items:center; }
-    .btn { background:var(--accent); color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:600; }
-    .btn-ghost { background:transparent; color:var(--accent); border:1px solid #e6eefc; }
-    .status { margin-top:10px; background:#1118270f; padding:8px; border-radius:8px; font-family:var(--mono); font-size:13px; max-height:160px; overflow:auto; white-space:pre-wrap; }
-    .preview { margin-top:12px; border-radius:8px; padding:10px; background:#fff; border:1px solid #eee; text-align:center; min-height:120px; }
-    .field-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
-    .footer { margin-top:12px; color:var(--muted); font-size:13px; }
+    .status { margin-top:6px; background:#ffffff; padding:8px; border-radius:8px; font-family:var(--mono); font-size:13px; max-height:120px; overflow:auto; white-space:pre-wrap; border:1px solid #f0f6ff; }
+    .gif-area { margin-top:8px; display:flex; gap:8px; align-items:center; }
+    .controls-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .footer { color:var(--muted); font-size:13px; margin-top:6px; }
     @media (max-width: 980px) {
-      .layout { grid-template-columns: 1fr; }
-      .container { padding:8px; }
+      .live-large { flex-direction:column; min-height:55vh; }
+      .right-col { width:100%; }
     }
-    /* big responsive SQL area styles */
-    .sql-display { font-family: var(--mono); font-weight:600; line-height:1.1; white-space:pre-wrap; word-break:break-word; }
+    .status {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4em;
+  height: 4.2em;
+  min-height: 4.2em;
+  max-height: 4.2em;
+}
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h1>RoBERTa-diffusion — Live SQL Inference</h1>
-      <div class="small">Live decoding on top • Responsive preview & GIF export</div>
-    </div>
+  <div class="vh">
+    <div class="container">
+      <div class="live-large" id="liveLarge">
+        <div class="live-left">
+          <div class="live-header">
+            <div class="title">Lethonium - Text Diffusion Playground</div>
+            <div class="step-pill" id="stepBox">Step — / —</div>
+          </div>
+          <div class="live-box" id="liveBox" aria-live="polite">
+            <!-- liveText is large, responsive; only SQL content will be shown -->
+            <pre id="liveText" class="sql-display" style="font-size:44px; margin:0; color:#0b1220;">Waiting — enter prompt/context and press Run</pre>
+          </div>
+        </div>
 
+        <div class="right-col">
+          <div class="controls">
+            <label class="label">Controls</label>
+            <form id="runForm">
+              <label class="small">Prompt</label>
+              <textarea name="prompt" id="prompt">{{ prompt_prefill }}</textarea>
 
-    <div class="layout" style="margin-top:18px;">
-      <div class="controls">
-        <form id="runForm">
-          <label>Prompt</label>
-          <textarea name="prompt" id="prompt">{{ prompt_prefill }}</textarea>
+              <label class="small" style="margin-top:8px;">Context</label>
+              <textarea name="context" id="context">{{ context_prefill }}</textarea>
 
-          <label style="margin-top:8px;">Context (schema / info)</label>
-          <textarea name="context" id="context">{{ context_prefill }}</textarea>
+              <div class="controls-grid" style="margin-top:10px;">
+                <div>
+                  <label class="small">Steps</label>
+                  <input name="steps" id="steps" type="number" value="10" min="1" max="500"/>
+                </div>
+                <div>
+                  <label class="small">Max Len</label>
+                  <input name="max_len" id="max_len" type="number" value="512" min="64" max="4096"/>
+                </div>
+                <div>
+                  <label class="small">SQL mask len</label>
+                  <input name="sql_len" id="sql_len" type="number" value="64" min="1" max="1024"/>
+                </div>
+                <div>
+                  <label class="small">Top-k</label>
+                  <input name="top_k" id="top_k" type="number" value="50" min="0" max="2000"/>
+                </div>
+              </div>
 
-          <div style="margin-top:8px;" class="field-grid">
-            <div>
-              <label>Steps</label>
-              <input type="number" name="steps" id="steps" value="10" min="1" max="500"/>
-            </div>
-            <div>
-              <label>Max Len</label>
-              <input type="number" name="max_len" id="max_len" value="512" min="64" max="4096"/>
-            </div>
-            <div>
-              <label>SQL mask len</label>
-              <input type="number" name="sql_len" id="sql_len" value="64" min="1" max="1024"/>
-            </div>
-            <div>
-              <label>Top-k</label>
-              <input type="number" name="top_k" id="top_k" value="50" min="0" max="2000"/>
-            </div>
+              <div class="controls-grid" style="margin-top:8px;">
+                <div>
+                  <label class="small">Top-p</label>
+                  <input name="top_p" id="top_p" type="number" step="0.01" value="0.95" min="0" max="1"/>
+                </div>
+                <div>
+                  <label class="small">Model Dir</label>
+                  <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}" />
+                </div>
+              </div>
+
+              <div style="margin-top:12px;">
+                <button id="runBtn" class="btn" type="submit">Run Generation</button>
+              </div>
+            </form>
+
+            <div id="status" class="status">Idle.</div>
           </div>
 
-          <div style="margin-top:8px;" class="field-grid">
-            <div>
-              <label>Top-p</label>
-              <input type="number" step="0.01" name="top_p" id="top_p" value="0.95" min="0" max="1"/>
-            </div>
-            <div>
-              <label>Model Dir</label>
-              <input type="text" name="model_dir" id="model_dir" value="{{ model_dir }}" />
+          <div>
+            <div class="small" style="margin-bottom:6px;">Download GIF</div>
+            <div class="gif-area">
+              <a id="gifLink" class="btn-ghost" href="#" style="display:none;" download>Download GIF</a>
             </div>
           </div>
-
-          <div style="display:flex; gap:8px; margin-top:10px;">
-            <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="animate" checked /> Collect snapshots</label>
-            <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="gif_fullscreen" /> GIF fullscreen (1920x1080)</label>
-          </div>
-
-          <div style="margin-top:8px;">
-            <label>GIF Width x Height (e.g. 1200x800, overrides fullscreen)</label>
-            <input name="gif_size" id="gif_size" type="text" placeholder="1200x800" />
-          </div>
-
-          <div style="margin-top:12px; display:flex; gap:8px;">
-            <button id="runBtn" class="btn" type="submit">Run Generation</button>
-            <button id="resetBtn" class="btn-ghost" type="button">Reset</button>
-            <div style="flex:1"></div>
-            <div class="small">Model dir must contain tokenizer & RobertaForMaskedLM files.</div>
-          </div>
-        </form>
-
-        <div id="status" class="status" style="margin-top:12px;">Idle.</div>
-      </div>
-
-      <div>
-        <div style="background:var(--card); padding:12px; border-radius:10px; box-shadow:0 6px 18px rgba(15,23,42,0.04);">
-          <h3 style="margin:0 0 8px 0;">Live Model Generation</h3>
-          <div id="liveBox" class="live-text sql-display" style="font-size:28px;">
-            <div style="color:#9ca3af;">Waiting for run — enter prompt/context in the form and click Run</div>
-          </div>
-                <a id="gifLink" class="btn" style="display:none; margin-top:12px;" download>Download GIF</a>
-
-            <button id="stopBtn" class="btn-ghost" style="display:none;">Stop</button>
-
         </div>
       </div>
     </div>
@@ -185,56 +191,31 @@ TEMPLATE = r"""
 let runId = null;
 let es = null;
 let snapshots = [];
-let animTimer = null;
-let animIndex = 0;
+let runInProgress = false;
 
-const liveBox = document.getElementById('liveBox');
-const animInner = document.getElementById('animInner');
-const animPreview = document.getElementById('animPreview');
+const liveText = document.getElementById('liveText');
+const stepBox = document.getElementById('stepBox');
 const statusBox = document.getElementById('status');
 const gifLink = document.getElementById('gifLink');
-const stopBtn = document.getElementById('stopBtn');
+const runBtn = document.getElementById('runBtn');
+const runForm = document.getElementById('runForm');
 
 function setStatus(s){ statusBox.textContent = s; }
-
 function setLiveText(txt){
-  // set raw text, then adjust font-size heuristically to fit container
-  liveBox.textContent = txt || "";
+  liveText.textContent = txt || "";
   fitLiveFont();
 }
-
 function fitLiveFont(){
-  // dynamic font sizing: compute longest line length and container width
-  const container = liveBox;
-  const width = container.clientWidth - 24;
+  const container = liveText;
+  const width = container.parentElement.clientWidth - 40;
   const lines = (container.textContent || "").split("\n").map(l=>l.trim());
   const longest = lines.reduce((a,b)=> Math.max(a, b.length), 0) || 40;
-  // heuristic: char width ≈ 0.6 * fontSize in px for monospace; adjust:
-  const candidate = Math.floor(Math.max(12, Math.min(56, width / Math.max(10, longest) * 1.6)));
+  const candidate = Math.floor(Math.max(18, Math.min(96, width / Math.max(6, longest) * 2.2)));
   container.style.fontSize = candidate + "px";
 }
-
 window.addEventListener('resize', fitLiveFont);
 
-function startAnimatingPreview(){
-  if(animTimer) clearInterval(animTimer);
-  animIndex = 0;
-  if(snapshots.length === 0){
-    animInner.textContent = "No frames yet";
-    return;
-  }
-  animTimer = setInterval(()=>{
-    animInner.textContent = snapshotToPlain(snapshots[animIndex]);
-    animIndex = (animIndex + 1) % snapshots.length;
-  }, 500);
-}
-
-function stopAnimatingPreview(){
-  if(animTimer){ clearInterval(animTimer); animTimer = null; }
-}
-
-function snapshotToPlain(s){
-  // extract SQL content between tags if present, otherwise whole snapshot
+function extractSQL(s){
   const start = s.indexOf("<SQL>");
   const end = s.indexOf("</SQL>");
   if(start !== -1 && end !== -1){
@@ -243,85 +224,103 @@ function snapshotToPlain(s){
   return s;
 }
 
-document.getElementById('runForm').addEventListener('submit', async (ev)=>{
+function setBtnStateRunning() {
+  runInProgress = true;
+  runBtn.textContent = "Stop Generation";
+  runBtn.disabled = false;
+}
+function setBtnStateIdle() {
+  runInProgress = false;
+  runBtn.textContent = "Run Generation";
+  runBtn.disabled = false;
+}
+
+async function stopRunIfRunning() {
+  if (runId) {
+    runBtn.disabled = true;
+    setStatus("Stopping...");
+    try {
+      await fetch('/stop/' + runId, { method:'POST' });
+    } catch(_) {}
+  }
+}
+
+runBtn.onclick = async function(ev) {
+  // This manually handles both submit and "stop" actions.
+  if (runInProgress) {
+    ev.preventDefault();
+    await stopRunIfRunning();
+    // Button stays disabled until stream closes.
+    return;
+  }
+  // Otherwise, allow form submit!
+};
+
+runForm.addEventListener('submit', async (ev)=>{
   ev.preventDefault();
-  // clear previous
-  stopRun();
+  if(es){ es.close(); es=null; }
   snapshots = [];
-  setLiveText("Starting run...");
-  gifLink.innerHTML = "";
-  gifLink.style.display = "none";
-  gifLink.href = "#";
-  gifLink.textContent = "";   
   setStatus("Preparing run...");
+  gifLink.style.display = "none";
+
+  setBtnStateRunning();
 
   const form = new FormData(ev.target);
-  // start run (immediate response with run_id)
-  setStatus("Sending run request to server...");
+  setStatus("Sending run request to server (deterministic)...");
   try {
     const resp = await fetch('/start', { method:'POST', body: form });
     if(!resp.ok){
       const txt = await resp.text();
       setStatus("ERROR: " + resp.status + " - " + txt);
+      setBtnStateIdle();
       return;
     }
     const j = await resp.json();
     runId = j.run_id;
-    setStatus("Run started (id: " + runId + "). Streaming live updates...");
-    // open SSE
+    setStatus("Run started (id: " + runId + "). Streaming updates...");
     openStream(runId);
-    // show stop button
-    stopBtn.style.display = "inline-block";
-    stopBtn.onclick = () => {
-      fetch('/stop/' + runId, {method:'POST'});
-      stopBtn.style.display = "none";
-    };
   } catch(e){
     setStatus("Exception starting run: " + e.toString());
+    setBtnStateIdle();
   }
 });
 
-function stopRun(){
-  if(es){ es.close(); es = null; }
-  stopAnimatingPreview();
-  stopBtn.style.display = "none";
-}
-
 async function openStream(id){
-  if(es){ es.close(); es = null; }
+  if(es){ es.close(); es=null; }
   es = new EventSource('/stream/' + id);
   es.onopen = ()=> console.log("SSE opened");
-  es.onerror = (e) => {
-    console.warn("SSE error", e);
-  };
+  es.onerror = (e)=> console.warn("SSE error", e);
   es.addEventListener('snapshot', (ev)=>{
-    const txt = JSON.parse(ev.data);
-    snapshots.push(txt);
-    // update live text to last snapshot
-    setLiveText(snapshotToPlain(txt));
-    // update mini preview frames array and start preview
-    startAnimatingPreview();
+    const obj = JSON.parse(ev.data);
+    snapshots.push(obj);
+    const sqlOnly = extractSQL(obj.text.replace(/____/g,'_____')) || "(empty)";
+    setLiveText(sqlOnly);
+    stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
   });
   es.addEventListener('status', (ev)=>{
     const info = JSON.parse(ev.data);
     setStatus(info.msg);
   });
+  function finishBtn() {
+    setBtnStateIdle();
+    runId = null;
+  }
   es.addEventListener('done', async (ev)=>{
     const payload = JSON.parse(ev.data);
     setStatus("Run finished.");
-    
-      if(payload.gif_url){
-    gifLink.href = payload.gif_url;
-    gifLink.download = ''; // trigger download
-    gifLink.style.display = "inline-block";
-    gifLink.textContent = "Download GIF";
+    if(payload.gif_url){
+      gifLink.href = payload.gif_url;
+      const fname = payload.gif_url.split('/').pop() || 'generation.gif';
+      gifLink.download = fname;
+      gifLink.style.display = "inline-block";
+      gifLink.textContent = "Download GIF";
+    } else {
+      gifLink.style.display = "none";
     }
-    es.close();
-    es = null;
-    stopBtn.style.display = "none";
+    if(es){ es.close(); es=null; }
+    finishBtn();
   });
 }
-
 </script>
 </body>
 </html>
@@ -331,50 +330,32 @@ async function openStream(id){
 # Run storage / state
 # -------------------------
 RUNS: Dict[str, Dict] = {}  # run_id -> {snapshots:[], status:str, done:bool, sql_only, display, gif_path}
-
 MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}
 
 # -------------------------
-# Utilities: font fitting for GIF frames
+# Utilities: GIF font fitting (bigger min size)
 # -------------------------
-def pick_font_and_size(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: int, padding: int = 24):
-    """
-    Pick the largest integer font size (within bounds) that makes wrapped text fit within max_width x max_height.
-    Uses DejaVuSansMono if available else default.
-    """
-    # try mono font
+def pick_font_and_size(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: int, padding: int = 28):
     fonts_to_try = ["DejaVuSansMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]
-    base_font = None
+    font_path = None
     for p in fonts_to_try:
         try:
-            base_font = ImageFont.truetype(p, size=12)
+            ImageFont.truetype(p, size=12)
             font_path = p
             break
         except Exception:
-            base_font = None
-    if base_font is None:
-        # fallback
-        font_path = None
+            font_path = None
 
-    # measure longest reasonable width using monospaced assumption
-    max_chars = max(40, int((max_width - padding * 2) / 8))
-    wrapped = textwrap.fill(text, width=max_chars)
-    # candidate sizes
-    min_size, max_size = 12, 54
-    # binary search for largest size that fits
+    min_size, max_size = 16, 72
     lo, hi = min_size, max_size
     best = min_size
     while lo <= hi:
         mid = (lo + hi) // 2
-        if font_path:
-            f = ImageFont.truetype(font_path, size=mid)
-        else:
-            f = ImageFont.load_default()
-        # recompute wrapping at this font: approximate chars per line using width / (font.getsize('M')[0])
+        f = ImageFont.truetype(font_path, size=mid) if font_path else ImageFont.load_default()
         char_w = f.getsize("M")[0] or 8
         chars_per_line = max(20, int((max_width - padding*2) / char_w))
-        wrapped_mid = textwrap.fill(text, width=chars_per_line)
-        bbox = draw.multiline_textbbox((0,0), wrapped_mid, font=f, spacing=4)
+        wrapped = textwrap.fill(text, width=chars_per_line)
+        bbox = draw.multiline_textbbox((0,0), wrapped, font=f, spacing=6)
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         if w + padding*2 <= max_width and h + padding*2 <= max_height:
@@ -382,39 +363,35 @@ def pick_font_and_size(draw: ImageDraw.ImageDraw, text: str, max_width: int, max
             lo = mid + 1
         else:
             hi = mid - 1
-    if font_path:
-        return ImageFont.truetype(font_path, size=best)
-    else:
-        return ImageFont.load_default()
+    return ImageFont.truetype(font_path, size=best) if font_path else ImageFont.load_default()
 
-def render_text_image_for_gif(text: str, width: int, height: int, padding: int = 24):
+def render_text_image_for_gif(text: str, width: int, height: int, padding: int = 28):
     img = Image.new("RGB", (width, height), color=(255,255,255))
     draw = ImageDraw.Draw(img)
     font = pick_font_and_size(draw, text, width, height, padding=padding)
-    # compute char width to determine wrap
     char_w = font.getsize("M")[0] or 8
     chars_per_line = max(20, int((width - padding*2) / char_w))
     wrapped = textwrap.fill(text, width=chars_per_line)
-    # compute top-left to center vertically a bit
-    bbox = draw.multiline_textbbox((0,0), wrapped, font=font, spacing=6)
-    text_h = bbox[3] - bbox[1]
     y = padding
-    draw.multiline_text((padding, y), wrapped, fill=(20,20,20), font=font, spacing=6)
+    draw.multiline_text((padding, y), wrapped, fill=(18,18,18), font=font, spacing=6)
     return img
 
-def build_gif_bytes_from_snapshots(snapshots: List[str], size=(1200,800), interval_ms: int = 550) -> bytes:
+def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), interval_ms: int = 500) -> bytes:
     frames = []
     for snap in snapshots:
-        start = snap.find("<SQL>")
-        end = snap.find("</SQL>")
+        s = snap.get("text") if isinstance(snap, dict) else snap
+        start = s.find("<SQL>")
+        end = s.find("</SQL>")
         if start != -1 and end != -1:
-            body = snap[start+len("<SQL>"):end].strip()
+            body = s[start+len("<SQL>"):end].strip()
         else:
-            body = snap
+            body = s
         if not body.strip():
             body = "(empty)"
         img = render_text_image_for_gif(body, width=size[0], height=size[1], padding=28)
         frames.append(img.convert("P", palette=Image.ADAPTIVE))
+    if not frames:
+        frames = [Image.new("RGB", size, color=(255,255,255)).convert("P", palette=Image.ADAPTIVE)]
     bio = io.BytesIO()
     frames[0].save(bio, format='GIF', save_all=True, append_images=frames[1:], loop=0, duration=interval_ms)
     bio.seek(0)
@@ -435,7 +412,7 @@ def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
     return tokenizer, model
 
 # -------------------------
-# Core denoising with callback for snapshots
+# Core denoising with callback for snapshots (reports step)
 # -------------------------
 def run_denoising_generation_callback(
     prompt_text: str,
@@ -447,14 +424,29 @@ def run_denoising_generation_callback(
     top_p: float = 0.95,
     sql_len_request: int = 64,
     animate: bool = True,
-    on_snapshot = None,   # callable(snapshot_str) -> None called when a snapshot is produced (for live streaming)
-    status_cb = None,     # callable(message) -> None used for minor status updates
+    on_snapshot = None,
+    status_cb = None,
+    deterministic_seed: int = DEFAULT_SEED,
 ) -> Dict:
     def log(s):
         if status_cb:
             status_cb(str(s))
+
+    # deterministic seeds
+    random.seed(deterministic_seed)
+    np.random.seed(deterministic_seed)
+    torch.manual_seed(deterministic_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(deterministic_seed)
+    try:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+
     log(f"[INFO] Loading model/tokenizer from {model_dir}")
     tokenizer, model = load_model_and_tokenizer(model_dir, max_len)
+
     REQUIRED_TAGS = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     missing = [t for t in REQUIRED_TAGS if t not in tokenizer.get_vocab()]
     if missing:
@@ -505,7 +497,6 @@ def run_denoising_generation_callback(
         if not (0 <= sql_open_idx < max_len):
             raise RuntimeError(f"Invalid SQL token indices: open={sql_open_idx}, close={sql_close_idx}")
 
-    # prepare mask region
     if sql_close_idx <= sql_open_idx + 1:
         max_possible = max_len - (sql_open_idx + 2)
         if max_possible <= 0:
@@ -543,16 +534,17 @@ def run_denoising_generation_callback(
         raise RuntimeError("No modifiable SQL tokens were found (empty SQL region).")
 
     mask_probs = [i / n_steps for i in range(n_steps - 1, -1, -1)]
-    snapshots: List[str] = []
+    total_steps = len(mask_probs)
+    snapshots: List[Dict] = []
     if animate:
         s0 = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-        snapshots.append(s0.replace(mask_token, " ____"))
+        snapshots.append({"text": s0.replace(mask_token, " ____"), "step": 0, "total_steps": total_steps})
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
     log("[INFO] Starting denoising")
     t0 = time.time()
-    for p_mask in mask_probs:
+    for step_idx, p_mask in enumerate(mask_probs):
         with torch.no_grad():
             outputs = model(input_ids=current_ids, attention_mask=current_attention)
             logits = outputs.logits
@@ -565,13 +557,16 @@ def run_denoising_generation_callback(
             sampled = torch.multinomial(probs, num_samples=1).squeeze(-1)
             pred_ids[0, pos] = sampled
 
+        if status_cb:
+            status_cb(f"step {step_idx+1}/{total_steps}")
+
         if math.isclose(p_mask, 0.0):
             new_ids = current_ids.clone()
             new_ids[0, sql_open_idx + 1 : sql_close_idx] = pred_ids[0, sql_open_idx + 1 : sql_close_idx]
             current_ids = new_ids
             if animate:
                 s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-                snapshots.append(s.replace(mask_token, " ____"))
+                snapshots.append({"text": s.replace(mask_token, " ____"), "step": step_idx+1, "total_steps": total_steps})
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
             break
@@ -589,7 +584,7 @@ def run_denoising_generation_callback(
         current_ids = next_ids
         if animate:
             s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-            snapshots.append(s.replace(mask_token, " ____"))
+            snapshots.append({"text": s.replace(mask_token, " ____"), "step": step_idx+1, "total_steps": total_steps})
             if on_snapshot:
                 on_snapshot(snapshots[-1])
 
@@ -609,12 +604,12 @@ def run_denoising_generation_callback(
         sql_only = tokenizer.decode(token_slice, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 
     if not animate:
-        snapshots = [display]
+        snapshots = [{"text": display, "step": total_steps, "total_steps": total_steps}]
 
     return {"snapshots": snapshots, "sql_only": sql_only, "display": display}
 
 # -------------------------
-# top-k / top-p helper (same as your original)
+# top-k / top-p helper
 # -------------------------
 def top_k_top_p_filtering(logits: torch.Tensor, top_k: int = 0, top_p: float = 0.0, filter_value: float = -float("Inf")) -> torch.Tensor:
     logits = logits.clone()
@@ -638,8 +633,14 @@ def top_k_top_p_filtering(logits: torch.Tensor, top_k: int = 0, top_p: float = 0
 # -------------------------
 @app.route("/")
 def index():
-    return render_template_string(TEMPLATE, prompt_prefill=args.prompt or "", context_prefill=args.context or "", model_dir=args.model_dir or "")
-
+    default_prompt = "how many planes are of name a380?"
+    default_context = "CREATE TABLE planes (id INT, name TEXT)"
+    return render_template_string(
+        TEMPLATE,
+        prompt_prefill=args.prompt or default_prompt,
+        context_prefill=args.context or default_context,
+        model_dir=DEFAULT_MODEL_DIR or "",
+    )
 @app.route("/start", methods=["POST"])
 def start_run():
     form = request.form
@@ -650,17 +651,14 @@ def start_run():
     sql_len = int(form.get("sql_len", "64"))
     top_k = int(form.get("top_k", "50"))
     top_p = float(form.get("top_p", "0.95"))
-    model_dir = form.get("model_dir", args.model_dir).strip() or args.model_dir
-    animate = form.get("animate") is not None
-    export_gif = True
-    gif_fullscreen = form.get("gif_fullscreen") is not None
+    model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
+    animate = True
     gif_size_text = form.get("gif_size", "").strip()
-    interval_ms = 550
+    interval_ms = 500
 
     if not prompt:
         return "Prompt is empty", 400
     if not os.path.isdir(model_dir):
-        # FIXED escape bug here (no odd escaping)
         return jsonify({"error": f"Model dir not found: {model_dir}"}), 400
 
     run_id = uuid.uuid4().hex
@@ -669,8 +667,8 @@ def start_run():
     def status_cb(msg):
         RUNS[run_id]["status"] = msg
 
-    def on_snapshot_callback(snapshot_str):
-        RUNS[run_id]["snapshots"].append(snapshot_str)
+    def on_snapshot_callback(snapshot_obj):
+        RUNS[run_id]["snapshots"].append(snapshot_obj)
 
     def worker():
         try:
@@ -679,32 +677,33 @@ def start_run():
                                                     n_steps=steps, max_len=max_len,
                                                     top_k=top_k, top_p=top_p,
                                                     sql_len_request=sql_len, animate=animate,
-                                                    on_snapshot=on_snapshot_callback, status_cb=status_cb)
+                                                    on_snapshot=on_snapshot_callback, status_cb=status_cb,
+                                                    deterministic_seed=DEFAULT_SEED)
             RUNS[run_id]["sql_only"] = res.get("sql_only")
             RUNS[run_id]["display"] = res.get("display")
             RUNS[run_id]["status"] = "generation complete"
-            # optionally build GIF if requested
-            if export_gif:
-                if gif_fullscreen:
-                    gif_size = (1920,1080)
-                elif gif_size_text:
-                    try:
-                        w,h = gif_size_text.lower().split('x')
-                        gif_size = (int(w), int(h))
-                    except Exception:
-                        gif_size = (1200,800)
-                else:
-                    gif_size = (1200,800)
-                RUNS[run_id]["status"] = "building GIF"
+
+            # always build GIF
+            if gif_size_text:
                 try:
-                    gif_bytes = build_gif_bytes_from_snapshots(res["snapshots"], size=gif_size, interval_ms=interval_ms)
-                    out_name = f"generation_{run_id}.gif"
-                    out_path = os.path.join(os.path.abspath("."), out_name)
-                    with open(out_path, "wb") as f:
-                        f.write(gif_bytes)
-                    RUNS[run_id]["gif_url"] = "/gif/" + out_name
-                except Exception as e:
-                    RUNS[run_id]["status"] = f"GIF build failed: {e}"
+                    w,h = gif_size_text.lower().split('x')
+                    gif_size = (int(w), int(h))
+                except Exception:
+                    gif_size = (1400,900)
+            else:
+                gif_size = (1400,900)
+
+            RUNS[run_id]["status"] = "building GIF"
+            try:
+                gif_bytes = build_gif_bytes_from_snapshots(RUNS[run_id]["snapshots"], size=gif_size, interval_ms=interval_ms)
+                out_name = f"generation_{run_id}.gif"
+                out_path = os.path.join(os.path.abspath("."), out_name)
+                with open(out_path, "wb") as f:
+                    f.write(gif_bytes)
+                RUNS[run_id]["gif_url"] = "/gif/" + out_name
+            except Exception as e:
+                RUNS[run_id]["status"] = f"GIF build failed: {e}"
+
             RUNS[run_id]["done"] = True
             RUNS[run_id]["status"] = "done"
         except Exception as e:
@@ -724,24 +723,20 @@ def stream(run_id):
         sent = 0
         last_status = ""
         while True:
-            # send any new snapshots
             snaps = RUNS[run_id]["snapshots"]
             while sent < len(snaps):
                 s = snaps[sent]
-                # send snapshot event
                 yield f"event: snapshot\ndata: {json.dumps(s)}\n\n"
                 sent += 1
-            # send status periodically if it changed
             st = RUNS[run_id].get("status", "")
             if st != last_status:
                 last_status = st
                 yield f"event: status\ndata: {json.dumps({'msg': st})}\n\n"
             if RUNS[run_id].get("done"):
-                # final payload includes sql_only and gif_url if present
                 payload = {"sql_only": RUNS[run_id].get("sql_only"), "gif_url": RUNS[run_id].get("gif_url")}
                 yield f"event: done\ndata: {json.dumps(payload)}\n\n"
                 break
-            time.sleep(0.18)
+            time.sleep(0.12)
     return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
 
 @app.route("/gif/<filename>")
@@ -753,7 +748,6 @@ def serve_gif(filename):
 
 @app.route("/stop/<run_id>", methods=["POST"])
 def stop_run(run_id):
-    # best-effort: mark as done; we cannot easily cancel torch inference safely here
     if run_id in RUNS:
         RUNS[run_id]["status"] = "stopped by user"
         RUNS[run_id]["done"] = True
