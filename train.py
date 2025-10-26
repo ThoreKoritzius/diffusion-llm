@@ -15,7 +15,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-
+import wandb
 
 # 1. Hyperparameters and Config
 N_STEPS =       10
@@ -24,6 +24,16 @@ BATCH_SIZE =    32
 MAX_LEN =       512
 TRAIN_SIZE =    10_000
 VAL_SIZE =      100
+SQL_WINDOW =    128
+
+os.environ["WANDB_PROJECT"] = "sql-diffusion"
+wandb.init(project="sql-diffusion", name="roberta-base-diffusion-style", config={
+    "epochs": NUM_EPOCHS,
+    "batch_size": BATCH_SIZE,
+    "n_steps": N_STEPS,
+    "train_size": TRAIN_SIZE,
+    "val_size": VAL_SIZE
+})
 
 # Masking schedule: linearly spaced from 1/N_STEPS .. 1.0
 mask_probs = [(i + 1) / N_STEPS for i in range(N_STEPS - 1, -1, -1)]
@@ -48,7 +58,6 @@ special_tokens_dict = {'additional_special_tokens': [
 ]}
 tokenizer.add_special_tokens(special_tokens_dict)
 
-
 # 4. Input Formatting
 def build_text(example):
     """Constructs input like:
@@ -57,7 +66,13 @@ def build_text(example):
     prompt = example["sql_prompt"]
     context = example.get("sql_context", "")
     sql = example.get("sql", "")
-    text = f"<PROMPT>{prompt}</PROMPT> <CONTEXT>{context}</CONTEXT> <SQL>{sql}</SQL>"
+    sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"]
+    sql_len = len(sql_ids)
+    if sql_len < SQL_WINDOW:
+        sql_ids = sql_ids + [tokenizer.pad_token_id]*(SQL_WINDOW - sql_len)
+    else:
+        sql_ids = sql_ids[:SQL_WINDOW]
+    text = f"<PROMPT>{prompt}</PROMPT> <CONTEXT>{context}</CONTEXT> <SQL>{tokenizer.decode(sql_ids)}</SQL>"
     return {"text": text}
 
 
@@ -108,6 +123,9 @@ def tokenize_function(example):
 
 # 6. Prepare Dataset
 tokenized = dataset.map(build_text)
+for i in range(10):
+    print(tokenized["train"][i]["text"])
+    print("=" * 80)
 tokenized = tokenized.map(tokenize_function, remove_columns=["text"])
 
 
@@ -135,15 +153,16 @@ def diffusion_collator(features):
     sql_starts = [int(f["sql_start"]) for f in features]
     sql_ends = [int(f["sql_end"]) for f in features]
 
-    # Choose a random mask rate for the whole batch (could be per-sample for more diversity)
-    p = float(mask_probs[torch.randint(low=0, high=len(mask_probs), size=(1,))])
-
     mask_positions = torch.zeros_like(batch_input_ids, dtype=torch.bool)
+    probs = torch.rand(len(features))  # random number [0, 1) per sample
+    mask_rate_indices = (probs * len(mask_probs)).long()
+    ps = [mask_probs[i] for i in mask_rate_indices]
+
     for i in range(B):
         s, e = sql_starts[i], sql_ends[i]
         if e > s:
             length = e - s
-            num_to_mask = max(1, int(round(p * length)))
+            num_to_mask = max(1, int(round(ps[i] * length)))
             idxs = torch.randperm(length)[:num_to_mask] + s
             mask_positions[i, idxs] = True
 
@@ -166,16 +185,18 @@ training_args = TrainingArguments(
     per_device_train_batch_size=BATCH_SIZE,
     save_strategy="epoch",
     save_total_limit=10,
-    logging_steps=200,
+    logging_steps=10,
     remove_unused_columns=False,
     logging_strategy="steps",
+    report_to=["wandb"],
+    eval_strategy="steps",
+    eval_steps=100,
 )
 
 
 # 10. Dataset Slices (small subset for quick test)
 small_train = tokenized["train"].select(range(TRAIN_SIZE))
 small_val = tokenized["test"].select(range(VAL_SIZE))
-
 
 # 11. Train
 trainer = Trainer(
@@ -190,3 +211,5 @@ trainer = Trainer(
 trainer.train()
 trainer.save_model("diffusion-sql")
 tokenizer.save_pretrained("diffusion-sql")
+
+wandb.finish()
