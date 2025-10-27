@@ -2,7 +2,7 @@
 
 This project implements a simplified transformer-based LLM that generates SQL queries using a diffusion-like denoising process. It is an early experimental idea to blen diffusion models with transformer architectures, where condition the noise on language prompts.
 
-![Diffusion Example](diffusion_example.gif)
+![Diffusion Example](examples/diffusion_example.gif)
 
 ## Features
 
