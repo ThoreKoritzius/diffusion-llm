@@ -1,6 +1,6 @@
 # Diffusion-LLM
 
-A masked language model implementing **diffusion-style text denoising** for SQL generation, leveraging the `RoBERTa architectur`. This project includes the training pipeline using a HF text-to-SQL dataset and provides an interactive Flask GUI playground to visualize the iterative diffusion process.
+A masked language model implementing **diffusion-style text denoising** for SQL generation, leveraging the `RoBERTa architectur`. This project includes the training pipeline using a HF text-to-SQL dataset and ships with a Gradio-based inference studio to visualize the iterative diffusion process.
 
 The core idea: Provide a `--prompt` (natural language question) and a `--context` (relevant table schema). The LLM then iteratively refines and decodes the corresponding SQL query over multiple diffusion steps which can be adjusted at inference. Therefore we are shift from sequential auto-regression to decode multiple tokens at once in one step.
 
@@ -38,14 +38,13 @@ This will:
 - Save the trained model to disk, inside `diffusion-sql` folder
 - Log data to `wandb`
 
-### 3. Run the Inference Playground
+### 3. Run the Gradio Inference Studio
 
 ```bash
-python src/inference.py
+python src/gradio_inference.py
 ```
 
-- The web interface opens in your browser
-- Enter your prompt/context, set steps/hyperparameters, and press "Run Generation"
-- View diffusion steps live and download a GIF of the full denoising process
-
----
+- Stream each denoising step with live SQL viewport
+- Scrub through intermediate snapshots
+- Auto-fill schema context from a CSV upload, or paste your own `CREATE TABLE` DDL
+- Adjust steps/top-k/top-p/max length/model directory directly from the UI

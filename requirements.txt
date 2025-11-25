@@ -1,7 +1,8 @@
-flask
 Pillow
 numpy
 torch
 transformers
 datasets
 wandb
+gradio
+accelerate
