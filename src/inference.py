@@ -24,7 +24,6 @@ import json
 import random
 import shlex
 import traceback
-import re
 from typing import List, Dict
 from werkzeug.utils import secure_filename
 
@@ -433,6 +432,9 @@ let pollTimer = null;
 let fallbackPolling = false;
 let lastSnapshotCount = 0;
 let lastStatusMsg = "";
+let pendingSnapshots = [];
+let playbackTimer = null;
+let donePayload = null;
 let runInProgress = false;
 
 const liveText = document.getElementById('liveText');
@@ -551,9 +553,6 @@ function normalizeSQLDisplay(sql){
   if(!sql) return "(empty)";
   let s = String(sql);
   s = s.replace(/_____+/g, " ").replace(/____/g, " ");
-  s = s.replace(/(?:\b[A-Za-z0-9_]\b(?:\s+|$)){3,}/g, (m)=>m.replace(/\s+/g, ""));
-  s = s.replace(/\s+([,;)])/g, "$1");
-  s = s.replace(/([(])\s+/g, "$1");
   s = s.replace(/\s{2,}/g, " ").trim();
   return s || "(empty)";
 }
@@ -577,6 +576,9 @@ async function stopRunIfRunning() {
       await fetch('/stop/' + runId, { method:'POST' });
     } catch(_) {}
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (playbackTimer) { clearInterval(playbackTimer); playbackTimer = null; }
+    pendingSnapshots = [];
+    donePayload = null;
   }
 }
 
@@ -595,9 +597,12 @@ runForm.addEventListener('submit', async (ev)=>{
   ev.preventDefault();
   if(es){ es.close(); es=null; }
   if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
+  if(playbackTimer){ clearInterval(playbackTimer); playbackTimer=null; }
   fallbackPolling = false;
   lastSnapshotCount = 0;
   lastStatusMsg = "";
+  pendingSnapshots = [];
+  donePayload = null;
   snapshots = [];
   setStatus("Preparing run...");
   sliderRow.style.display = "none";
@@ -632,6 +637,35 @@ function applySnapshot(obj){
   const sqlOnly = normalizeSQLDisplay(obj.sql_only || extractSQL((obj.text || "").replace(/____/g,'_____')));
   animateBlurToText(sqlOnly);
   stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
+}
+
+function maybeFinalize(){
+  if(donePayload && pendingSnapshots.length === 0){
+    const payload = donePayload;
+    donePayload = null;
+    finishRun(payload);
+  }
+}
+
+function ensurePlayback(){
+  if(playbackTimer) return;
+  playbackTimer = setInterval(()=>{
+    if (pendingSnapshots.length === 0){
+      clearInterval(playbackTimer);
+      playbackTimer = null;
+      maybeFinalize();
+      return;
+    }
+    const next = pendingSnapshots.shift();
+    applySnapshot(next);
+    maybeFinalize();
+  }, 120);
+}
+
+function enqueueSnapshot(obj){
+  if(!obj) return;
+  pendingSnapshots.push(obj);
+  ensurePlayback();
 }
 
 function finishRun(payload){
@@ -669,7 +703,7 @@ async function pollRunState(id){
     }
     const data = await resp.json();
     const list = data.snapshots || [];
-    for (const snap of list) applySnapshot(snap);
+    for (const snap of list) enqueueSnapshot(snap);
     if (typeof data.snapshot_count === "number") {
       lastSnapshotCount = data.snapshot_count;
     } else {
@@ -680,7 +714,8 @@ async function pollRunState(id){
       setStatus(data.status);
     }
     if (data.done) {
-      finishRun(data);
+      donePayload = data;
+      maybeFinalize();
     }
   } catch (e) {
     setStatus("Polling exception: " + e.toString());
@@ -710,7 +745,7 @@ async function openStream(id){
   };
   es.addEventListener('snapshot', (ev)=>{
     const obj = JSON.parse(ev.data);
-    applySnapshot(obj);
+    enqueueSnapshot(obj);
     lastSnapshotCount = snapshots.length;
   });
   es.addEventListener('status', (ev)=>{
@@ -722,7 +757,8 @@ async function openStream(id){
   });
   es.addEventListener('done', async (ev)=>{
     const payload = JSON.parse(ev.data);
-    finishRun(payload || {});
+    donePayload = (payload || {});
+    maybeFinalize();
   });
 }
 
@@ -828,29 +864,17 @@ def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
 
 
-def normalize_sql_text(sql: str) -> str:
-    if not sql:
+def extract_sql_only_from_text(s: str) -> str:
+    if not s:
         return ""
-    s = sql.replace("<pad>", "").replace("____", " ").replace("_____"," ").strip()
-    # Collapse long runs of single-char tokens into normal words (e.g. "h o w" -> "how")
-    s = re.sub(
-        r"(?:\b[A-Za-z0-9_]\b(?:\s+|$)){3,}",
-        lambda m: m.group(0).replace(" ", ""),
-        s,
-    )
-    s = re.sub(r"\s+([,;)])", r"\1", s)
-    s = re.sub(r"([(])\s+", r"\1", s)
-    s = re.sub(r"\s{2,}", " ", s).strip()
-    return s
-
-
-def decode_token_ids_sql(tokenizer, token_ids: List[int]) -> str:
+    start_marker = "<SQL>"
+    end_marker = "</SQL>"
     try:
-        tokens = tokenizer.convert_ids_to_tokens(token_ids, skip_special_tokens=True)
-        text = tokenizer.convert_tokens_to_string(tokens)
-    except Exception:
-        text = tokenizer.decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    return normalize_sql_text(text)
+        start_idx = s.index(start_marker) + len(start_marker)
+        end_idx = s.index(end_marker, start_idx)
+        return s[start_idx:end_idx].strip()
+    except ValueError:
+        return s.strip()
 
 
 def update_run(run_id: str, **updates) -> None:
@@ -1198,10 +1222,10 @@ def run_denoising_generation_callback(
     REQUIRED_TAGS = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     missing = [t for t in REQUIRED_TAGS if t not in tokenizer.get_vocab()]
     if missing:
-        raise RuntimeError(
-            f"Model/tokenizer missing required special tokens: {missing}. "
-            "Use the same tokenizer/model directory that was trained for this pipeline."
-        )
+        log(f"[INFO] Adding missing special tokens: {missing}")
+        tokenizer.add_special_tokens({"additional_special_tokens": missing})
+        model.resize_token_embeddings(len(tokenizer))
+        log("[INFO] Resized embeddings")
 
     mask_token = tokenizer.mask_token
     mask_id = tokenizer.mask_token_id
@@ -1281,21 +1305,13 @@ def run_denoising_generation_callback(
     if len(modifiable_positions) == 0:
         raise RuntimeError("No modifiable SQL tokens were found (empty SQL region).")
 
-    def current_sql_only_from_ids(ids_tensor) -> str:
-        token_slice = ids_tensor[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
-        return decode_token_ids_sql(tokenizer, token_slice)
-
     mask_probs = [i / n_steps for i in range(n_steps - 1, -1, -1)]
     total_steps = len(mask_probs)
     snapshots: List[Dict] = []
     if animate:
         s0 = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-        snapshots.append({
-            "text": s0.replace(mask_token, " ____").replace("<pad>", ""),
-            "sql_only": current_sql_only_from_ids(current_ids),
-            "step": 0,
-            "total_steps": total_steps,
-        })
+        s0_clean = s0.replace(mask_token, " ____").replace("<pad>", "")
+        snapshots.append({"text": s0_clean, "sql_only": extract_sql_only_from_text(s0_clean), "step": 0, "total_steps": total_steps})
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -1327,12 +1343,8 @@ def run_denoising_generation_callback(
             current_ids = new_ids
             if animate:
                 s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-                snapshots.append({
-                    "text": s.replace(mask_token, " ____").replace("<pad>", ""),
-                    "sql_only": current_sql_only_from_ids(current_ids),
-                    "step": step_idx+1,
-                    "total_steps": total_steps,
-                })
+                s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
+                snapshots.append({"text": s_clean, "sql_only": extract_sql_only_from_text(s_clean), "step": step_idx+1, "total_steps": total_steps})
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
             break
@@ -1350,12 +1362,8 @@ def run_denoising_generation_callback(
         current_ids = next_ids
         if animate:
             s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-            snapshots.append({
-                "text": s.replace(mask_token, " ____").replace("<pad>", ""),
-                "sql_only": current_sql_only_from_ids(current_ids),
-                "step": step_idx+1,
-                "total_steps": total_steps,
-            })
+            s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
+            snapshots.append({"text": s_clean, "sql_only": extract_sql_only_from_text(s_clean), "step": step_idx+1, "total_steps": total_steps})
             if on_snapshot:
                 on_snapshot(snapshots[-1])
 
@@ -1370,10 +1378,11 @@ def run_denoising_generation_callback(
         end_marker = "</SQL>"
         start_idx = display.index(start_marker) + len(start_marker)
         end_idx = display.index(end_marker, start_idx)
-        sql_only = normalize_sql_text(display[start_idx:end_idx].strip())
+        sql_only = display[start_idx:end_idx].strip()
     except ValueError:
         token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
-        sql_only = decode_token_ids_sql(tokenizer, token_slice)
+        sql_only = tokenizer.decode(token_slice, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        sql_only = sql_only.replace("____", "")
 
 
     if not animate:
