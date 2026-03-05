@@ -3,6 +3,8 @@ Pillow
 numpy
 torch
 transformers
+sentencepiece
+tiktoken
 datasets
 wandb
 gradio

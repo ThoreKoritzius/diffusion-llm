@@ -37,7 +37,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 import numpy as np
 import torch
-from transformers import RobertaTokenizerFast, RobertaForMaskedLM
+from transformers import AutoTokenizer, RobertaTokenizer, RobertaForMaskedLM
 from queue import Queue, Empty
 
 # -------------------------
@@ -916,12 +916,26 @@ def validate_model_dir(model_dir: str) -> tuple[bool, str]:
     cached = MODEL_VALIDATION_CACHE.get(model_dir)
     if cached:
         return cached["ok"], cached["msg"]
+    tokenizer = None
+    tok_err = None
     try:
-        tokenizer = RobertaTokenizerFast.from_pretrained(model_dir)
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
     except Exception as e:
-        ok, msg = False, f"failed loading tokenizer from {model_dir}: {e}"
-        MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
-        return ok, msg
+        tok_err = e
+    if tokenizer is None:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
+        except Exception as e:
+            tok_err_slow = e
+            try:
+                tokenizer = RobertaTokenizer.from_pretrained(model_dir)
+            except Exception as e_roberta:
+                ok, msg = False, (
+                    f"failed loading tokenizer from {model_dir}: {e_roberta}. "
+                    f"fast-tokenizer error was: {tok_err}; slow AutoTokenizer error was: {tok_err_slow}"
+                )
+                MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+                return ok, msg
 
     required = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     vocab = tokenizer.get_vocab()
@@ -1203,7 +1217,14 @@ def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), inter
 def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
     if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["tokenizer"] is not None and MODEL_CACHE["model"] is not None:
         return MODEL_CACHE["tokenizer"], MODEL_CACHE["model"]
-    tokenizer = RobertaTokenizerFast.from_pretrained(model_dir)
+    tokenizer = None
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+    except Exception:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
+        except Exception:
+            tokenizer = RobertaTokenizer.from_pretrained(model_dir)
     tokenizer.model_max_length = max_len
     model = RobertaForMaskedLM.from_pretrained(model_dir)
     model.to(torch.device("cuda") if torch.cuda.is_available() else (torch.device("mps") if torch.backends.mps.is_available() and torch.backends.mps.is_built() else torch.device("cpu")))
