@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-ttl-seconds", type=int, default=900)
     parser.add_argument("--worker", action="store_true", help="Run worker loop instead of web server")
     parser.add_argument("--redis-url", type=str, default=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
+    parser.add_argument("--inference-dtype", type=str, default=os.environ.get("INFERENCE_DTYPE", "fp16"), choices=["fp16", "fp32", "bf16", "auto"], help="Preferred model dtype for inference")
     return parser
 
 
@@ -97,6 +98,7 @@ ENABLE_GIF = bool(args.enable_gif)
 RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
 IS_WORKER = bool(args.worker)
 REDIS_URL = args.redis_url
+INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
 
 # -------------------------
 # Flask app & template
@@ -122,6 +124,7 @@ limiter = Limiter(
 # -------------------------
 MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}
 MODEL_VALIDATION_CACHE: Dict[str, Dict] = {}
+MODEL_INFO_CACHE: Dict[str, Dict] = {}
 OUT_DIR = os.path.join(os.path.abspath("."), "generated_gifs")
 REDIS_CLIENT = None
 
@@ -164,6 +167,14 @@ def extract_sql_only_from_text(s: str) -> str:
         return s[start_idx:end_idx].strip()
     except ValueError:
         return s.strip()
+
+
+def strip_final_masks(sql_text: str) -> str:
+    if not sql_text:
+        return ""
+    cleaned = sql_text.replace("____", "")
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip()
 
 
 def to_redis_value(v):
@@ -281,6 +292,25 @@ def estimate_eta_seconds(position: int | None) -> int | None:
     return max(1, int(round(avg * position)))
 
 
+def estimate_eta_confidence(position: int | None, eta_seconds: int | None) -> str:
+    if position is None or eta_seconds is None:
+        return "low"
+    if position <= 1:
+        return "high"
+    raw = get_redis().hget(METRICS_KEY, "avg_duration")
+    if raw is None:
+        return "low"
+    try:
+        avg = float(raw)
+    except ValueError:
+        return "low"
+    if avg <= 0:
+        return "low"
+    if position <= 3:
+        return "medium"
+    return "low"
+
+
 def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
     default = (1400, 900)
     if not gif_size_text:
@@ -296,6 +326,65 @@ def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
 
 def set_run_terminal(run_id: str, state: str, status: str) -> None:
     redis_update_run(run_id, state=state, status=status, done=True, finished_at=now_ts())
+
+
+def get_inference_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def resolve_model_dtype(device: torch.device) -> tuple[torch.dtype, str]:
+    requested = INFERENCE_DTYPE
+    if requested == "auto":
+        requested = "fp16" if device.type in ("cuda", "mps") else "fp32"
+    if requested == "fp16":
+        if device.type == "cpu":
+            return torch.float32, "fp32(cpu-fallback)"
+        return torch.float16, "fp16"
+    if requested == "bf16":
+        if device.type == "cpu":
+            return torch.bfloat16, "bf16"
+        if device.type == "cuda" and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+            return torch.bfloat16, "bf16"
+        return torch.float32, "fp32(fallback)"
+    return torch.float32, "fp32"
+
+
+def format_param_count(n: int | None) -> str:
+    if not n or n <= 0:
+        return "unknown"
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.2f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def get_model_info(model_dir: str) -> Dict:
+    cached = MODEL_INFO_CACHE.get(model_dir)
+    if cached:
+        return cached
+    info = {
+        "param_count": None,
+        "param_count_display": "unknown",
+    }
+    try:
+        if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["model"] is not None:
+            model = MODEL_CACHE["model"]
+        else:
+            model = RobertaForMaskedLM.from_pretrained(model_dir)
+        param_count = int(sum(p.numel() for p in model.parameters()))
+        info["param_count"] = param_count
+        info["param_count_display"] = format_param_count(param_count)
+    except Exception:
+        pass
+    MODEL_INFO_CACHE[model_dir] = info
+    return info
 
 
 def validate_model_dir(model_dir: str) -> tuple[bool, str]:
@@ -401,7 +490,8 @@ def process_run(run_id: str) -> None:
             deterministic_seed=DEFAULT_SEED,
             should_stop=should_stop,
         )
-        redis_update_run(run_id, sql_only=res.get("sql_only"), display=res.get("display"))
+        final_sql = strip_final_masks(res.get("sql_only", ""))
+        redis_update_run(run_id, sql_only=final_sql, display=res.get("display"))
 
         if ENABLE_GIF and not should_stop():
             os.makedirs(OUT_DIR, exist_ok=True)
@@ -632,8 +722,14 @@ def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
         except Exception:
             tokenizer = RobertaTokenizer.from_pretrained(model_dir)
     tokenizer.model_max_length = max_len
-    model = RobertaForMaskedLM.from_pretrained(model_dir)
-    model.to(torch.device("cuda") if torch.cuda.is_available() else (torch.device("mps") if torch.backends.mps.is_available() and torch.backends.mps.is_built() else torch.device("cpu")))
+    device = get_inference_device()
+    dtype, _dtype_label = resolve_model_dtype(device)
+    try:
+        model = RobertaForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
+    except Exception:
+        model = RobertaForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32)
+        dtype = torch.float32
+    model.to(device)
     model.eval()
     MODEL_CACHE.update({"dir": model_dir, "tokenizer": tokenizer, "model": model})
     return tokenizer, model
@@ -840,6 +936,7 @@ def run_denoising_generation_callback(
         sql_only = tokenizer.decode(token_slice, skip_special_tokens=True, clean_up_tokenization_spaces=True)
         sql_only = sql_only.replace("____", "")
 
+    sql_only = strip_final_masks(sql_only)
 
     if not animate:
         snapshots = [{"text": display, "sql_only": sql_only, "step": total_steps, "total_steps": total_steps}]
@@ -909,11 +1006,17 @@ def healthz():
 def index():
     default_prompt = "how many planes are of name a380?"
     default_context = "CREATE TABLE planes (id INT, name TEXT)"
+    model_info = get_model_info(DEFAULT_MODEL_DIR)
+    effective_dtype = resolve_model_dtype(get_inference_device())[1]
     return render_template(
         "inference.html",
         prompt_prefill=args.prompt or default_prompt,
         context_prefill=args.context or default_context,
         model_dir=DEFAULT_MODEL_DIR or "",
+        model_param_count=model_info.get("param_count"),
+        model_param_count_display=model_info.get("param_count_display", "unknown"),
+        inference_dtype_requested=INFERENCE_DTYPE,
+        inference_dtype_effective=effective_dtype,
     )
 
 
@@ -997,11 +1100,13 @@ def start_run():
     if pos is None:
         pos = 1
     eta = estimate_eta_seconds(pos)
+    eta_confidence = estimate_eta_confidence(pos, eta)
     return jsonify({
         "run_id": run_id,
         "state": "queued",
         "queue_position": pos,
         "eta_seconds": eta,
+        "eta_confidence": eta_confidence,
         "queue_token": run_id,
     })
 
@@ -1072,6 +1177,7 @@ def run_state(run_id):
     pos = queue_position(run_id) if run.get("state") == "queued" else None
     if run.get("state") == "queued" and pos is None:
         pos = 1
+    eta = estimate_eta_seconds(pos)
     return jsonify({
         "run_id": run_id,
         "state": run.get("state"),
@@ -1082,7 +1188,8 @@ def run_state(run_id):
         "snapshot_count": snap_count,
         "snapshots": delta,
         "queue_position": pos,
-        "eta_seconds": estimate_eta_seconds(pos),
+        "eta_seconds": eta,
+        "eta_confidence": estimate_eta_confidence(pos, eta),
         "started_at": run.get("started_at"),
         "finished_at": run.get("finished_at"),
     })
@@ -1097,11 +1204,13 @@ def queue_state(run_id):
     pos = queue_position(run_id) if run.get("state") == "queued" else None
     if run.get("state") == "queued" and pos is None:
         pos = 1
+    eta = estimate_eta_seconds(pos)
     return jsonify({
         "run_id": run_id,
         "state": run.get("state"),
         "queue_position": pos,
-        "eta_seconds": estimate_eta_seconds(pos),
+        "eta_seconds": eta,
+        "eta_confidence": estimate_eta_confidence(pos, eta),
         "active_worker_count": active_worker_count(),
     })
 
