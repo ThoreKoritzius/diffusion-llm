@@ -101,7 +101,11 @@ REDIS_URL = args.redis_url
 # -------------------------
 # Flask app & template
 # -------------------------
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+    static_url_path="/static",
+)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 limiter = Limiter(
@@ -142,13 +146,29 @@ TEMPLATE = r"""
     .label { font-weight:700; margin-bottom:6px; font-size:13px; color:#0b1220; display:block; }
     input[type=text], textarea, input[type=number], select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #e6eef7; font-size:14px; box-sizing:border-box; }
     textarea { min-height:80px; resize:vertical; font-family:inherit; }
-    .btn { background:var(--accent); color:white; border:none; padding:12px 16px; border-radius:10px; cursor:pointer; font-weight:700; font-size:15px; width:100%; }
+    .btn { background:var(--accent); color:white; border:none; padding:12px 16px; border-radius:10px; cursor:pointer; font-weight:700; font-size:15px; width:100%; position:relative; overflow:hidden; }
+    .btn.btn-queued { background:#b46a08; animation: btnShiver 900ms ease-in-out infinite; }
+    .btn.btn-running { background:#0a6dd9; animation: btnPulse 1200ms ease-in-out infinite; }
+    .btn.btn-stopping { background:#8b1f1f; animation:none; opacity:0.92; }
+    .btn .btn-progress-bar { position:absolute; left:0; bottom:0; height:4px; background:rgba(255,255,255,0.86); width:0%; opacity:0; transition:width 220ms linear, opacity 120ms ease; }
     .btn-ghost { background:transparent; color:var(--accent); border:1px solid #e6eef7; padding:10px 12px; border-radius:8px; cursor:pointer; }
     .small { font-size:13px; color:var(--muted); }
     .status { margin-top:6px; background:#ffffff; padding:8px; border-radius:8px; font-family:var(--mono); font-size:13px; max-height:120px; overflow:auto; white-space:pre-wrap; border:1px solid #f0f6ff; }
     .gif-area { margin-top:8px; display:flex; gap:8px; align-items:center; }
     .controls-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     .footer { color:var(--muted); font-size:13px; margin-top:6px; }
+    @keyframes btnPulse {
+      0% { transform: translateY(0); filter: saturate(1.0); }
+      50% { transform: translateY(-1px); filter: saturate(1.2); }
+      100% { transform: translateY(0); filter: saturate(1.0); }
+    }
+    @keyframes btnShiver {
+      0% { transform: translateX(0); }
+      25% { transform: translateX(1px); }
+      50% { transform: translateX(-1px); }
+      75% { transform: translateX(1px); }
+      100% { transform: translateX(0); }
+    }
     @media (max-width: 980px) {
       .live-large { flex-direction:column; min-height:55vh; }
       .right-col { width:100%; }
@@ -428,486 +448,12 @@ TEMPLATE = r"""
             <div id="status" class="status">Idle.</div>
           </div>
 
-          <div>
-            <div class="small" style="margin-bottom:6px;">Download GIF</div>
-            <div class="gif-area">
-              <a id="gifLink" class="btn-ghost" href="#" style="display:none;" download>Download GIF</a>
-            </div>
-          </div>
         </div>
       </div>
     </div>
   </div>
 
-<script>
-let runId = null;
-let es = null;
-let historySnapshots = [];
-let pollTimer = null;
-let pollDelayMs = 250;
-let fallbackPolling = false;
-let lastSnapshotCount = 0;
-let lastStatusMsg = "";
-let pendingSnapshots = [];
-let playbackTimer = null;
-let donePayload = null;
-let runInProgress = false;
-
-const liveText = document.getElementById('liveText');
-const stepBox = document.getElementById('stepBox');
-const statusBox = document.getElementById('status');
-const gifLink = document.getElementById('gifLink');
-const runBtn = document.getElementById('runBtn');
-const runForm = document.getElementById('runForm');
-const sliderRow = document.getElementById('sliderRow');
-const snapSlider = document.getElementById('snapSlider');
-const snapSliderLabel = document.getElementById('snapSliderLabel');
-const queueChip = document.getElementById('queueChip');
-
-function setStatus(s){ statusBox.textContent = s; }
-const liveFront = document.getElementById('liveTextFront');
-const liveBack = document.getElementById('liveTextBack');
-
-function fitLiveFontForElem(elem) {
-  const container = elem.parentElement;
-  let width = container.clientWidth - 40;
-  if (window.innerWidth <= 600) {
-    width = Math.max(180, width * 0.9);
-  }
-  const lines = (elem.textContent || "").split("\n");
-  const longest = lines.reduce((a,b)=> Math.max(a, b.length), 0) || 40;
-
-  // Responsive formula: larger min on desktop, smaller min on mobile.
-  let minFont = window.innerWidth < 600 ? 14 : 24;
-  let maxFont = window.innerWidth < 600 ? 28 : 96;
-  let candidate = Math.floor(Math.max(
-    minFont, 
-    Math.min(maxFont, width / Math.max(8, longest) * 2.2)
-  ));
-  elem.style.fontSize = candidate + "px";
-}
-
-// global helper used by resize
-function fitLiveFont(){
-  fitLiveFontForElem(liveFront);
-  fitLiveFontForElem(liveBack);
-}
-
-window.addEventListener('resize', fitLiveFont);
-
-// animate blur/unblur transition
-let animating = false;
-function animateBlurToText(newText){
-  if(animating){
-    // quick fallback: stop current animation and show text
-    liveFront.style.transition = "";
-    liveBack.style.transition = "";
-    liveFront.textContent = newText;
-    fitLiveFontForElem(liveFront);
-    // restore transitions
-    setTimeout(()=> {
-      liveFront.style.transition = "";
-      liveBack.style.transition = "";
-    }, 20);
-    animating = false;
-    return;
-  }
-
-  // prepare back with the new text
-  liveBack.textContent = newText || "";
-  fitLiveFontForElem(liveBack);
-
-  // initial visual state for back
-  const blurMax = 4;
-  liveBack.style.filter = `blur(${blurMax}px)`;
-  liveBack.style.opacity = "0";
-  // ensure ordering
-  liveBack.style.zIndex = 2;
-  liveFront.style.zIndex = 1;
-
-  // trigger reflow so transition occurs
-  // then animate: back -> blur 0, opacity 1 ; front -> opacity 0
-  requestAnimationFrame(()=> {
-    liveBack.style.transition = "filter 420ms cubic-bezier(.2,.9,.2,1), opacity 420ms cubic-bezier(.2,.9,.2,1)";
-    liveFront.style.transition = "opacity 420ms cubic-bezier(.2,.9,.2,1)";
-    // target states
-    liveBack.style.filter = "blur(0px)";
-    liveBack.style.opacity = "1";
-    liveFront.style.opacity = "0";
-    animating = true;
-
-    // after transition, swap content & reset styles
-    setTimeout(()=> {
-      // put new text into front and reset back
-      liveFront.textContent = newText || "";
-      fitLiveFontForElem(liveFront);
-      liveFront.style.opacity = "1";
-      liveFront.style.transition = "";
-      liveFront.style.filter = "none";
-      liveFront.style.zIndex = 2;
-
-      liveBack.style.opacity = "0";
-      liveBack.style.filter = `blur(${blurMax}px)`;
-      liveBack.style.transition = "";
-      liveBack.style.zIndex = 1;
-      animating = false;
-    }, 460);
-  });
-}
-
-window.addEventListener('resize', fitLiveFont);
-
-function extractSQL(s){
-  const start = s.indexOf("<SQL>");
-  const end = s.indexOf("</SQL>");
-  if(start !== -1 && end !== -1){
-    return s.substring(start+5, end).trim();
-  }
-  return s;
-}
-
-function normalizeSQLDisplay(sql){
-  if(!sql) return "(empty)";
-  let s = String(sql);
-  s = s.replace(/_____+/g, "_____");
-  s = s.replace(/\s{2,}/g, " ").trim();
-  return s || "(empty)";
-}
-
-function setQueueChip(text) {
-  if (!text) {
-    queueChip.style.display = "none";
-    queueChip.textContent = "";
-    return;
-  }
-  queueChip.style.display = "block";
-  queueChip.textContent = text;
-}
-
-function setBtnStateRunning(label) {
-  runInProgress = true;
-  runBtn.textContent = label || "Stop Generation";
-  runBtn.disabled = false;
-}
-function setBtnStateIdle() {
-  runInProgress = false;
-  runBtn.textContent = "Run Generation";
-  runBtn.disabled = false;
-  setQueueChip("");
-}
-
-function updateRunUx(state, queuePos, etaSeconds, statusMsg){
-  if (state === "queued") {
-    const pos = queuePos ? `#${queuePos}` : "#?";
-    const eta = etaSeconds ? `~${etaSeconds}s` : "~estimating";
-    setBtnStateRunning(`Cancel • Queued ${pos} ${eta}`);
-    setQueueChip(`Queued ${pos} ${eta}`);
-    return;
-  }
-  if (state === "running") {
-    if (statusMsg && statusMsg.startsWith("step ")) {
-      setBtnStateRunning(`Stop • ${statusMsg}`);
-      setQueueChip(`Running (${statusMsg})`);
-    } else {
-      setBtnStateRunning("Stop • Running…");
-      setQueueChip("Running");
-    }
-    return;
-  }
-  if (state === "stopping") {
-    setBtnStateRunning("Stopping…");
-    setQueueChip("Stopping");
-    return;
-  }
-  setBtnStateIdle();
-}
-
-async function stopRunIfRunning() {
-  if (runId) {
-    runBtn.disabled = true;
-    setStatus("Stopping...");
-    try {
-      await fetch('/stop/' + runId, { method:'POST' });
-    } catch(_) {}
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    if (playbackTimer) { clearInterval(playbackTimer); playbackTimer = null; }
-    pendingSnapshots = [];
-    donePayload = null;
-  }
-}
-
-runBtn.onclick = async function(ev) {
-  // This manually handles both submit and "stop" actions.
-  if (runInProgress) {
-    ev.preventDefault();
-    await stopRunIfRunning();
-    // Button stays disabled until stream closes.
-    return;
-  }
-  // Otherwise, allow form submit!
-};
-
-runForm.addEventListener('submit', async (ev)=>{
-  ev.preventDefault();
-  if(es){ es.close(); es=null; }
-  if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
-  if(playbackTimer){ clearInterval(playbackTimer); playbackTimer=null; }
-  fallbackPolling = false;
-  lastSnapshotCount = 0;
-  lastStatusMsg = "";
-  pendingSnapshots = [];
-  donePayload = null;
-  historySnapshots = [];
-  setStatus("Preparing run...");
-  sliderRow.style.display = "none";
-
-  gifLink.style.display = "none";
-
-  setBtnStateRunning("Cancel • Queued");
-
-  const form = new FormData(ev.target);
-  setStatus("Sending run request to server (deterministic)...");
-  try {
-    const resp = await fetch('/start', { method:'POST', body: form });
-    if(!resp.ok){
-      const txt = await resp.text();
-      setStatus("ERROR: " + resp.status + " - " + txt);
-      setBtnStateIdle();
-      return;
-    }
-    const j = await resp.json();
-    runId = j.run_id;
-    updateRunUx(j.state, j.queue_position, j.eta_seconds, "");
-    setStatus("Run started (id: " + runId + "). Streaming updates...");
-    openStream(runId);
-  } catch(e){
-    setStatus("Exception starting run: " + e.toString());
-    setBtnStateIdle();
-  }
-});
-
-function applySnapshot(obj){
-  if (!obj) return;
-  const sqlOnly = normalizeSQLDisplay(obj.sql_only || extractSQL((obj.text || "").replace(/____/g,'_____')));
-  animateBlurToText(sqlOnly);
-  stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
-}
-
-function maybeFinalize(){
-  if(donePayload && pendingSnapshots.length === 0){
-    const payload = donePayload;
-    donePayload = null;
-    finishRun(payload);
-  }
-}
-
-function ensurePlayback(){
-  if(playbackTimer) return;
-  playbackTimer = setInterval(()=>{
-    if (pendingSnapshots.length === 0){
-      clearInterval(playbackTimer);
-      playbackTimer = null;
-      maybeFinalize();
-      return;
-    }
-    const next = pendingSnapshots.shift();
-    applySnapshot(next);
-    maybeFinalize();
-  }, 120);
-}
-
-function enqueueSnapshot(obj){
-  if(!obj) return;
-  pendingSnapshots.push(obj);
-  ensurePlayback();
-}
-
-function finishRun(payload){
-  setStatus("Run finished.");
-  if(payload && payload.gif_url){
-    gifLink.href = payload.gif_url;
-    const fname = payload.gif_url.split('/').pop() || 'generation.gif';
-    gifLink.download = fname;
-    gifLink.style.display = "inline-block";
-    gifLink.textContent = "Download GIF";
-  } else {
-    gifLink.style.display = "none";
-  }
-  if(es){ es.close(); es=null; }
-  if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
-  setBtnStateIdle();
-  runId = null;
-
-  if (historySnapshots.length > 1) {
-    snapSlider.max = (historySnapshots.length - 1).toString();
-    snapSlider.value = snapSlider.max;
-    sliderRow.style.display = "flex";
-    updateSliderLabel();
-  } else {
-    sliderRow.style.display = "none";
-  }
-}
-
-async function pollRunState(id){
-  try {
-    const resp = await fetch('/run/' + id + '?after=' + encodeURIComponent(lastSnapshotCount), { cache: 'no-store' });
-    if(!resp.ok){
-      setStatus("Polling failed: HTTP " + resp.status);
-      return;
-    }
-    const data = await resp.json();
-    const list = data.snapshots || [];
-    for (const snap of list) historySnapshots.push(snap);
-    if (list.length === 1) {
-      enqueueSnapshot(list[0]);
-    } else if (list.length > 1) {
-      enqueueSnapshot(list[0]);
-      enqueueSnapshot(list[list.length - 1]);
-    }
-    if (typeof data.snapshot_count === "number") {
-      lastSnapshotCount = data.snapshot_count;
-    } else {
-      lastSnapshotCount += list.length;
-    }
-    updateRunUx(data.state, data.queue_position, data.eta_seconds, data.status || "");
-    pollDelayMs = (data.state === "queued") ? 800 : 250;
-    if (data.status && data.status !== lastStatusMsg) {
-      lastStatusMsg = data.status;
-      setStatus(data.status);
-    }
-    if (data.done) {
-      donePayload = data;
-      maybeFinalize();
-    }
-  } catch (e) {
-    console.warn("Polling exception", e);
-  }
-}
-
-function startPollingFallback(id){
-  if (fallbackPolling) return;
-  fallbackPolling = true;
-  if(es){ es.close(); es=null; }
-  setStatus("SSE unavailable via proxy. Switched to polling fallback.");
-  const loop = async ()=>{
-    if (!fallbackPolling) return;
-    await pollRunState(id);
-    if (!fallbackPolling) return;
-    pollTimer = setTimeout(loop, pollDelayMs);
-  };
-  loop();
-}
-
-async function openStream(id){
-  if(es){ es.close(); es=null; }
-  es = new EventSource('/stream/' + id);
-  es.onopen = ()=> console.log("SSE opened");
-  es.onerror = (e)=>{
-    console.warn("SSE error", e);
-    const state = es ? es.readyState : -1;
-    setStatus("SSE connection error (state " + state + "). Falling back to polling.");
-    startPollingFallback(id);
-  };
-  es.addEventListener('snapshot', (ev)=>{
-    const obj = JSON.parse(ev.data);
-    historySnapshots.push(obj);
-    enqueueSnapshot(obj);
-    lastSnapshotCount = historySnapshots.length;
-  });
-  es.addEventListener('status', (ev)=>{
-    const info = JSON.parse(ev.data);
-    if (info && info.msg) {
-      lastStatusMsg = info.msg;
-      setStatus(info.msg);
-      updateRunUx("running", null, null, info.msg);
-    }
-  });
-  es.addEventListener('done', async (ev)=>{
-    const payload = JSON.parse(ev.data);
-    donePayload = (payload || {});
-    maybeFinalize();
-  });
-}
-
-function updateSliderLabel() {
-  if (!historySnapshots.length) {
-    snapSliderLabel.innerText = "";
-    return;
-  }
-  const idx = parseInt(snapSlider.value);
-  const snap = historySnapshots[idx] || {};
-  snapSliderLabel.innerText = `Step ${snap.step || (idx+1)} / ${snap.total_steps || historySnapshots.length}`;
-}
-
-// User moves slider => show that snapshot
-snapSlider.addEventListener('input', ()=>{
-  if (!historySnapshots.length) return;
-  const idx = parseInt(snapSlider.value);
-  const snap = historySnapshots[idx];
-  const sqlOnly = normalizeSQLDisplay(snap.sql_only || extractSQL((snap.text || "").replace(/____/g,'_____')));
-  animateBlurToText(sqlOnly);
-  stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
-  updateSliderLabel();
-});
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.onclick = function() {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-btn-active'));
-    btn.classList.add('tab-btn-active');
-    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('tab-pane-active'));
-    document.getElementById('tab-' + btn.dataset.tab).classList.add('tab-pane-active');
-  }
-});
-
-document.getElementById('csvInput').addEventListener('change', function(ev){
-  const file = ev.target.files[0];
-  if(!file) return;
-  const reader = new FileReader();
-  reader.onload = function(e){
-    processCSV(e.target.result);
-  };
-  reader.readAsText(file);
-});
-
-// Guess data types from first nonempty data row
-function guessType(val){
-  if(/^[\d]+$/.test(val)) return "INT";
-  if(/^[\d\.]+$/.test(val) && val.includes('.')) return "FLOAT";
-  return "TEXT";
-}
-function processCSV(text){
-  const lines = text.trim().split(/\r?\n/);
-  if(!lines.length) return;
-  const headers = lines[0].split(",");
-  // Find first "valid" data row for type inference
-  let dataRow = null;
-  for(let i=1;i<lines.length;i++){
-    if(lines[i].trim()) {
-      dataRow = lines[i].split(",");
-      break;
-    }
-  }
-  if(!dataRow) dataRow = headers.map(x=>"");
-  let types = dataRow.map(guessType);
-  // Table preview (first 30, min 5 rows)
-  let dataRows = lines.slice(1).map(r=>r.split(",")).slice(0,30);
-  let html = '<table><thead><tr>' +
-    headers.map(h=>`<th>${h}</th>`).join("") + '</tr></thead><tbody>';
-  if(!dataRows.length){html+='<tr><td colspan="'+headers.length+'"><em>No data rows</em></td></tr>';}
-  dataRows.forEach(row=>{
-    html+='<tr>'+headers.map((_,i)=>`<td>${row[i]!==undefined?row[i]:""}</td>`).join("")+'</tr>';
-  });
-  html+='</tbody></table>';
-  document.getElementById('csvTableWrapper').innerHTML = html;
-
-  // CREATE TABLE SQL (not displayed, but set in context)
-  let colDefs = headers.map((h,i)=>`  ${h} ${types[i]||"TEXT"}`).join(",\n");
-  let create = `CREATE TABLE table_name (\n${colDefs}\n);`
-  if(document.getElementById('context')) {
-    document.getElementById('context').value = create;
-  }
-}
-
-</script>
+<script src="/static/inference.js"></script>
 </body>
 </html>
 """
@@ -1122,10 +668,24 @@ def validate_model_dir(model_dir: str) -> tuple[bool, str]:
     vocab = tokenizer.get_vocab()
     missing = [t for t in required if t not in vocab]
     if missing:
+        ok, msg = True, (
+            f"tokenizer missing special tokens {missing}; "
+            "inference will add them dynamically to match train.py behavior."
+        )
+        MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+        return ok, msg
+
+    weight_candidates = [
+        "model.safetensors",
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+    ]
+    has_weights = any(os.path.isfile(os.path.join(model_dir, name)) for name in weight_candidates)
+    if not has_weights:
         ok, msg = False, (
-            "model/tokenizer is incompatible with this inference pipeline. "
-            f"missing special tokens: {missing}. "
-            "Mount the trained diffusion model directory (not a base RoBERTa checkpoint)."
+            f"model weights not found in {model_dir}. "
+            "Expected one of: model.safetensors, pytorch_model.bin, pytorch_model.bin.index.json. "
+            "Mount the trained diffusion model output directory."
         )
         MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
         return ok, msg
@@ -1459,10 +1019,10 @@ def run_denoising_generation_callback(
     REQUIRED_TAGS = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     missing = [t for t in REQUIRED_TAGS if t not in tokenizer.get_vocab()]
     if missing:
-        raise RuntimeError(
-            "Tokenizer/model mismatch: missing required special tokens "
-            f"{missing}. Use the exact trained model directory."
-        )
+        log(f"[INFO] Adding missing special tokens at inference-time: {missing}")
+        tokenizer.add_special_tokens({"additional_special_tokens": missing})
+        model.resize_token_embeddings(len(tokenizer))
+        log("[INFO] Resized model embeddings for added tokens")
 
     mask_token = tokenizer.mask_token
     mask_id = tokenizer.mask_token_id
@@ -1768,6 +1328,8 @@ def start_run():
     })
     r.rpush(QUEUE_KEY, run_id)
     pos = queue_position(run_id)
+    if pos is None:
+        pos = 1
     eta = estimate_eta_seconds(pos)
     return jsonify({
         "run_id": run_id,
@@ -1809,6 +1371,7 @@ def stream(run_id):
                 "sql_only": run_now.get("sql_only"),
                 "gif_url": run_now.get("gif_url"),
                 "state": run_now.get("state"),
+                "status": run_now.get("status"),
             }
             if is_done and not done_sent:
                 yield f"event: done\\ndata: {json.dumps(payload)}\\n\\n"
@@ -1841,6 +1404,8 @@ def run_state(run_id):
         return jsonify({"error": "not_found", "message": "run_id not found"}), 404
     snap_count, delta = redis_get_snapshot_delta(run_id, after_idx)
     pos = queue_position(run_id) if run.get("state") == "queued" else None
+    if run.get("state") == "queued" and pos is None:
+        pos = 1
     return jsonify({
         "run_id": run_id,
         "state": run.get("state"),
@@ -1864,6 +1429,8 @@ def queue_state(run_id):
     if not run:
         return jsonify({"error": "not_found", "message": "run_id not found"}), 404
     pos = queue_position(run_id) if run.get("state") == "queued" else None
+    if run.get("state") == "queued" and pos is None:
+        pos = 1
     return jsonify({
         "run_id": run_id,
         "state": run.get("state"),
