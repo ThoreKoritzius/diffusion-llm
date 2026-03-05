@@ -718,7 +718,7 @@ async function pollRunState(id){
       maybeFinalize();
     }
   } catch (e) {
-    setStatus("Polling exception: " + e.toString());
+    console.warn("Polling exception", e);
   }
 }
 
@@ -853,6 +853,7 @@ RUNS_LOCK = threading.RLock()
 RUN_QUEUE: Queue = Queue(maxsize=MAX_QUEUED_RUNS)
 RUN_SEMAPHORE = threading.BoundedSemaphore(value=MAX_CONCURRENT_RUNS)
 MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}
+MODEL_VALIDATION_CACHE: Dict[str, Dict] = {}
 OUT_DIR = os.path.join(os.path.abspath("."), "generated_gifs")
 
 
@@ -909,6 +910,34 @@ def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
 
 def set_run_terminal(run_id: str, state: str, status: str) -> None:
     update_run(run_id, state=state, status=status, done=True, finished_at=now_ts())
+
+
+def validate_model_dir(model_dir: str) -> tuple[bool, str]:
+    cached = MODEL_VALIDATION_CACHE.get(model_dir)
+    if cached:
+        return cached["ok"], cached["msg"]
+    try:
+        tokenizer = RobertaTokenizerFast.from_pretrained(model_dir)
+    except Exception as e:
+        ok, msg = False, f"failed loading tokenizer from {model_dir}: {e}"
+        MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+        return ok, msg
+
+    required = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
+    vocab = tokenizer.get_vocab()
+    missing = [t for t in required if t not in vocab]
+    if missing:
+        ok, msg = False, (
+            "model/tokenizer is incompatible with this inference pipeline. "
+            f"missing special tokens: {missing}. "
+            "Mount the trained diffusion model directory (not a base RoBERTa checkpoint)."
+        )
+        MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+        return ok, msg
+
+    ok, msg = True, "ok"
+    MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+    return ok, msg
 
 
 def build_should_stop_cb(run_id: str, start_time: float):
@@ -1222,10 +1251,10 @@ def run_denoising_generation_callback(
     REQUIRED_TAGS = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     missing = [t for t in REQUIRED_TAGS if t not in tokenizer.get_vocab()]
     if missing:
-        log(f"[INFO] Adding missing special tokens: {missing}")
-        tokenizer.add_special_tokens({"additional_special_tokens": missing})
-        model.resize_token_embeddings(len(tokenizer))
-        log("[INFO] Resized embeddings")
+        raise RuntimeError(
+            "Tokenizer/model mismatch: missing required special tokens "
+            f"{missing}. Use the exact trained model directory."
+        )
 
     mask_token = tokenizer.mask_token
     mask_id = tokenizer.mask_token_id
@@ -1468,6 +1497,9 @@ def start_run():
         return jsonify({"error": "invalid_input", "message": f"Context too long (>{MAX_CONTEXT_CHARS} chars)"}), 400
     if not os.path.isdir(model_dir):
         return jsonify({"error": "invalid_input", "message": f"Model dir not found: {model_dir}"}), 400
+    model_ok, model_msg = validate_model_dir(model_dir)
+    if not model_ok:
+        return jsonify({"error": "invalid_model", "message": model_msg}), 400
     if steps < 1 or steps > MAX_STEPS:
         return jsonify({"error": "invalid_input", "message": f"steps must be 1..{MAX_STEPS}"}), 400
     if max_len < 8 or max_len > MAX_MAX_LEN:
