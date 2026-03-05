@@ -159,27 +159,52 @@
       justify-content: center;
     }
 
-    #liveTextWrapper {
+    #liveTokenDisplay {
       width: 100%;
-      min-height: 120px;
-      position: relative;
     }
 
-    .sql-display {
+    #liveTokenPre {
       margin: 0;
-      position: absolute;
-      inset: 0;
       font-family: var(--mono);
       font-weight: 700;
       white-space: pre-wrap;
       word-break: break-word;
       color: #101a2e;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      text-align: left;
-      transition: filter 200ms ease, opacity 200ms ease;
-      will-change: filter, opacity;
+      line-height: 1.6;
+    }
+
+    .tok {
+      display: inline;
+      transition: opacity 180ms ease;
+    }
+
+    .tok.masked {
+      display: inline-block;
+      border-radius: 3px;
+      background: linear-gradient(
+        90deg,
+        #b0bfd6 0%,
+        #d0dff0 45%,
+        #b0bfd6 100%
+      );
+      background-size: 250% 100%;
+      animation: tok-shimmer 1.2s ease-in-out infinite;
+      color: transparent;
+      vertical-align: middle;
+      min-height: 1em;
+    }
+
+    .tok.resolving {
+      opacity: 0;
+    }
+
+    .tok.resolved {
+      opacity: 1;
+    }
+
+    @keyframes tok-shimmer {
+      0%   { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
     }
 
     .slider-row {
@@ -550,9 +575,8 @@
         grid-template-columns: 1fr;
       }
 
-      .sql-display {
-        align-items: flex-start;
-        justify-content: flex-start;
+      #liveTokenPre {
+        text-align: left;
       }
     }
 
@@ -583,9 +607,8 @@
           <div class="queue-chip" id="queueChip" aria-live="polite"></div>
 
           <div class="live-box" id="liveBox" aria-live="polite">
-            <div id="liveTextWrapper">
-              <pre id="liveTextFront" class="sql-display">Ready for generation. Submit a prompt to start.</pre>
-              <pre id="liveTextBack" class="sql-display" style="opacity:0; filter:blur(8px);"> </pre>
+            <div id="liveTokenDisplay">
+              <pre id="liveTokenPre">Ready for generation. Submit a prompt to start.</pre>
             </div>
           </div>
 

@@ -35,8 +35,7 @@ const sliderRow = document.getElementById('sliderRow');
 const snapSlider = document.getElementById('snapSlider');
 const snapSliderLabel = document.getElementById('snapSliderLabel');
 const queueChip = document.getElementById('queueChip');
-const liveFront = document.getElementById('liveTextFront');
-const liveBack = document.getElementById('liveTextBack');
+const liveTokenPre = document.getElementById('liveTokenPre');
 
 const viewTabs = Array.from(document.querySelectorAll('.view-tab'));
 const inferencePanel = document.getElementById('view-inference');
@@ -251,6 +250,8 @@ function resetRunState() {
   historySnapshots = [];
   historyByStep = new Map();
   pendingSnapshots = [];
+  tokenSlots = [];
+  while (liveTokenPre.firstChild) liveTokenPre.removeChild(liveTokenPre.firstChild);
 
   queueEtaBaseline = null;
   queueEtaSeconds = null;
@@ -261,74 +262,97 @@ function resetRunState() {
   setUiState(UI_MODES.IDLE);
 }
 
-function fitLiveFontForElem(elem) {
-  const wrapper = elem.parentElement;
+// Token slot state — each entry is {element, text, isMask}
+let tokenSlots = [];
+
+function tokenizeSql(sql) {
+  const parts = (sql || '').split(/(\s+|_{2,}|[(),*=<>!;])/);
+  return parts.filter((t) => t.length > 0);
+}
+
+function isMaskToken(tok) {
+  return /^_{2,}$/.test(tok);
+}
+
+function getOrCreateSlot(index) {
+  if (tokenSlots[index]) return tokenSlots[index];
+  const span = document.createElement('span');
+  span.className = 'tok';
+  liveTokenPre.appendChild(span);
+  tokenSlots[index] = { element: span, text: null, isMask: null };
+  return tokenSlots[index];
+}
+
+function updateTokenDisplay(sql) {
+  const tokens = tokenizeSql(sql);
+
+  // If the pre has stale non-span content (e.g. text node from renderImmediate), nuke it
+  if (tokenSlots.length === 0 && liveTokenPre.firstChild) {
+    liveTokenPre.textContent = '';
+  }
+
+  // Remove excess slots from the end
+  while (tokenSlots.length > tokens.length) {
+    const removed = tokenSlots.pop();
+    liveTokenPre.removeChild(removed.element);
+  }
+
+  tokens.forEach((tok, i) => {
+    const slot = getOrCreateSlot(i);
+    const mask = isMaskToken(tok);
+
+    if (slot.text === tok) return;
+    slot.text = tok;
+
+    if (mask) {
+      if (!slot.isMask) {
+        slot.element.style.minWidth = `max(${tok.length}ch, 2ch)`;
+      }
+      slot.element.className = 'tok masked';
+      slot.element.textContent = tok;
+    } else if (slot.isMask) {
+      // Mask → resolved: fade in
+      slot.element.className = 'tok resolving';
+      slot.element.textContent = tok;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          slot.element.className = 'tok resolved';
+          setTimeout(() => { slot.element.style.minWidth = ''; }, 200);
+        });
+      });
+    } else {
+      slot.element.className = 'tok resolved';
+      slot.element.textContent = tok;
+    }
+
+    slot.isMask = mask;
+  });
+
+  fitLiveFont();
+}
+
+function fitLiveFont() {
+  const wrapper = liveTokenPre.parentElement;
   const width = Math.max(220, wrapper.clientWidth - 28);
-  const text = elem.textContent || '';
+  const text = liveTokenPre.textContent || '';
   const lines = text.split('\n');
   const longest = lines.reduce((m, line) => Math.max(m, line.length), 0) || 20;
   const minFont = window.innerWidth <= 980 ? 14 : 22;
   const maxFont = window.innerWidth <= 980 ? 28 : 72;
   const calc = Math.floor(width / Math.max(8, longest) * 1.9);
-  elem.style.fontSize = `${Math.max(minFont, Math.min(maxFont, calc))}px`;
-}
-
-function fitLiveFont() {
-  fitLiveFontForElem(liveFront);
-  fitLiveFontForElem(liveBack);
+  liveTokenPre.style.fontSize = `${Math.max(minFont, Math.min(maxFont, calc))}px`;
 }
 
 window.addEventListener('resize', fitLiveFont);
 
-let animating = false;
-let pendingAnimText = null;
-function animateBlurToText(newText) {
-  if (prefersReducedMotion.matches) {
-    renderImmediate(newText);
-    return;
-  }
-
-  if (animating) {
-    // Update the pending text so the in-flight timeout picks up the latest value.
-    pendingAnimText = newText;
-    liveFront.textContent = newText;
-    fitLiveFontForElem(liveFront);
-    return;
-  }
-
-  pendingAnimText = newText;
-  liveBack.textContent = newText || '';
-  fitLiveFontForElem(liveBack);
-  liveBack.style.filter = 'blur(8px)';
-  liveBack.style.opacity = '0';
-  liveBack.style.zIndex = '2';
-  liveFront.style.zIndex = '1';
-
-  requestAnimationFrame(() => {
-    animating = true;
-    liveBack.style.filter = 'blur(0px)';
-    liveBack.style.opacity = '1';
-    liveFront.style.opacity = '0';
-
-    setTimeout(() => {
-      // Use pendingAnimText, not the stale closure value, so any update during
-      // the animation (e.g. the terminal clean frame) is preserved.
-      const finalText = pendingAnimText || '';
-      liveFront.textContent = finalText;
-      fitLiveFontForElem(liveFront);
-      liveFront.style.opacity = '1';
-      liveFront.style.zIndex = '2';
-      liveBack.style.opacity = '0';
-      liveBack.style.filter = 'blur(8px)';
-      liveBack.style.zIndex = '1';
-      animating = false;
-    }, 220);
-  });
-}
-
 function renderImmediate(text) {
-  liveFront.textContent = text || '(empty)';
-  fitLiveFontForElem(liveFront);
+  // Clear all token slots and reset to plain text (used for status messages)
+  while (tokenSlots.length) {
+    const removed = tokenSlots.pop();
+    liveTokenPre.removeChild(removed.element);
+  }
+  liveTokenPre.textContent = text || '(empty)';
+  fitLiveFont();
 }
 
 function extractSQL(s) {
@@ -410,8 +434,7 @@ function applySnapshotAnimated(snap) {
   const text = isTerm
     ? sanitizeFinalSql(snapshotText(snap))
     : snapshotText(snap);
-  if (isTerm) console.debug('[diffusion] applySnapshotAnimated TERMINAL', {step: snap.step, total: snap.total_steps, sql_only: snap.sql_only, text});
-  animateBlurToText(text);
+  updateTokenDisplay(text);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
 }
 
@@ -420,7 +443,7 @@ function applySnapshotImmediate(snap) {
   const text = isTerminalSnapshot(snap)
     ? sanitizeFinalSql(snapshotText(snap))
     : snapshotText(snap);
-  renderImmediate(text);
+  updateTokenDisplay(text);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
 }
 
@@ -435,7 +458,7 @@ function ensurePlayback() {
     }
     applySnapshotAnimated(pendingSnapshots.shift());
     maybeFinalize();
-  }, 85);
+  }, 60);
 }
 
 function enqueueAnimated(snap) {
@@ -449,12 +472,6 @@ function replayAllOnceAndFinalize() {
   // Replay all non-terminal history steps, then append one canonical terminal frame.
   pendingSnapshots = historySnapshots.filter((snap) => !isTerminalSnapshot(snap));
   const terminalFromHistory = historySnapshots.find((snap) => isTerminalSnapshot(snap));
-  console.debug('[diffusion] replayAllOnceAndFinalize', {
-    historyLen: historySnapshots.length,
-    nonTerminalLen: pendingSnapshots.length,
-    terminalFromHistory: terminalFromHistory ? {step: terminalFromHistory.step, total: terminalFromHistory.total_steps, sql_only: terminalFromHistory.sql_only} : null,
-    terminalSqlText,
-  });
   const terminalStep = terminalFromHistory
     ? Number(terminalFromHistory.step)
     : (historySnapshots.length ? Number(historySnapshots[historySnapshots.length - 1].step) : 0);
@@ -462,7 +479,6 @@ function replayAllOnceAndFinalize() {
     ? Number(terminalFromHistory.total_steps)
     : (historySnapshots.length ? Number(historySnapshots[historySnapshots.length - 1].total_steps) : terminalStep);
   const resolvedTerminalText = terminalSqlText || (terminalFromHistory ? sanitizeFinalSql(snapshotText(terminalFromHistory)) : '');
-  console.debug('[diffusion] resolvedTerminalText:', resolvedTerminalText);
   if (resolvedTerminalText) {
     if (!terminalSqlText) terminalSqlText = resolvedTerminalText;
     pendingSnapshots.push({
@@ -472,7 +488,6 @@ function replayAllOnceAndFinalize() {
       text: `<SQL>${resolvedTerminalText}</SQL>`,
     });
   }
-  console.debug('[diffusion] pendingSnapshots after push:', pendingSnapshots.length, 'last sql_only:', pendingSnapshots[pendingSnapshots.length-1]?.sql_only);
   if (!pendingSnapshots.length) {
     maybeFinalize();
     return;
@@ -498,8 +513,6 @@ function finishRun(payload) {
     const lastSnap = lastTerminal || historySnapshots[historySnapshots.length - 1];
     terminalSqlText = sanitizeFinalSql(snapshotText(lastSnap));
   }
-  console.debug('[diffusion] finishRun', {terminalSqlText, payloadSqlOnly: payload?.sql_only, historyLen: historySnapshots.length});
-
   if (payload && payload.state === 'error') {
     setStatus(payload.status || 'Run failed.');
     renderImmediate('Run failed. Check status for details.');
@@ -530,12 +543,12 @@ function finishRun(payload) {
     sliderRow.classList.add('visible');
     updateSliderLabel();
     if (terminalSqlText) {
-      renderImmediate(terminalSqlText);
+      updateTokenDisplay(terminalSqlText);
     } else {
       applySnapshotImmediate(historySnapshots[historySnapshots.length - 1]);
     }
   } else if (terminalSqlText) {
-    renderImmediate(terminalSqlText);
+    updateTokenDisplay(terminalSqlText);
   }
 
   setUiState(UI_MODES.IDLE);
@@ -658,8 +671,8 @@ async function pollRunState(id) {
       }
       replayAllOnceAndFinalize();
     }
-  } catch (err) {
-    console.debug('Polling exception', err);
+  } catch (_err) {
+    // polling exception — will retry on next interval
   }
 }
 
@@ -689,9 +702,8 @@ function openStream(id, sessionId) {
 
   es = new EventSource(`/stream/${id}`);
 
-  es.onerror = (err) => {
+  es.onerror = () => {
     if (terminalStateReached || sessionId !== runSessionId) return;
-    console.debug('SSE error; switching to polling fallback', err);
     startPollingFallback(id);
   };
 
@@ -779,7 +791,7 @@ snapSlider.addEventListener('input', () => {
   const snap = historySnapshots[idx];
 
   if (terminalSqlText && idx === historySnapshots.length - 1) {
-    renderImmediate(terminalSqlText);
+    updateTokenDisplay(terminalSqlText);
     if (snap) {
       stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
     }
