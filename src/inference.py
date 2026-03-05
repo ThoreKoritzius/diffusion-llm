@@ -24,6 +24,7 @@ import json
 import random
 import shlex
 import traceback
+import re
 from typing import List, Dict
 from werkzeug.utils import secure_filename
 
@@ -125,7 +126,7 @@ TEMPLATE = r"""
     html,body { height:100%; margin:0; background:var(--bg); font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; color:#0f172a; }
     .vh { height:100vh; display:flex; flex-direction:column; }
     .container { width:100%; max-width:1400px; margin:0 auto; padding:12px; box-sizing:border-box; display:flex; flex-direction:column; gap:12px; flex:1 1 auto; }
-    .live-large { background:var(--card); border-radius:12px; padding:18px; box-shadow:0 8px 28px rgba(2,6,23,0.06); display:flex; gap:18px; align-items:stretch; min-height:48vh; }
+    .live-large { background:var(--card); border-radius:12px; padding:14px; box-shadow:0 8px 28px rgba(2,6,23,0.06); display:flex; gap:14px; align-items:stretch; min-height:52vh; }
     .live-left { flex:1; display:flex; flex-direction:column; gap:10px; }
     .live-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
     .live-header .title { font-weight:700; font-size:16px; color:#0b1220; }
@@ -133,8 +134,8 @@ TEMPLATE = r"""
     /* lighter gray background for live area and nicer padding */
     .live-box { flex:1; background:#f3f4f6; border-radius:10px; padding:22px; overflow:auto; display:flex; align-items:center; justify-content:center; }
     .sql-display { font-family:var(--mono); font-weight:700; white-space:pre-wrap; word-break:break-word; color:#021024; margin:0; }
-    .right-col { width:380px; display:flex; flex-direction:column; gap:12px; }
-    .controls { background:var(--card); padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(2,6,23,0.04); }
+    .right-col { width:min(420px, 100%); display:flex; flex-direction:column; gap:12px; }
+    .controls { background:var(--card); padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(2,6,23,0.04); position:sticky; top:10px; }
     .label { font-weight:700; margin-bottom:6px; font-size:13px; color:#0b1220; display:block; }
     input[type=text], textarea, input[type=number], select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #e6eef7; font-size:14px; box-sizing:border-box; }
     textarea { min-height:80px; resize:vertical; font-family:inherit; }
@@ -150,16 +151,13 @@ TEMPLATE = r"""
       .right-col { width:100%; }
     }
     .status {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.4em;
-  height: 4.2em;
-  min-height: 4.2em;
-  max-height: 4.2em;
-}
+      display:block;
+      line-height:1.35;
+      min-height:72px;
+      max-height:180px;
+      overflow:auto;
+      text-overflow:clip;
+    }
 .sql-display {
   transition: filter 20ms cubic-bezier(.2,.9,.2,1), opacity 20ms cubic-bezier(.2,.9,.2,1);
   will-change: filter, opacity;
@@ -267,6 +265,9 @@ TEMPLATE = r"""
   .right-col {
     width: 100%;
   }
+  .controls { position: static; }
+  .live-large { min-height: 62vh; padding: 10px; gap: 10px; }
+  .live-box { min-height: 280px; padding: 12px; }
 }
 
 /* Animated mask / pad runs to smoothly shrink/expand token runs */
@@ -546,6 +547,17 @@ function extractSQL(s){
   return s;
 }
 
+function normalizeSQLDisplay(sql){
+  if(!sql) return "(empty)";
+  let s = String(sql);
+  s = s.replace(/_____+/g, " ").replace(/____/g, " ");
+  s = s.replace(/(?:\b[A-Za-z0-9_]\b(?:\s+|$)){3,}/g, (m)=>m.replace(/\s+/g, ""));
+  s = s.replace(/\s+([,;)])/g, "$1");
+  s = s.replace(/([(])\s+/g, "$1");
+  s = s.replace(/\s{2,}/g, " ").trim();
+  return s || "(empty)";
+}
+
 function setBtnStateRunning() {
   runInProgress = true;
   runBtn.textContent = "Stop Generation";
@@ -617,7 +629,7 @@ runForm.addEventListener('submit', async (ev)=>{
 function applySnapshot(obj){
   if (!obj) return;
   snapshots.push(obj);
-  const sqlOnly = extractSQL((obj.text || "").replace(/____/g,'_____')) || "(empty)";
+  const sqlOnly = normalizeSQLDisplay(obj.sql_only || extractSQL((obj.text || "").replace(/____/g,'_____')));
   animateBlurToText(sqlOnly);
   stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
 }
@@ -650,16 +662,18 @@ function finishRun(payload){
 
 async function pollRunState(id){
   try {
-    const resp = await fetch('/run/' + id, { cache: 'no-store' });
+    const resp = await fetch('/run/' + id + '?after=' + encodeURIComponent(lastSnapshotCount), { cache: 'no-store' });
     if(!resp.ok){
       setStatus("Polling failed: HTTP " + resp.status);
       return;
     }
     const data = await resp.json();
     const list = data.snapshots || [];
-    while (lastSnapshotCount < list.length) {
-      applySnapshot(list[lastSnapshotCount]);
-      lastSnapshotCount += 1;
+    for (const snap of list) applySnapshot(snap);
+    if (typeof data.snapshot_count === "number") {
+      lastSnapshotCount = data.snapshot_count;
+    } else {
+      lastSnapshotCount += list.length;
     }
     if (data.status && data.status !== lastStatusMsg) {
       lastStatusMsg = data.status;
@@ -679,7 +693,9 @@ function startPollingFallback(id){
   if(es){ es.close(); es=null; }
   setStatus("SSE unavailable via proxy. Switched to polling fallback.");
   pollRunState(id);
-  pollTimer = setInterval(()=>pollRunState(id), 1000);
+  pollTimer = setInterval(()=>{
+    pollRunState(id);
+  }, 250);
 }
 
 async function openStream(id){
@@ -725,7 +741,7 @@ snapSlider.addEventListener('input', ()=>{
   if (!snapshots.length) return;
   const idx = parseInt(snapSlider.value);
   const snap = snapshots[idx];
-  const sqlOnly = extractSQL((snap.text || "").replace(/____/g,'_____')) || "(empty)";
+  const sqlOnly = normalizeSQLDisplay(snap.sql_only || extractSQL((snap.text || "").replace(/____/g,'_____')));
   animateBlurToText(sqlOnly);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
   updateSliderLabel();
@@ -810,6 +826,31 @@ def now_ts() -> float:
 
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
+
+
+def normalize_sql_text(sql: str) -> str:
+    if not sql:
+        return ""
+    s = sql.replace("<pad>", "").replace("____", " ").replace("_____"," ").strip()
+    # Collapse long runs of single-char tokens into normal words (e.g. "h o w" -> "how")
+    s = re.sub(
+        r"(?:\b[A-Za-z0-9_]\b(?:\s+|$)){3,}",
+        lambda m: m.group(0).replace(" ", ""),
+        s,
+    )
+    s = re.sub(r"\s+([,;)])", r"\1", s)
+    s = re.sub(r"([(])\s+", r"\1", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
+
+
+def decode_token_ids_sql(tokenizer, token_ids: List[int]) -> str:
+    try:
+        tokens = tokenizer.convert_ids_to_tokens(token_ids, skip_special_tokens=True)
+        text = tokenizer.convert_tokens_to_string(tokens)
+    except Exception:
+        text = tokenizer.decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    return normalize_sql_text(text)
 
 
 def update_run(run_id: str, **updates) -> None:
@@ -1157,10 +1198,10 @@ def run_denoising_generation_callback(
     REQUIRED_TAGS = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     missing = [t for t in REQUIRED_TAGS if t not in tokenizer.get_vocab()]
     if missing:
-        log(f"[INFO] Adding missing special tokens: {missing}")
-        tokenizer.add_special_tokens({"additional_special_tokens": missing})
-        model.resize_token_embeddings(len(tokenizer))
-        log("[INFO] Resized embeddings")
+        raise RuntimeError(
+            f"Model/tokenizer missing required special tokens: {missing}. "
+            "Use the same tokenizer/model directory that was trained for this pipeline."
+        )
 
     mask_token = tokenizer.mask_token
     mask_id = tokenizer.mask_token_id
@@ -1240,12 +1281,21 @@ def run_denoising_generation_callback(
     if len(modifiable_positions) == 0:
         raise RuntimeError("No modifiable SQL tokens were found (empty SQL region).")
 
+    def current_sql_only_from_ids(ids_tensor) -> str:
+        token_slice = ids_tensor[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
+        return decode_token_ids_sql(tokenizer, token_slice)
+
     mask_probs = [i / n_steps for i in range(n_steps - 1, -1, -1)]
     total_steps = len(mask_probs)
     snapshots: List[Dict] = []
     if animate:
         s0 = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-        snapshots.append({"text": s0.replace(mask_token, " ____").replace("<pad>", ""), "step": 0, "total_steps": total_steps})
+        snapshots.append({
+            "text": s0.replace(mask_token, " ____").replace("<pad>", ""),
+            "sql_only": current_sql_only_from_ids(current_ids),
+            "step": 0,
+            "total_steps": total_steps,
+        })
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -1277,7 +1327,12 @@ def run_denoising_generation_callback(
             current_ids = new_ids
             if animate:
                 s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-                snapshots.append({"text": s.replace(mask_token, " ____").replace("<pad>", ""), "step": step_idx+1, "total_steps": total_steps})
+                snapshots.append({
+                    "text": s.replace(mask_token, " ____").replace("<pad>", ""),
+                    "sql_only": current_sql_only_from_ids(current_ids),
+                    "step": step_idx+1,
+                    "total_steps": total_steps,
+                })
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
             break
@@ -1295,7 +1350,12 @@ def run_denoising_generation_callback(
         current_ids = next_ids
         if animate:
             s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-            snapshots.append({"text": s.replace(mask_token, " ____").replace("<pad>", ""), "step": step_idx+1, "total_steps": total_steps})
+            snapshots.append({
+                "text": s.replace(mask_token, " ____").replace("<pad>", ""),
+                "sql_only": current_sql_only_from_ids(current_ids),
+                "step": step_idx+1,
+                "total_steps": total_steps,
+            })
             if on_snapshot:
                 on_snapshot(snapshots[-1])
 
@@ -1310,15 +1370,14 @@ def run_denoising_generation_callback(
         end_marker = "</SQL>"
         start_idx = display.index(start_marker) + len(start_marker)
         end_idx = display.index(end_marker, start_idx)
-        sql_only = display[start_idx:end_idx].strip()
+        sql_only = normalize_sql_text(display[start_idx:end_idx].strip())
     except ValueError:
         token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
-        sql_only = tokenizer.decode(token_slice, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-        sql_only = sql_only.replace("____", "")
+        sql_only = decode_token_ids_sql(tokenizer, token_slice)
 
 
     if not animate:
-        snapshots = [{"text": display, "step": total_steps, "total_steps": total_steps}]
+        snapshots = [{"text": display, "sql_only": sql_only, "step": total_steps, "total_steps": total_steps}]
 
     return {"snapshots": snapshots, "sql_only": sql_only, "display": display}
 
@@ -1512,10 +1571,20 @@ def stream(run_id):
 @app.route("/run/<run_id>")
 @limiter.exempt
 def run_state(run_id):
+    after = request.args.get("after", "0")
+    try:
+        after_idx = max(0, int(after))
+    except ValueError:
+        after_idx = 0
     with RUNS_LOCK:
         run = RUNS.get(run_id)
         if not run:
             return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+        all_snaps = run.get("snapshots", [])
+        snap_count = len(all_snaps)
+        if after_idx > snap_count:
+            after_idx = snap_count
+        delta = all_snaps[after_idx:]
         return jsonify({
             "run_id": run_id,
             "state": run.get("state"),
@@ -1523,7 +1592,8 @@ def run_state(run_id):
             "done": bool(run.get("done")),
             "sql_only": run.get("sql_only"),
             "gif_url": run.get("gif_url"),
-            "snapshots": run.get("snapshots", []),
+            "snapshot_count": snap_count,
+            "snapshots": delta,
         })
 
 
