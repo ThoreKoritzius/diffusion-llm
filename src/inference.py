@@ -1400,7 +1400,6 @@ def start_run():
 
 
 @app.route("/stream/<run_id>")
-@limiter.limit("60 per minute")
 def stream(run_id):
     with RUNS_LOCK:
         if run_id not in RUNS:
@@ -1411,6 +1410,7 @@ def stream(run_id):
             q = RUNS[run_id]["snapshot_queue"]
         last_status = ""
         done_sent = False
+        last_heartbeat = time.time()
         while True:
             try:
                 snap = q.get(timeout=0.4)
@@ -1438,7 +1438,17 @@ def stream(run_id):
                 done_sent = True
                 break
 
-    return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+            # Keep SSE alive through proxies/load balancers while queued/running.
+            now = time.time()
+            if now - last_heartbeat >= 10:
+                yield ": keepalive\\n\\n"
+                last_heartbeat = now
+
+    resp = Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    resp.headers["Connection"] = "keep-alive"
+    return resp
 
 
 @app.route("/gif/<filename>")
