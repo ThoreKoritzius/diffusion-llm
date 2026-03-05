@@ -103,7 +103,7 @@ app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["60 per minute"],
+    default_limits=[],
     storage_uri="memory://",
 )
 
@@ -609,7 +609,11 @@ async function openStream(id){
   if(es){ es.close(); es=null; }
   es = new EventSource('/stream/' + id);
   es.onopen = ()=> console.log("SSE opened");
-  es.onerror = (e)=> console.warn("SSE error", e);
+  es.onerror = (e)=>{
+    console.warn("SSE error", e);
+    const state = es ? es.readyState : -1;
+    setStatus("SSE connection error (state " + state + "). Check /stream response in Network tab.");
+  };
   es.addEventListener('snapshot', (ev)=>{
 
     const obj = JSON.parse(ev.data);
@@ -1400,6 +1404,7 @@ def start_run():
 
 
 @app.route("/stream/<run_id>")
+@limiter.exempt
 def stream(run_id):
     with RUNS_LOCK:
         if run_id not in RUNS:
