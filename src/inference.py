@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-inference.py - Flask GUI with live decoding + always-generated GIF download
+inference.py - Flask GUI with live decoding and optional GIF export
 
 Usage:
   python inference.py
   python inference.py --no-open
   python inference.py --prompt "..." --context "..." --model-dir "diffusion-sql"
 
-This version:
- - Always generates a GIF and provides a Download button (no preview image).
- - Live preview only shows content inside <SQL>...</SQL>.
- - Live preview uses a large, responsive, easy-to-read monospace display with a light-gray background.
- - GIF text sizing uses a fitting algorithm for large readable text.
- - Deterministic runs by default (seed configurable via CLI).
+This version includes:
+ - Public-safe queueing, rate limiting, and timeout controls for CPU-only hosts.
+ - Live preview for content inside <SQL>...</SQL>.
+ - Optional GIF generation (disabled by default for public robustness).
 """
 import argparse
 import io
@@ -24,12 +22,18 @@ import uuid
 import textwrap
 import json
 import random
+import shlex
+import traceback
 from typing import List, Dict
 from werkzeug.utils import secure_filename
 
 from flask import Flask, render_template_string, request, jsonify, Response, send_file, stream_with_context
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 import webbrowser
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 import numpy as np
 import torch
@@ -37,28 +41,71 @@ from transformers import RobertaTokenizerFast, RobertaForMaskedLM
 from queue import Queue, Empty
 
 # -------------------------
-# CLI args
-# -------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
-parser.add_argument("--prompt", type=str, default="", help="Prefill prompt (optional)")
-parser.add_argument("--context", type=str, default="", help="Prefill context (optional)")
-parser.add_argument("--model-dir", type=str, default="diffusion-sql", help="Default model dir (optional)")
-parser.add_argument("--host", type=str, default="127.0.0.1")
-parser.add_argument("--port", type=int, default=7860)
-parser.add_argument("--seed", type=int, default=1234, help="Deterministic seed (default 1234).")
-args = parser.parse_args()
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
+    parser.add_argument("--public", action="store_true", help="Bind on 0.0.0.0 and disable browser auto-open")
+    parser.add_argument("--prompt", type=str, default="", help="Prefill prompt (optional)")
+    parser.add_argument("--context", type=str, default="", help="Prefill context (optional)")
+    parser.add_argument("--model-dir", type=str, default="diffusion-sql", help="Default model dir (optional)")
+    parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--seed", type=int, default=42, help="Deterministic seed (default 42).")
+    parser.add_argument("--max-concurrent-runs", type=int, default=1)
+    parser.add_argument("--max-queued-runs", type=int, default=3)
+    parser.add_argument("--request-timeout-seconds", type=int, default=90)
+    parser.add_argument("--max-prompt-chars", type=int, default=1000)
+    parser.add_argument("--max-context-chars", type=int, default=8000)
+    parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument("--max-max-len", type=int, default=512)
+    parser.add_argument("--max-sql-len", type=int, default=128)
+    parser.add_argument("--enable-gif", action="store_true", help="Enable GIF generation for runs")
+    parser.add_argument("--run-ttl-seconds", type=int, default=900)
+    return parser
+
+
+def parse_runtime_args() -> argparse.Namespace:
+    parser = build_parser()
+    env_args = os.environ.get("INFERENCE_APP_ARGS", "").strip()
+    if env_args:
+        parsed, _unknown = parser.parse_known_args(shlex.split(env_args))
+    else:
+        parsed, _unknown = parser.parse_known_args()
+    if parsed.public:
+        parsed.host = "0.0.0.0"
+        parsed.no_open = True
+    return parsed
+
+
+args = parse_runtime_args()
 
 HOST = args.host
 PORT = args.port
 DEFAULT_MODEL_DIR = args.model_dir
-DEFAULT_SEED = 42
+DEFAULT_SEED = args.seed
+MAX_CONCURRENT_RUNS = max(1, args.max_concurrent_runs)
+MAX_QUEUED_RUNS = max(1, args.max_queued_runs)
+REQUEST_TIMEOUT_SECONDS = max(1, args.request_timeout_seconds)
+MAX_PROMPT_CHARS = max(1, args.max_prompt_chars)
+MAX_CONTEXT_CHARS = max(1, args.max_context_chars)
+MAX_STEPS = max(1, args.max_steps)
+MAX_MAX_LEN = max(8, args.max_max_len)
+MAX_SQL_LEN = max(1, args.max_sql_len)
+ENABLE_GIF = bool(args.enable_gif)
+RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
 
 # -------------------------
 # Flask app & template
 # -------------------------
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["60 per minute"],
+    storage_uri="memory://",
+)
 
 TEMPLATE = r"""
 <!doctype html>
@@ -692,8 +739,170 @@ function processCSV(text){
 # -------------------------
 # Run storage / state
 # -------------------------
-RUNS: Dict[str, Dict] = {}  # run_id -> {snapshots:[], status:str, done:bool, sql_only, display, gif_path}
+RUNS: Dict[str, Dict] = {}  # run_id -> per-run state
+RUNS_LOCK = threading.RLock()
+RUN_QUEUE: Queue = Queue(maxsize=MAX_QUEUED_RUNS)
+RUN_SEMAPHORE = threading.BoundedSemaphore(value=MAX_CONCURRENT_RUNS)
 MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}
+OUT_DIR = os.path.join(os.path.abspath("."), "generated_gifs")
+
+
+def now_ts() -> float:
+    return time.time()
+
+
+def clamp_int(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))
+
+
+def update_run(run_id: str, **updates) -> None:
+    with RUNS_LOCK:
+        if run_id in RUNS:
+            RUNS[run_id].update(updates)
+            RUNS[run_id]["updated_at"] = now_ts()
+
+
+def append_snapshot(run_id: str, snapshot_obj: Dict) -> None:
+    with RUNS_LOCK:
+        run = RUNS.get(run_id)
+        if not run:
+            return
+        run["snapshots"].append(snapshot_obj)
+        run["snapshot_queue"].put(snapshot_obj)
+        run["updated_at"] = now_ts()
+
+
+def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
+    default = (1400, 900)
+    if not gif_size_text:
+        return default
+    try:
+        w, h = gif_size_text.lower().split("x")
+        width = clamp_int(int(w), 320, 1920)
+        height = clamp_int(int(h), 240, 1080)
+        return (width, height)
+    except Exception:
+        return default
+
+
+def set_run_terminal(run_id: str, state: str, status: str) -> None:
+    update_run(run_id, state=state, status=status, done=True, finished_at=now_ts())
+
+
+def build_should_stop_cb(run_id: str, start_time: float):
+    def _should_stop() -> bool:
+        with RUNS_LOCK:
+            run = RUNS.get(run_id)
+            if not run:
+                return True
+            if run.get("cancel_event") and run["cancel_event"].is_set():
+                run["timed_out"] = run.get("timed_out", False)
+                return True
+            if (now_ts() - start_time) > REQUEST_TIMEOUT_SECONDS:
+                run["timed_out"] = True
+                if run.get("cancel_event"):
+                    run["cancel_event"].set()
+                return True
+            return False
+    return _should_stop
+
+
+def process_run(run_id: str) -> None:
+    with RUNS_LOCK:
+        run = RUNS.get(run_id)
+    if not run:
+        return
+    start_time = now_ts()
+    update_run(run_id, state="running", status="running (loading model)", started_at=start_time)
+    try:
+        payload = run["payload"]
+        should_stop = build_should_stop_cb(run_id, start_time)
+
+        def status_cb(msg):
+            update_run(run_id, status=str(msg))
+
+        def on_snapshot_callback(snapshot_obj):
+            append_snapshot(run_id, snapshot_obj)
+
+        res = run_denoising_generation_callback(
+            payload["prompt"],
+            payload["context"],
+            payload["model_dir"],
+            n_steps=payload["steps"],
+            max_len=payload["max_len"],
+            top_k=payload["top_k"],
+            top_p=payload["top_p"],
+            sql_len_request=payload["sql_len"],
+            animate=True,
+            on_snapshot=on_snapshot_callback,
+            status_cb=status_cb,
+            deterministic_seed=DEFAULT_SEED,
+            should_stop=should_stop,
+        )
+        update_run(run_id, sql_only=res.get("sql_only"), display=res.get("display"))
+
+        if ENABLE_GIF and not should_stop():
+            os.makedirs(OUT_DIR, exist_ok=True)
+            update_run(run_id, status="building GIF")
+            gif_size = parse_gif_size(payload["gif_size_text"])
+            gif_bytes = build_gif_bytes_from_snapshots(run["snapshots"], size=gif_size, interval_ms=500)
+            out_name = secure_filename(f"generation_{run_id}.gif")
+            out_path = os.path.join(OUT_DIR, out_name)
+            with open(out_path, "wb") as f:
+                f.write(gif_bytes)
+            update_run(run_id, gif_url=f"/gif/{out_name}", status=f"GIF written to {out_path}")
+
+        if should_stop():
+            with RUNS_LOCK:
+                timed_out = RUNS.get(run_id, {}).get("timed_out", False)
+            if timed_out:
+                set_run_terminal(run_id, state="timed_out", status="timed out")
+            else:
+                set_run_terminal(run_id, state="stopped", status="stopped by user")
+        else:
+            set_run_terminal(run_id, state="done", status="done")
+    except TimeoutError:
+        set_run_terminal(run_id, state="timed_out", status="timed out")
+    except Exception as e:
+        tb = traceback.format_exc(limit=4)
+        set_run_terminal(run_id, state="error", status=f"error: {e}\n{tb}")
+    finally:
+        RUN_SEMAPHORE.release()
+
+
+def queue_dispatch_loop():
+    while True:
+        run_id = RUN_QUEUE.get()
+        RUN_SEMAPHORE.acquire()
+        th = threading.Thread(target=process_run, args=(run_id,), daemon=True)
+        th.start()
+
+
+def cleanup_loop():
+    while True:
+        time.sleep(60)
+        cutoff = now_ts() - RUN_TTL_SECONDS
+        to_delete = []
+        with RUNS_LOCK:
+            for run_id, run in RUNS.items():
+                if run.get("done") and run.get("updated_at", run.get("created_at", 0)) < cutoff:
+                    to_delete.append(run_id)
+            for run_id in to_delete:
+                RUNS.pop(run_id, None)
+        if ENABLE_GIF and os.path.isdir(OUT_DIR):
+            for name in os.listdir(OUT_DIR):
+                if not name.endswith(".gif"):
+                    continue
+                path = os.path.join(OUT_DIR, name)
+                try:
+                    if os.path.getmtime(path) < cutoff:
+                        os.remove(path)
+                except OSError:
+                    pass
+
+
+threading.Thread(target=queue_dispatch_loop, daemon=True).start()
+threading.Thread(target=cleanup_loop, daemon=True).start()
 
 # -------------------------
 # Utilities: GIF font fitting (bigger min size)
@@ -867,6 +1076,7 @@ def run_denoising_generation_callback(
     on_snapshot = None,
     status_cb = None,
     deterministic_seed: int = DEFAULT_SEED,
+    should_stop=None,
 ) -> Dict:
     def log(s):
         if status_cb:
@@ -985,12 +1195,16 @@ def run_denoising_generation_callback(
     log("[INFO] Starting denoising")
     t0 = time.time()
     for step_idx, p_mask in enumerate(mask_probs):
+        if should_stop and should_stop():
+            raise TimeoutError("Run cancelled or timed out")
         with torch.no_grad():
             outputs = model(input_ids=current_ids, attention_mask=current_attention)
             logits = outputs.logits
 
         pred_ids = current_ids.clone()
         for pos in modifiable_positions:
+            if should_stop and should_stop():
+                raise TimeoutError("Run cancelled or timed out")
             logit_vec = logits[0, pos, :]
             filtered = top_k_top_p_filtering(logit_vec, top_k=top_k, top_p=top_p, filter_value=-float("Inf"))
             probs = torch.softmax(filtered, dim=-1)
@@ -1072,8 +1286,26 @@ def top_k_top_p_filtering(logits: torch.Tensor, top_k: int = 0, top_p: float = 0
     return logits
 
 # -------------------------
+# -------------------------
 # Flask endpoints
 # -------------------------
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({"error": "rate_limited", "message": str(e.description)}), 429
+
+
+@app.errorhandler(Exception)
+def json_http_errors(e):
+    if isinstance(e, HTTPException):
+        return e
+    return jsonify({"error": "internal_error", "message": str(e)}), 500
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True, "active_limit": MAX_CONCURRENT_RUNS, "queue_limit": MAX_QUEUED_RUNS}), 200
+
+
 @app.route("/")
 def index():
     default_prompt = "how many planes are of name a380?"
@@ -1084,148 +1316,157 @@ def index():
         context_prefill=args.context or default_context,
         model_dir=DEFAULT_MODEL_DIR or "",
     )
+
+
 @app.route("/start", methods=["POST"])
+@limiter.limit("5 per minute; 30 per hour")
 def start_run():
     form = request.form
     prompt = form.get("prompt", "").strip()
     context = form.get("context", "").strip()
-    steps = int(form.get("steps", "10"))
-    max_len = int(form.get("max_len", "512"))
-    sql_len = int(form.get("sql_len", "64"))
-    top_k = int(form.get("top_k", "1"))
-    top_p = float(form.get("top_p", "1"))
     model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
-    animate = True
     gif_size_text = form.get("gif_size", "").strip()
-    interval_ms = 500
+    try:
+        steps = int(form.get("steps", "10"))
+        max_len = int(form.get("max_len", "512"))
+        sql_len = int(form.get("sql_len", "64"))
+        top_k = int(form.get("top_k", "1"))
+        top_p = float(form.get("top_p", "1"))
+    except ValueError:
+        return jsonify({"error": "invalid_input", "message": "steps/max_len/sql_len/top_k/top_p must be numeric"}), 400
 
     if not prompt:
-        return "Prompt is empty", 400
+        return jsonify({"error": "invalid_input", "message": "Prompt is empty"}), 400
+    if len(prompt) > MAX_PROMPT_CHARS:
+        return jsonify({"error": "invalid_input", "message": f"Prompt too long (>{MAX_PROMPT_CHARS} chars)"}), 400
+    if len(context) > MAX_CONTEXT_CHARS:
+        return jsonify({"error": "invalid_input", "message": f"Context too long (>{MAX_CONTEXT_CHARS} chars)"}), 400
     if not os.path.isdir(model_dir):
-        return jsonify({"error": f"Model dir not found: {model_dir}"}), 400
+        return jsonify({"error": "invalid_input", "message": f"Model dir not found: {model_dir}"}), 400
+    if steps < 1 or steps > MAX_STEPS:
+        return jsonify({"error": "invalid_input", "message": f"steps must be 1..{MAX_STEPS}"}), 400
+    if max_len < 8 or max_len > MAX_MAX_LEN:
+        return jsonify({"error": "invalid_input", "message": f"max_len must be 8..{MAX_MAX_LEN}"}), 400
+    if sql_len < 1 or sql_len > MAX_SQL_LEN:
+        return jsonify({"error": "invalid_input", "message": f"sql_len must be 1..{MAX_SQL_LEN}"}), 400
+    if top_k < 0:
+        return jsonify({"error": "invalid_input", "message": "top_k must be >= 0"}), 400
+    if top_p < 0 or top_p > 1:
+        return jsonify({"error": "invalid_input", "message": "top_p must be in [0, 1]"}), 400
 
     run_id = uuid.uuid4().hex
-    RUNS[run_id] = {
+    run = {
         "snapshots": [],
         "snapshot_queue": Queue(),
         "status": "queued",
+        "state": "queued",
         "done": False,
+        "timed_out": False,
         "sql_only": None,
         "display": None,
-        "gif_url": None
+        "gif_url": None,
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+        "started_at": None,
+        "finished_at": None,
+        "cancel_event": threading.Event(),
+        "payload": {
+            "prompt": prompt,
+            "context": context,
+            "steps": steps,
+            "max_len": max_len,
+            "sql_len": sql_len,
+            "top_k": top_k,
+            "top_p": top_p,
+            "model_dir": model_dir,
+            "gif_size_text": gif_size_text,
+        },
     }
-    def status_cb(msg):
-        RUNS[run_id]["status"] = msg
+    with RUNS_LOCK:
+        RUNS[run_id] = run
 
-    def on_snapshot_callback(snapshot_obj):
-        RUNS[run_id]["snapshots"].append(snapshot_obj)
-        RUNS[run_id]["snapshot_queue"].put(snapshot_obj)
+    try:
+        RUN_QUEUE.put_nowait(run_id)
+    except Exception:
+        with RUNS_LOCK:
+            RUNS.pop(run_id, None)
+        return jsonify({
+            "error": "queue_full",
+            "message": "Server is busy. Try again shortly.",
+            "max_queued_runs": MAX_QUEUED_RUNS,
+        }), 503
 
-    def worker():
-        try:
-            RUNS[run_id]["status"] = "running (loading model)"
-            res = run_denoising_generation_callback(prompt, context, model_dir,
-                                                    n_steps=steps, max_len=max_len,
-                                                    top_k=top_k, top_p=top_p,
-                                                    sql_len_request=sql_len, animate=animate,
-                                                    on_snapshot=on_snapshot_callback, status_cb=status_cb,
-                                                    deterministic_seed=DEFAULT_SEED)
-            RUNS[run_id]["sql_only"] = res.get("sql_only")
-            RUNS[run_id]["display"] = res.get("display")
-            # ensure output dir
-            out_dir = os.path.join(os.path.abspath("."), "generated_gifs")
-            os.makedirs(out_dir, exist_ok=True)
+    return jsonify({"run_id": run_id, "state": "queued"})
 
-            # always build GIF
-            RUNS[run_id]["status"] = "building GIF"
-            try:
-                if gif_size_text:
-                    try:
-                        w,h = gif_size_text.lower().split('x')
-                        gif_size = (int(w), int(h))
-                    except Exception:
-                        gif_size = (1400,900)
-                else:
-                    gif_size = (1400,900)
-
-                gif_bytes = build_gif_bytes_from_snapshots(RUNS[run_id]["snapshots"], size=gif_size, interval_ms=interval_ms)
-                out_name = f"generation_{run_id}.gif"
-                # safe filename
-                out_name = secure_filename(out_name)
-                out_path = os.path.join(out_dir, out_name)
-                with open(out_path, "wb") as f:
-                    f.write(gif_bytes)
-                # use a URL path that maps to our /gif/<filename> endpoint
-                RUNS[run_id]["gif_url"] = f"/gif/{out_name}"
-                RUNS[run_id]["status"] = f"GIF written to {out_path}"
-            except Exception as e:
-                # store traceback so UI shows reason
-                RUNS[run_id]["status"] = f"GIF build failed: {e}\n{tb}"
-
-            RUNS[run_id]["done"] = True
-            RUNS[run_id]["status"] = "done"
-        except Exception as e:
-            RUNS[run_id]["status"] = f"error: {e}"
-            RUNS[run_id]["done"] = True
-
-    th = threading.Thread(target=worker, daemon=True)
-    th.start()
-    return jsonify({"run_id": run_id})
 
 @app.route("/stream/<run_id>")
+@limiter.limit("60 per minute")
 def stream(run_id):
-    if run_id not in RUNS:
-        return "Not found", 404
+    with RUNS_LOCK:
+        if run_id not in RUNS:
+            return jsonify({"error": "not_found", "message": "run_id not found"}), 404
 
     def event_stream():
-        q = RUNS[run_id]["snapshot_queue"]
+        with RUNS_LOCK:
+            q = RUNS[run_id]["snapshot_queue"]
         last_status = ""
         done_sent = False
         while True:
             try:
-                snap = q.get(timeout=0.4)  # Non-polling, gets data as soon as available
-                yield f"event: snapshot\ndata: {json.dumps(snap)}\n\n"
+                snap = q.get(timeout=0.4)
+                yield f"event: snapshot\\ndata: {json.dumps(snap)}\\n\\n"
             except Empty:
                 pass
 
-            st = RUNS[run_id].get("status", "")
+            with RUNS_LOCK:
+                run = RUNS.get(run_id)
+                if not run:
+                    break
+                st = run.get("status", "")
             if st != last_status:
                 last_status = st
-                yield f"event: status\ndata: {json.dumps({'msg': st})}\n\n"
+                yield f"event: status\\ndata: {json.dumps({'msg': st})}\\n\\n"
 
-            if RUNS[run_id].get("done") and not done_sent:
-                payload = {"sql_only": RUNS[run_id].get("sql_only"), "gif_url": RUNS[run_id].get("gif_url")}
-                yield f"event: done\ndata: {json.dumps(payload)}\n\n"
+            with RUNS_LOCK:
+                run = RUNS.get(run_id)
+                if not run:
+                    break
+                is_done = run.get("done")
+                payload = {"sql_only": run.get("sql_only"), "gif_url": run.get("gif_url"), "state": run.get("state")}
+            if is_done and not done_sent:
+                yield f"event: done\\ndata: {json.dumps(payload)}\\n\\n"
                 done_sent = True
                 break
+
     return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
 
-from werkzeug.utils import secure_filename
-from flask import abort
 
 @app.route("/gif/<filename>")
 def serve_gif(filename):
-    # prevent path traversal
+    if not ENABLE_GIF:
+        return jsonify({"error": "gif_disabled", "message": "GIF generation is disabled on this server"}), 404
     safe_name = secure_filename(filename)
-    out_dir = os.path.join(os.path.abspath("."), "generated_gifs")
-    p = os.path.join(out_dir, safe_name)
+    p = os.path.join(OUT_DIR, safe_name)
     if not os.path.isfile(p):
-        return "Not found", 404
-    # Force as-attachment download (Flask 2.0+ uses download_name)
+        return jsonify({"error": "not_found", "message": "file not found"}), 404
     try:
         return send_file(p, mimetype="image/gif", as_attachment=True, download_name=safe_name)
     except TypeError:
-        # fallback for older Flask versions
         return send_file(p, mimetype="image/gif", as_attachment=True, attachment_filename=safe_name)
 
 
 @app.route("/stop/<run_id>", methods=["POST"])
 def stop_run(run_id):
-    if run_id in RUNS:
-        RUNS[run_id]["status"] = "stopped by user"
-        RUNS[run_id]["done"] = True
-        return "ok"
-    return "not found", 404
+    with RUNS_LOCK:
+        run = RUNS.get(run_id)
+        if not run:
+            return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+        run["cancel_event"].set()
+        run["state"] = "stopped"
+        run["status"] = "stopping..."
+        run["updated_at"] = now_ts()
+    return jsonify({"ok": True, "run_id": run_id})
+
 
 # -------------------------
 # Start server

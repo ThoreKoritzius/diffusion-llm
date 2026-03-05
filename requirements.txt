@@ -1,3 +1,4 @@
+Flask
 Pillow
 numpy
 torch
@@ -6,3 +7,5 @@ datasets
 wandb
 gradio
 accelerate
+gunicorn
+Flask-Limiter

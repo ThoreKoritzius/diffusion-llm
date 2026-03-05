@@ -1,0 +1,38 @@
+services:
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: diffusion-llm:latest
+    container_name: diffusion-llm-inference
+    ports:
+      - "7860:7860"
+    command:
+      - --model-dir
+      - /models/model
+      - --public
+      - --max-concurrent-runs
+      - "1"
+      - --max-queued-runs
+      - "3"
+      - --request-timeout-seconds
+      - "90"
+      - --max-steps
+      - "24"
+      - --max-max-len
+      - "512"
+      - --max-sql-len
+      - "128"
+      - --run-ttl-seconds
+      - "900"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TORCH_NUM_THREADS=1
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+    volumes:
+      - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
+      - ./generated_gifs:/app/generated_gifs
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.0
