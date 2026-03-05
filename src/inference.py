@@ -24,6 +24,7 @@ import json
 import random
 import shlex
 import traceback
+import re
 from typing import List, Dict
 from werkzeug.utils import secure_filename
 
@@ -173,8 +174,38 @@ def strip_final_masks(sql_text: str) -> str:
     if not sql_text:
         return ""
     cleaned = sql_text.replace("____", "")
+    # Handle spaced tag variants from token-level displays, e.g. "< p a d >".
+    cleaned = re.sub(r"<\s*/?\s*p\s*a\s*d\s*>", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[\s*p\s*a\s*d\s*\]", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<\s*/?\s*s\s*>", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<\s*m\s*a\s*s\s*k\s*>", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("<pad>", " ").replace("<PAD>", " ").replace("[PAD]", " ")
+    cleaned = cleaned.replace("<s>", " ").replace("</s>", " ").replace("<mask>", " ")
     cleaned = " ".join(cleaned.split())
     return cleaned.strip()
+
+
+def decode_sql_from_token_ids(tokenizer, token_ids: List[int], mask_id: int | None, pad_id: int | None) -> str:
+    special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
+    if mask_id is not None:
+        special_ids.add(int(mask_id))
+    if pad_id is not None:
+        special_ids.add(int(pad_id))
+    filtered_ids = [int(tid) for tid in token_ids if int(tid) not in special_ids]
+    if not filtered_ids:
+        return ""
+    return tokenizer.decode(filtered_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip()
+
+
+def replace_sql_section(full_text: str, sql_only: str) -> str:
+    start_marker = "<SQL>"
+    end_marker = "</SQL>"
+    try:
+        start_idx = full_text.index(start_marker) + len(start_marker)
+        end_idx = full_text.index(end_marker, start_idx)
+        return full_text[:start_idx] + (" " + sql_only + " " if sql_only else " ") + full_text[end_idx:]
+    except ValueError:
+        return full_text
 
 
 def to_redis_value(v):
@@ -893,10 +924,14 @@ def run_denoising_generation_callback(
             new_ids = current_ids.clone()
             new_ids[0, sql_open_idx + 1 : sql_close_idx] = pred_ids[0, sql_open_idx + 1 : sql_close_idx]
             current_ids = new_ids
+            final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
+            final_sql_only = decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id)
+            final_sql_only = strip_final_masks(final_sql_only)
             if animate:
                 s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
                 s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
-                snapshots.append({"text": s_clean, "sql_only": extract_sql_only_from_text(s_clean), "step": step_idx+1, "total_steps": total_steps})
+                s_clean_final = replace_sql_section(s_clean, final_sql_only)
+                snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": step_idx+1, "total_steps": total_steps})
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
             break
@@ -925,16 +960,8 @@ def run_denoising_generation_callback(
     decoded_full = tokenizer.decode(current_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
     display = decoded_full.replace(mask_token, "_____").replace("<pad>", "")
     display = display.replace("_____", "")
-    try:
-        start_marker = "<SQL>"
-        end_marker = "</SQL>"
-        start_idx = display.index(start_marker) + len(start_marker)
-        end_idx = display.index(end_marker, start_idx)
-        sql_only = display[start_idx:end_idx].strip()
-    except ValueError:
-        token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
-        sql_only = tokenizer.decode(token_slice, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-        sql_only = sql_only.replace("____", "")
+    token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
+    sql_only = decode_sql_from_token_ids(tokenizer, token_slice, mask_id=mask_id, pad_id=pad_id)
 
     sql_only = strip_final_masks(sql_only)
 
@@ -1008,6 +1035,11 @@ def index():
     default_context = "CREATE TABLE planes (id INT, name TEXT)"
     model_info = get_model_info(DEFAULT_MODEL_DIR)
     effective_dtype = resolve_model_dtype(get_inference_device())[1]
+    static_js_path = os.path.join(os.path.dirname(__file__), "static", "inference.js")
+    try:
+        static_version = str(int(os.path.getmtime(static_js_path)))
+    except OSError:
+        static_version = str(int(time.time()))
     return render_template(
         "inference.html",
         prompt_prefill=args.prompt or default_prompt,
@@ -1017,6 +1049,7 @@ def index():
         model_param_count_display=model_info.get("param_count_display", "unknown"),
         inference_dtype_requested=INFERENCE_DTYPE,
         inference_dtype_effective=effective_dtype,
+        static_version=static_version,
     )
 
 

@@ -1,9 +1,10 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-  <meta charset="utf-8"/>
+  <meta charset="utf-8" />
   <title>Diffusion LLM Playground</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root {
       --color-bg: #f6f7fb;
@@ -25,9 +26,12 @@
       --sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
 
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
 
-    html, body {
+    html,
+    body {
       margin: 0;
       padding: 0;
       min-height: 100%;
@@ -64,15 +68,22 @@
       cursor: pointer;
     }
 
-    .view-tab:last-child { border-right: 0; }
+    .view-tab:last-child {
+      border-right: 0;
+    }
 
     .view-tab.active {
       background: #eaf1ff;
       color: #1a4d9d;
     }
 
-    .view-panel { display: none; }
-    .view-panel.active { display: block; }
+    .view-panel {
+      display: none;
+    }
+
+    .view-panel.active {
+      display: block;
+    }
 
     .layout {
       display: grid;
@@ -101,7 +112,10 @@
       gap: var(--space-2);
     }
 
-    .title { font-size: 16px; font-weight: 700; }
+    .title {
+      font-size: 16px;
+      font-weight: 700;
+    }
 
     .step-pill {
       border: 1px solid #cfe0ff;
@@ -122,9 +136,17 @@
       min-height: 20px;
     }
 
-    .queue-chip[data-state="queued"] { color: var(--color-warn); }
-    .queue-chip[data-state="running"] { color: var(--color-accent); }
-    .queue-chip[data-state="rate_limited"] { color: var(--color-danger); }
+    .queue-chip[data-state="queued"] {
+      color: var(--color-warn);
+    }
+
+    .queue-chip[data-state="running"] {
+      color: var(--color-accent);
+    }
+
+    .queue-chip[data-state="rate_limited"] {
+      color: var(--color-danger);
+    }
 
     .live-box {
       border: 1px solid var(--color-border);
@@ -160,11 +182,25 @@
       will-change: filter, opacity;
     }
 
-    .slider-row { display: none; gap: 6px; }
-    .slider-row.visible { display: grid; }
+    .slider-row {
+      display: none;
+      gap: 6px;
+    }
 
-    .range { width: 100%; min-height: 44px; }
-    .slider-label { font-size: 12px; color: var(--color-muted); font-weight: 600; }
+    .slider-row.visible {
+      display: grid;
+    }
+
+    .range {
+      width: 100%;
+      min-height: 44px;
+    }
+
+    .slider-label {
+      font-size: 12px;
+      color: var(--color-muted);
+      font-weight: 600;
+    }
 
     .sidebar {
       display: grid;
@@ -177,7 +213,7 @@
       bottom: 0;
       z-index: 20;
       padding-bottom: env(safe-area-inset-bottom, 0px);
-      background: linear-gradient(180deg, rgba(246,247,251,0) 0%, var(--color-bg) 20%);
+      background: linear-gradient(180deg, rgba(246, 247, 251, 0) 0%, var(--color-bg) 20%);
     }
 
     .run-btn {
@@ -195,12 +231,28 @@
       transition: background-color 180ms ease;
     }
 
-    .run-btn:disabled { cursor: default; }
-    .run-btn[data-mode="queued"] { background: var(--color-warn); }
-    .run-btn[data-mode="running"], .run-btn[data-mode="finalizing"] { background: var(--color-accent); }
-    .run-btn[data-mode="rate_limited"], .run-btn[data-mode="error"] { background: var(--color-danger); }
+    .run-btn:disabled {
+      cursor: default;
+    }
 
-    .run-btn-label { position: relative; z-index: 2; }
+    .run-btn[data-mode="queued"] {
+      background: var(--color-warn);
+    }
+
+    .run-btn[data-mode="running"],
+    .run-btn[data-mode="finalizing"] {
+      background: var(--color-accent);
+    }
+
+    .run-btn[data-mode="rate_limited"],
+    .run-btn[data-mode="error"] {
+      background: var(--color-danger);
+    }
+
+    .run-btn-label {
+      position: relative;
+      z-index: 2;
+    }
 
     .btn-progress-track {
       position: absolute;
@@ -208,7 +260,7 @@
       right: 0;
       bottom: 0;
       height: 4px;
-      background: rgba(255,255,255,0.25);
+      background: rgba(255, 255, 255, 0.25);
       z-index: 1;
       opacity: 0;
       transition: opacity 180ms ease;
@@ -217,17 +269,31 @@
     .btn-progress-bar {
       height: 100%;
       width: 0%;
-      background: rgba(255,255,255,0.92);
+      background: rgba(255, 255, 255, 0.92);
       transition: width 200ms linear;
     }
 
-    .run-btn[data-progress="visible"] .btn-progress-track { opacity: 1; }
-    .run-btn[data-progress="indeterminate"] .btn-progress-track { opacity: 1; }
-    .run-btn[data-progress="indeterminate"] .btn-progress-bar { width: 36%; animation: indeterminate 1.2s ease-in-out infinite; }
+    .run-btn[data-progress="visible"] .btn-progress-track {
+      opacity: 1;
+    }
+
+    .run-btn[data-progress="indeterminate"] .btn-progress-track {
+      opacity: 1;
+    }
+
+    .run-btn[data-progress="indeterminate"] .btn-progress-bar {
+      width: 36%;
+      animation: indeterminate 1.2s ease-in-out infinite;
+    }
 
     @keyframes indeterminate {
-      0% { transform: translateX(-120%); }
-      100% { transform: translateX(320%); }
+      0% {
+        transform: translateX(-120%);
+      }
+
+      100% {
+        transform: translateX(320%);
+      }
     }
 
     .inputs-panel {
@@ -244,7 +310,10 @@
       margin-bottom: 6px;
     }
 
-    textarea, input[type="text"], input[type="number"], input[type="file"] {
+    textarea,
+    input[type="text"],
+    input[type="number"],
+    input[type="file"] {
       width: 100%;
       min-height: 44px;
       border: 1px solid var(--color-border);
@@ -255,7 +324,10 @@
       font-family: var(--sans);
     }
 
-    textarea { resize: vertical; min-height: 84px; }
+    textarea {
+      resize: vertical;
+      min-height: 84px;
+    }
 
     .advanced-block {
       border: 1px solid var(--color-border);
@@ -263,7 +335,7 @@
       padding: var(--space-2);
     }
 
-    .advanced-block > summary {
+    .advanced-block>summary {
       cursor: pointer;
       font-size: 13px;
       font-weight: 700;
@@ -274,7 +346,9 @@
       align-items: center;
     }
 
-    .advanced-block > summary::-webkit-details-marker { display: none; }
+    .advanced-block>summary::-webkit-details-marker {
+      display: none;
+    }
 
     .advanced-content {
       display: grid;
@@ -295,8 +369,15 @@
       overflow: auto;
     }
 
-    #csvTableWrapper table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12.5px; }
-    #csvTableWrapper th, #csvTableWrapper td {
+    #csvTableWrapper table {
+      border-collapse: collapse;
+      width: 100%;
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+
+    #csvTableWrapper th,
+    #csvTableWrapper td {
       border: 1px solid var(--color-border);
       padding: 4px 8px;
       text-align: left;
@@ -312,7 +393,11 @@
       color: #1e3f84;
     }
 
-    .hint { color: var(--color-muted); font-size: 12px; line-height: 1.45; }
+    .hint {
+      color: var(--color-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
 
     .status {
       border: 1px solid var(--color-border);
@@ -334,7 +419,11 @@
       gap: var(--space-3);
     }
 
-    .info-title { font-size: 20px; font-weight: 700; }
+    .info-title {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
     .info-card {
       border: 1px solid var(--color-border);
       background: #fff;
@@ -354,7 +443,9 @@
       padding: var(--space-3);
     }
 
-    .modal-overlay.visible { display: flex; }
+    .modal-overlay.visible {
+      display: flex;
+    }
 
     .modal {
       width: min(760px, 100%);
@@ -366,8 +457,16 @@
       gap: var(--space-2);
     }
 
-    .modal h2 { margin: 0; font-size: 20px; }
-    .modal p { margin: 0; color: #2c3a52; }
+    .modal h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .modal p {
+      margin: 0;
+      color: #2c3a52;
+    }
+
     .modal-actions {
       margin-top: var(--space-2);
       display: flex;
@@ -404,24 +503,57 @@
     }
 
     @media (min-width: 981px) {
-      .layout { grid-template-columns: minmax(0, 1fr) 400px; align-items: start; }
-      .action-row { position: static; padding-bottom: 0; background: transparent; }
-      .sidebar { position: sticky; top: 12px; }
+      .layout {
+        grid-template-columns: minmax(0, 1fr) 400px;
+        align-items: start;
+      }
+
+      .action-row {
+        position: static;
+        padding-bottom: 0;
+        background: transparent;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 12px;
+      }
     }
 
     @media (max-width: 980px) {
-      .page { padding: var(--space-2); gap: var(--space-2); }
-      .live-panel { min-height: 44vh; }
-      .live-box { min-height: 200px; padding: var(--space-2); }
-      .controls-grid { grid-template-columns: 1fr; }
-      .sql-display { align-items: flex-start; justify-content: flex-start; }
+      .page {
+        padding: var(--space-2);
+        gap: var(--space-2);
+      }
+
+      .live-panel {
+        min-height: 44vh;
+      }
+
+      .live-box {
+        min-height: 200px;
+        padding: var(--space-2);
+      }
+
+      .controls-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .sql-display {
+        align-items: flex-start;
+        justify-content: flex-start;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
-      * { animation: none !important; transition-duration: 0ms !important; }
+      * {
+        animation: none !important;
+        transition-duration: 0ms !important;
+      }
     }
   </style>
 </head>
+
 <body>
   <main class="page">
     <nav class="top-tabs" aria-label="Page sections">
@@ -447,7 +579,7 @@
           </div>
 
           <div class="slider-row" id="sliderRow">
-            <input type="range" class="range" min="0" value="0" id="snapSlider" aria-label="Snapshot timeline"/>
+            <input type="range" class="range" min="0" value="0" id="snapSlider" aria-label="Snapshot timeline" />
             <div class="slider-label" id="snapSliderLabel"></div>
           </div>
         </section>
@@ -464,12 +596,14 @@
             <form id="runForm" autocomplete="off">
               <div>
                 <label class="field-label" for="prompt">Prompt</label>
-                <textarea name="prompt" id="prompt" placeholder="e.g. how many planes are of name a380?">{{ prompt_prefill }}</textarea>
+                <textarea name="prompt" id="prompt"
+                  placeholder="e.g. how many planes are of name a380?">{{ prompt_prefill }}</textarea>
               </div>
 
               <div>
                 <label class="field-label" for="context">Context</label>
-                <textarea name="context" id="context" placeholder="Table schema, DDL, and relevant data context">{{ context_prefill }}</textarea>
+                <textarea name="context" id="context"
+                  placeholder="Table schema, DDL, and relevant data context">{{ context_prefill }}</textarea>
               </div>
 
               <details class="advanced-block" id="advancedDetails">
@@ -477,7 +611,7 @@
                 <div class="advanced-content">
                   <div>
                     <label class="field-label" for="csvInput">Upload CSV</label>
-                    <input type="file" id="csvInput" accept=".csv"/>
+                    <input type="file" id="csvInput" accept=".csv" />
                     <div class="csv-preview" id="csvTableWrapper"></div>
                     <div class="hint">CSV preview shows first 30 rows. Schema is written into Context.</div>
                   </div>
@@ -485,27 +619,27 @@
                   <div class="controls-grid">
                     <div>
                       <label class="field-label" for="steps">Steps</label>
-                      <input name="steps" id="steps" type="number" value="10" min="1" max="500"/>
+                      <input name="steps" id="steps" type="number" value="10" min="1" max="500" />
                     </div>
                     <div>
                       <label class="field-label" for="max_len">Max Len</label>
-                      <input name="max_len" id="max_len" type="number" value="512" min="64" max="4096"/>
+                      <input name="max_len" id="max_len" type="number" value="512" min="64" max="4096" />
                     </div>
                     <div>
                       <label class="field-label" for="sql_len">SQL mask len</label>
-                      <input name="sql_len" id="sql_len" type="number" value="64" min="1" max="1024"/>
+                      <input name="sql_len" id="sql_len" type="number" value="64" min="1" max="1024" />
                     </div>
                     <div>
                       <label class="field-label" for="top_k">Top-k</label>
-                      <input name="top_k" id="top_k" type="number" value="1" min="0" max="2000"/>
+                      <input name="top_k" id="top_k" type="number" value="1" min="0" max="2000" />
                     </div>
                     <div>
                       <label class="field-label" for="top_p">Top-p</label>
-                      <input name="top_p" id="top_p" type="number" step="0.01" value="1" min="0" max="1"/>
+                      <input name="top_p" id="top_p" type="number" step="0.01" value="1" min="0" max="1" />
                     </div>
                     <div>
                       <label class="field-label" for="model_dir">Model Dir</label>
-                      <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}"/>
+                      <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}" />
                     </div>
                   </div>
                 </div>
@@ -523,18 +657,20 @@
         <div class="info-title">General Info</div>
         <div class="info-card">
           <strong>What is text diffusion here?</strong>
-          <div>Generation starts from masked SQL tokens and denoises over multiple steps, showing intermediate states before final SQL.</div>
+          <div>Generation starts from masked SQL tokens and denoises over multiple steps, showing intermediate states
+            before final SQL.</div>
         </div>
         <div class="info-card">
           <strong>Runtime profile</strong>
-          <div>CPU-optimized, lightweight public inference with queueing and rate limits to avoid overload.</div>
+          <p>This is an early Research Preview deployed on a <strong>CPU</strong> (yes i cant afford GPUs).</p>
           <div>Model parameters: <strong>{{ model_param_count_display }}</strong></div>
           <div>Requested dtype: <strong>{{ inference_dtype_requested }}</strong></div>
           <div>Effective dtype: <strong>{{ inference_dtype_effective }}</strong></div>
         </div>
         <div class="info-card">
           <strong>How to use</strong>
-          <div>Provide prompt + context, adjust steps if needed, then run. Higher steps increase quality but take longer.</div>
+          <div>Provide prompt + context, adjust steps if needed, then run. Higher steps increase quality but take
+            longer.</div>
         </div>
       </article>
     </section>
@@ -543,9 +679,10 @@
   <div class="modal-overlay" id="introModal" role="dialog" aria-modal="true" aria-labelledby="introTitle">
     <div class="modal">
       <h2 id="introTitle">Welcome to Text Diffusion Inference</h2>
-      <p>This playground generates SQL via iterative denoising. You can observe each step from masked tokens to final output.</p>
-      <p>Deployment is CPU-safe and public-ready with queueing and rate limits.</p>
-      <p>Model size: <strong>{{ model_param_count_display }}</strong> parameters. Default dtype preference: <strong>{{ inference_dtype_requested }}</strong> (effective: <strong>{{ inference_dtype_effective }}</strong>).</p>
+      <p>This playground generates SQL via iterative denoising. You can observe each step from masked tokens to final
+        output.</p>
+      <p>This is an early research preview deployed on a <strong>CPU</strong>.</p>
+      <p>Model size: <strong>{{ model_param_count_display }}</strong> parameters.</p>
       <div class="modal-actions">
         <button class="btn-plain" id="introDismiss">Close</button>
         <button class="btn-primary" id="introStart">Open Inference</button>
@@ -553,6 +690,7 @@
     </div>
   </div>
 
-  <script src="/static/inference.js"></script>
+  <script src="{{ url_for('static', filename='inference.js') }}?v={{ static_version }}"></script>
 </body>
+
 </html>

@@ -7,6 +7,7 @@ let es = null;
 let pollTimer = null;
 let playbackTimer = null;
 let rateLimitTimer = null;
+let queueCountdownTimer = null;
 let fallbackPolling = false;
 let pollDelayMs = 250;
 
@@ -18,8 +19,9 @@ let lastSnapshotCount = 0;
 let lastStatusMsg = "";
 
 let queueEtaBaseline = null;
-let recentQueueEtas = [];
-let queueEtaStable = false;
+let queueEtaSeconds = null;
+let queueEtaSyncedAtMs = 0;
+let queuePositionCurrent = null;
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -61,6 +63,79 @@ function setQueueChip(text, state = '') {
   queueChip.dataset.state = state;
 }
 
+function formatCountdown(seconds) {
+  const safe = Math.max(0, Math.ceil(seconds));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  if (mins <= 0) return `${secs}s`;
+  if (mins < 60) return `${mins}m ${String(secs).padStart(2, '0')}s`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h ${String(remMins).padStart(2, '0')}m`;
+}
+
+function getQueueRemainingSeconds() {
+  if (!Number.isFinite(queueEtaSeconds) || queueEtaSeconds <= 0 || !queueEtaSyncedAtMs) {
+    return null;
+  }
+  const elapsed = (Date.now() - queueEtaSyncedAtMs) / 1000;
+  return Math.max(0, Math.ceil(queueEtaSeconds - elapsed));
+}
+
+function stopQueueCountdown() {
+  if (queueCountdownTimer) {
+    clearInterval(queueCountdownTimer);
+    queueCountdownTimer = null;
+  }
+}
+
+function renderQueuedCountdown() {
+  const posText = Number.isFinite(queuePositionCurrent) && queuePositionCurrent > 0 ? `#${queuePositionCurrent}` : '#?';
+  const remaining = getQueueRemainingSeconds();
+
+  if (!Number.isFinite(remaining)) {
+    runBtnLabel.textContent = `Queued ${posText} • ~estimating`;
+    setQueueChip(`Queued ${posText}`, 'queued');
+    setStatus(`Queued ${posText} • ~estimating`);
+    setProgressIndeterminate();
+    return;
+  }
+
+  const countdownText = formatCountdown(remaining);
+  runBtnLabel.textContent = `Queued ${posText} • ${countdownText}`;
+  setQueueChip(`Queued ${posText} • ${countdownText}`, 'queued');
+  setStatus(`Queued ${posText} • ${countdownText}`);
+
+  if (!Number.isFinite(queueEtaBaseline) || queueEtaBaseline <= 0 || remaining > queueEtaBaseline) {
+    queueEtaBaseline = remaining;
+  }
+  const pct = (remaining / Math.max(queueEtaBaseline, 1)) * 100;
+  setProgressValue(Math.max(0, Math.min(100, pct)));
+}
+
+function syncQueuedEstimate(queuePosition, etaSeconds) {
+  queuePositionCurrent = Number.isFinite(queuePosition) && queuePosition > 0 ? queuePosition : null;
+
+  if (Number.isFinite(etaSeconds) && etaSeconds > 0) {
+    queueEtaSeconds = etaSeconds;
+    queueEtaSyncedAtMs = Date.now();
+    if (!Number.isFinite(queueEtaBaseline) || queueEtaBaseline <= 0 || etaSeconds > queueEtaBaseline) {
+      queueEtaBaseline = etaSeconds;
+    }
+  } else {
+    queueEtaSeconds = null;
+    queueEtaSyncedAtMs = 0;
+  }
+
+  renderQueuedCountdown();
+
+  if (!queueCountdownTimer) {
+    queueCountdownTimer = setInterval(() => {
+      renderQueuedCountdown();
+    }, 250);
+  }
+}
+
 function setProgressHidden() {
   runBtn.dataset.progress = 'hidden';
   runBtnProgress.style.width = '0%';
@@ -81,6 +156,7 @@ function setUiState(mode, data = {}) {
   runBtn.dataset.mode = mode;
 
   if (mode === UI_MODES.IDLE) {
+    stopQueueCountdown();
     runBtn.disabled = false;
     runBtnLabel.textContent = 'Run Generation';
     setProgressHidden();
@@ -89,29 +165,13 @@ function setUiState(mode, data = {}) {
   }
 
   if (mode === UI_MODES.QUEUED) {
-    const queuePosition = Number.isFinite(data.queuePosition) && data.queuePosition > 0 ? data.queuePosition : null;
-    const etaSeconds = Number.isFinite(data.etaSeconds) && data.etaSeconds > 0 ? data.etaSeconds : null;
-
-    const posText = queuePosition ? `#${queuePosition}` : '#?';
-    const etaText = etaSeconds ? `~${etaSeconds}s` : '~estimating';
-
     runBtn.disabled = true;
-    runBtnLabel.textContent = `Queued ${posText} • ${etaText}`;
-    setQueueChip(`Queued ${posText}`, 'queued');
-
-    if (data.progressMode === 'determinate' && etaSeconds) {
-      if (!Number.isFinite(queueEtaBaseline) || queueEtaBaseline <= 0 || etaSeconds > queueEtaBaseline) {
-        queueEtaBaseline = etaSeconds;
-      }
-      const pct = (etaSeconds / Math.max(queueEtaBaseline, 1)) * 100;
-      setProgressValue(Math.max(5, Math.min(100, pct)));
-    } else {
-      setProgressIndeterminate();
-    }
+    syncQueuedEstimate(data.queuePosition, data.etaSeconds);
     return;
   }
 
   if (mode === UI_MODES.RUNNING) {
+    stopQueueCountdown();
     runBtn.disabled = true;
     const stepLabel = data.stepLabel || 'Running';
     runBtnLabel.textContent = `Running • ${stepLabel}`;
@@ -126,6 +186,7 @@ function setUiState(mode, data = {}) {
   }
 
   if (mode === UI_MODES.FINALIZING) {
+    stopQueueCountdown();
     runBtn.disabled = true;
     runBtnLabel.textContent = 'Finalizing...';
     setQueueChip('Finalizing', 'running');
@@ -134,6 +195,7 @@ function setUiState(mode, data = {}) {
   }
 
   if (mode === UI_MODES.RATE_LIMITED) {
+    stopQueueCountdown();
     runBtn.disabled = true;
     runBtnLabel.textContent = `Rate limited • ${data.remaining || 0}s`;
     setQueueChip('Rate limited', 'rate_limited');
@@ -142,6 +204,7 @@ function setUiState(mode, data = {}) {
   }
 
   if (mode === UI_MODES.ERROR) {
+    stopQueueCountdown();
     runBtn.disabled = true;
     runBtnLabel.textContent = 'Run Failed';
     setQueueChip('Error', 'rate_limited');
@@ -171,6 +234,7 @@ function resetRunState() {
     clearInterval(rateLimitTimer);
     rateLimitTimer = null;
   }
+  stopQueueCountdown();
 
   runId = null;
   runSessionId += 1;
@@ -187,8 +251,9 @@ function resetRunState() {
   pendingSnapshots = [];
 
   queueEtaBaseline = null;
-  recentQueueEtas = [];
-  queueEtaStable = false;
+  queueEtaSeconds = null;
+  queueEtaSyncedAtMs = 0;
+  queuePositionCurrent = null;
 
   sliderRow.classList.remove('visible');
   setUiState(UI_MODES.IDLE);
@@ -274,14 +339,40 @@ function normalizeSQLDisplay(sql) {
 
 function sanitizeFinalSql(sql) {
   if (!sql) return '';
-  return String(sql)
+  let out = String(sql);
+  // Normalize zero-width / NBSP style spacing artifacts first.
+  out = out.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\u00A0/g, ' ');
+  // Collapse letter-spaced special tags like "< p a d >", "< / s >", "< m a s k >", "[ p a d ]".
+  out = out
+    .replace(/<\s*\/?\s*p\s*a\s*d\s*>/gi, ' ')
+    .replace(/\[\s*p\s*a\s*d\s*\]/gi, ' ')
+    .replace(/<\s*\/?\s*s\s*>/gi, ' ')
+    .replace(/<\s*m\s*a\s*s\s*k\s*>/gi, ' ');
+  return out
+    // Remove common special/pad tokens that must never appear in terminal output.
+    .replace(/<\s*\/?\s*pad\s*>/gi, ' ')
+    .replace(/\[\s*pad\s*\]/gi, ' ')
+    .replace(/<\s*\/?\s*s\s*>/gi, ' ')
+    .replace(/<\s*mask\s*>/gi, ' ')
+    // Remove contiguous underscore masks like "____"
     .replace(/\s*_{2,}\s*/g, ' ')
+    // Remove tokenized/space-separated underscore runs like "_ _ _ _"
+    .replace(/(?:^|\s)(?:_+\s+){1,}_+(?=\s|$)/g, ' ')
+    // Remove any remaining standalone underscore-only tokens
+    .replace(/(?:^|\s)_+(?=\s|$)/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function snapshotText(snap) {
   return normalizeSQLDisplay(snap.sql_only || extractSQL(snap.text || ''));
+}
+
+function isTerminalSnapshot(snap) {
+  if (!snap) return false;
+  const step = Number(snap.step);
+  const total = Number(snap.total_steps);
+  return Number.isFinite(step) && Number.isFinite(total) && total > 0 && step === total;
 }
 
 function upsertSnapshot(snap) {
@@ -306,13 +397,19 @@ function updateSliderLabel() {
 
 function applySnapshotAnimated(snap) {
   if (!snap) return;
-  animateBlurToText(snapshotText(snap));
+  const text = isTerminalSnapshot(snap)
+    ? sanitizeFinalSql(snapshotText(snap))
+    : snapshotText(snap);
+  animateBlurToText(text);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
 }
 
 function applySnapshotImmediate(snap) {
   if (!snap) return;
-  renderImmediate(snapshotText(snap));
+  const text = isTerminalSnapshot(snap)
+    ? sanitizeFinalSql(snapshotText(snap))
+    : snapshotText(snap);
+  renderImmediate(text);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
 }
 
@@ -327,7 +424,7 @@ function ensurePlayback() {
     }
     applySnapshotAnimated(pendingSnapshots.shift());
     maybeFinalize();
-  }, 100);
+  }, 85);
 }
 
 function enqueueAnimated(snap) {
@@ -337,15 +434,27 @@ function enqueueAnimated(snap) {
 }
 
 function replayAllOnceAndFinalize() {
-  if (!historySnapshots.length) {
+  setUiState(UI_MODES.FINALIZING);
+  // Replay all non-terminal history steps, then append one canonical terminal frame.
+  pendingSnapshots = historySnapshots.filter((snap) => !isTerminalSnapshot(snap));
+  const terminalFromHistory = historySnapshots.find((snap) => isTerminalSnapshot(snap));
+  const terminalStep = terminalFromHistory
+    ? Number(terminalFromHistory.step)
+    : (historySnapshots.length ? Number(historySnapshots[historySnapshots.length - 1].step) : 0);
+  const terminalTotal = terminalFromHistory
+    ? Number(terminalFromHistory.total_steps)
+    : (historySnapshots.length ? Number(historySnapshots[historySnapshots.length - 1].total_steps) : terminalStep);
+  if (terminalSqlText) {
+    pendingSnapshots.push({
+      step: Number.isFinite(terminalStep) ? terminalStep : 0,
+      total_steps: Number.isFinite(terminalTotal) ? terminalTotal : (Number.isFinite(terminalStep) ? terminalStep : 0),
+      sql_only: sanitizeFinalSql(terminalSqlText),
+      text: `<SQL>${sanitizeFinalSql(terminalSqlText)}</SQL>`,
+    });
+  }
+  if (!pendingSnapshots.length) {
     maybeFinalize();
     return;
-  }
-  setUiState(UI_MODES.FINALIZING);
-  pendingSnapshots = [...historySnapshots];
-  if (terminalSqlText) {
-    const last = historySnapshots[historySnapshots.length - 1] || { step: 0, total_steps: 0 };
-    pendingSnapshots.push({ ...last, sql_only: terminalSqlText, text: `<SQL>${terminalSqlText}</SQL>` });
   }
   ensurePlayback();
 }
@@ -421,41 +530,11 @@ function parseStepProgress(statusMsg) {
   };
 }
 
-function pushEtaSample(eta) {
-  if (!Number.isFinite(eta) || eta <= 0) return;
-  recentQueueEtas.push(eta);
-  if (recentQueueEtas.length > 2) {
-    recentQueueEtas = recentQueueEtas.slice(-2);
-  }
-}
-
-function isEtaStable(queuePosition, etaSeconds, etaConfidence) {
-  if (etaConfidence === 'high') return true;
-  if (Number.isFinite(queuePosition) && queuePosition === 1) return true;
-  if (!Number.isFinite(etaSeconds) || etaSeconds <= 0) return false;
-  pushEtaSample(etaSeconds);
-  if (recentQueueEtas.length < 2) return false;
-  const [a, b] = recentQueueEtas;
-  const delta = Math.abs(a - b);
-  const ref = Math.max(1, Math.max(a, b));
-  return (delta / ref) <= 0.2;
-}
-
-function essentialQueuedStatus(queuePosition, etaSeconds) {
-  const posText = Number.isFinite(queuePosition) && queuePosition > 0 ? `#${queuePosition}` : '#?';
-  const etaText = Number.isFinite(etaSeconds) && etaSeconds > 0 ? `~${etaSeconds}s` : '~estimating';
-  return `Queued ${posText} • ${etaText}`;
-}
-
-function setQueuedUi(queuePosition, etaSeconds, etaConfidence) {
-  const stable = queueEtaStable || isEtaStable(queuePosition, etaSeconds, etaConfidence);
-  queueEtaStable = stable;
+function setQueuedUi(queuePosition, etaSeconds, _etaConfidence) {
   setUiState(UI_MODES.QUEUED, {
     queuePosition,
     etaSeconds,
-    progressMode: stable ? 'determinate' : 'indeterminate',
   });
-  setStatus(essentialQueuedStatus(queuePosition, etaSeconds));
 }
 
 function updateRunningUi(statusMsg) {
@@ -548,6 +627,8 @@ async function pollRunState(id) {
       donePayload = data;
       if (data.sql_only) {
         terminalSqlText = sanitizeFinalSql(data.sql_only);
+      } else if (historySnapshots.length > 0) {
+        terminalSqlText = sanitizeFinalSql(snapshotText(historySnapshots[historySnapshots.length - 1]));
       }
       replayAllOnceAndFinalize();
     }
@@ -616,6 +697,8 @@ function openStream(id, sessionId) {
     donePayload = payload;
     if (payload.sql_only) {
       terminalSqlText = sanitizeFinalSql(payload.sql_only);
+    } else if (historySnapshots.length > 0) {
+      terminalSqlText = sanitizeFinalSql(snapshotText(historySnapshots[historySnapshots.length - 1]));
     }
     replayAllOnceAndFinalize();
   });
@@ -626,7 +709,7 @@ runForm.addEventListener('submit', async (ev) => {
   resetRunState();
 
   renderImmediate('Queueing request...');
-  setUiState(UI_MODES.QUEUED, { queuePosition: null, etaSeconds: null, progressMode: 'indeterminate' });
+  setUiState(UI_MODES.QUEUED, { queuePosition: null, etaSeconds: null });
   setStatus('Submitting run...');
 
   const form = new FormData(runForm);
