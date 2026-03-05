@@ -129,3 +129,15 @@ The container sets:
 - `PYTHONUNBUFFERED=1`
 
 This is intentional for predictable CPU load on a Linux CPU host.
+
+For a faster profile (roughly ~2x on many CPU-only hosts), increase worker CPU/threads in `.env`:
+
+```bash
+TORCH_NUM_THREADS=4
+OMP_NUM_THREADS=4
+MKL_NUM_THREADS=4
+WORKER_CPUS=3.0
+WORKER_MEM_LIMIT=4g
+```
+
+And lower denoising steps in requests (for example `steps=6` instead of `10`) for near-linear speedups.

@@ -36,16 +36,16 @@ services:
       - "900"
     environment:
       - PYTHONUNBUFFERED=1
-      - TORCH_NUM_THREADS=1
-      - OMP_NUM_THREADS=1
-      - MKL_NUM_THREADS=1
+      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-4}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
       - ./generated_gifs:/app/generated_gifs
     restart: unless-stopped
-    mem_limit: 2g
-    cpus: 1.0
+    mem_limit: ${WEB_MEM_LIMIT:-2g}
+    cpus: ${WEB_CPUS:-1.0}
 
   worker:
     image: diffusion-llm:latest
@@ -55,16 +55,16 @@ services:
     entrypoint: ["python", "src/inference.py", "--worker", "--model-dir", "/models/model"]
     environment:
       - PYTHONUNBUFFERED=1
-      - TORCH_NUM_THREADS=1
-      - OMP_NUM_THREADS=1
-      - MKL_NUM_THREADS=1
+      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-4}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
       - ./generated_gifs:/app/generated_gifs
     restart: unless-stopped
-    mem_limit: 2g
-    cpus: 1.0
+    mem_limit: ${WORKER_MEM_LIMIT:-4g}
+    cpus: ${WORKER_CPUS:-3.0}
 
 volumes:
   redis_data:

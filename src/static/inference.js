@@ -12,6 +12,11 @@ let playbackTimer = null;
 let donePayload = null;
 let runInProgress = false;
 let finalReplayStarted = false;
+let queueEtaBaseline = null;
+let rateLimitTimer = null;
+let terminalStateReached = false;
+let runSessionId = 0;
+let terminalSqlText = '';
 
 const stepBox = document.getElementById('stepBox');
 const statusBox = document.getElementById('status');
@@ -46,12 +51,12 @@ function ensureBtnProgressNode() {
   return n;
 }
 
-function setButtonVisual(mode, label, progressPct) {
-  runBtn.classList.remove('btn-queued', 'btn-running', 'btn-stopping');
+function setButtonVisual(mode, label, remainingPct) {
+  runBtn.classList.remove('btn-queued', 'btn-running', 'btn-stopping', 'btn-rate-limited');
   if (mode) runBtn.classList.add(mode);
   runBtn.textContent = label;
   const bar = ensureBtnProgressNode();
-  bar.style.width = `${Math.max(0, Math.min(100, progressPct || 0))}%`;
+  bar.style.width = `${Math.max(0, Math.min(100, remainingPct || 0))}%`;
   bar.style.opacity = mode ? '1' : '0';
 }
 
@@ -60,16 +65,43 @@ function setBtnStateIdle() {
   runBtn.disabled = false;
   setButtonVisual('', 'Run Generation', 0);
   setQueueChip('');
+  if (rateLimitTimer) {
+    clearInterval(rateLimitTimer);
+    rateLimitTimer = null;
+  }
+}
+
+function stopTransports() {
+  fallbackPolling = false;
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  if (es) {
+    es.close();
+    es = null;
+  }
 }
 
 function updateRunUx(state, queuePos, etaSeconds, statusMsg){
   if (state === 'queued') {
     const posText = Number.isFinite(queuePos) && queuePos > 0 ? `#${queuePos}` : '#1';
     const etaText = Number.isFinite(etaSeconds) && etaSeconds > 0 ? `~${etaSeconds}s` : '~10s';
+    let remaining = 100;
+    if (Number.isFinite(etaSeconds) && etaSeconds > 0) {
+      if (!Number.isFinite(queueEtaBaseline) || queueEtaBaseline <= 0 || etaSeconds > queueEtaBaseline) {
+        queueEtaBaseline = etaSeconds;
+      }
+      remaining = Math.round((etaSeconds / Math.max(queueEtaBaseline, 1)) * 100);
+      remaining = Math.max(8, Math.min(100, remaining));
+    } else if (Number.isFinite(queuePos) && queuePos > 0) {
+      remaining = Math.max(12, 100 - ((queuePos - 1) * 18));
+    }
     runInProgress = true;
     runBtn.disabled = true;
-    setButtonVisual('btn-queued', `Queued ${posText} ${etaText}`, 8);
+    setButtonVisual('btn-queued', `Queued ${posText} ${etaText}`, remaining);
     setQueueChip(`Queued ${posText} ${etaText}`);
+    renderImmediate('____ ____ ____ ____');
     return;
   }
   if (state === 'running') {
@@ -84,23 +116,45 @@ function updateRunUx(state, queuePos, etaSeconds, statusMsg){
         const j = parseInt(m[2], 10);
         if (j > 0) pct = Math.round((i / j) * 100);
       }
-      label = `Stop • ${statusMsg}`;
       label = `${statusMsg}`;
       setQueueChip(`Running (${statusMsg})`);
     } else {
       setQueueChip('Running');
     }
-    setButtonVisual('btn-running', label, pct);
+    setButtonVisual('btn-running', label, Math.max(2, 100 - pct));
     return;
   }
   if (state === 'stopping') {
     runInProgress = true;
     runBtn.disabled = true;
-    setButtonVisual('btn-stopping', 'Stopping…', 95);
+    setButtonVisual('btn-stopping', 'Stopping…', 5);
     setQueueChip('Stopping');
     return;
   }
   setBtnStateIdle();
+}
+
+function startRateLimitCooldown(retryAfterSeconds, message){
+  const total = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? Math.ceil(retryAfterSeconds) : 10;
+  let remaining = total;
+  runInProgress = true;
+  runBtn.disabled = true;
+  setQueueChip('Rate limited');
+  setStatus(message || 'Rate limited. Please retry shortly.');
+  setButtonVisual('btn-rate-limited', `Rate limited • ${remaining}s`, 100);
+  if (rateLimitTimer) clearInterval(rateLimitTimer);
+  rateLimitTimer = setInterval(()=>{
+    remaining -= 1;
+    if (remaining <= 0) {
+      clearInterval(rateLimitTimer);
+      rateLimitTimer = null;
+      setBtnStateIdle();
+      setStatus('Ready.');
+      return;
+    }
+    const pct = Math.max(0, Math.round((remaining / total) * 100));
+    setButtonVisual('btn-rate-limited', `Rate limited • ${remaining}s`, pct);
+  }, 1000);
 }
 
 function fitLiveFontForElem(elem) {
@@ -182,7 +236,8 @@ function extractSQL(s){
 
 function normalizeSQLDisplay(sql){
   if (!sql) return '(empty)';
-  return String(sql).replace(/\s{2,}/g, ' ').trim() || '(empty)';
+  const raw = String(sql).replace(/\r/g, '');
+  return raw.trim() ? raw : '(empty)';
 }
 
 function snapshotText(snap){
@@ -208,16 +263,19 @@ runBtn.onclick = async function(ev) {
 };
 
 function resetRunState(){
-  if (es){ es.close(); es = null; }
-  if (pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
+  stopTransports();
   if (playbackTimer){ clearInterval(playbackTimer); playbackTimer = null; }
-  fallbackPolling = false;
   pollDelayMs = 250;
   lastSnapshotCount = 0;
   lastStatusMsg = '';
   pendingSnapshots = [];
   donePayload = null;
   finalReplayStarted = false;
+  terminalStateReached = false;
+  runSessionId += 1;
+  terminalSqlText = '';
+  queueEtaBaseline = null;
+  if (rateLimitTimer){ clearInterval(rateLimitTimer); rateLimitTimer = null; }
   historySnapshots = [];
   historyByStep = new Map();
   sliderRow.style.display = 'none';
@@ -227,24 +285,35 @@ function resetRunState(){
 runForm.addEventListener('submit', async (ev)=>{
   ev.preventDefault();
   resetRunState();
-  setStatus('Preparing run...');
+  setStatus('Submitting run...');
+  renderImmediate('Queueing request...');
   runInProgress = true;
-  setButtonVisual('btn-queued', 'Queued #1 ~10s', 6);
+  setButtonVisual('btn-queued', 'Queued #1 ~10s', 100);
 
   const form = new FormData(ev.target);
   try {
     const resp = await fetch('/start', { method:'POST', body: form });
     if(!resp.ok){
-      const txt = await resp.text();
-      setStatus('ERROR: ' + resp.status + ' - ' + txt);
+      let bodyText = await resp.text();
+      let bodyJson = null;
+      try { bodyJson = JSON.parse(bodyText); } catch (_) {}
+      if (resp.status === 429) {
+        const retryAfterHeader = resp.headers.get('Retry-After');
+        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+        const msg = (bodyJson && bodyJson.message) ? bodyJson.message : ('HTTP 429: ' + bodyText);
+        startRateLimitCooldown(retryAfter, msg);
+        return;
+      }
+      const pretty = bodyJson && bodyJson.message ? bodyJson.message : bodyText;
+      setStatus('ERROR: ' + resp.status + ' - ' + pretty);
       setBtnStateIdle();
       return;
     }
     const j = await resp.json();
     runId = j.run_id;
     updateRunUx(j.state, j.queue_position, j.eta_seconds, '');
-    setStatus('Run started (id: ' + runId + '). Streaming updates...');
-    openStream(runId);
+    setStatus('Run accepted. Streaming updates...');
+    openStream(runId, runSessionId);
   } catch(e){
     setStatus('Exception starting run: ' + e.toString());
     setBtnStateIdle();
@@ -305,17 +374,34 @@ function replayAllOnceAndFinalize(){
   if (finalReplayStarted) return;
   finalReplayStarted = true;
   pendingSnapshots = [];
+  renderImmediate('Finalizing replay...');
   for (const snap of historySnapshots) pendingSnapshots.push(snap);
+  if (terminalSqlText) {
+    const last = historySnapshots.length ? historySnapshots[historySnapshots.length - 1] : { step: 0, total_steps: 0 };
+    pendingSnapshots.push({
+      ...last,
+      sql_only: terminalSqlText,
+      text: `<SQL>${terminalSqlText}</SQL>`,
+    });
+  }
   ensurePlayback();
 }
 
 function finishRun(payload){
+  stopTransports();
+  terminalStateReached = true;
+  if (payload && payload.sql_only) {
+    terminalSqlText = normalizeSQLDisplay(payload.sql_only);
+  }
   if (payload && payload.state === 'error') {
     setStatus(payload.status || 'Run failed.');
+    renderImmediate('Run failed. Check status details.');
   } else if (payload && payload.state === 'timed_out') {
     setStatus(payload.status || 'Run timed out.');
+    renderImmediate('Run timed out.');
   } else if (payload && payload.state === 'stopped') {
     setStatus(payload.status || 'Run stopped.');
+    renderImmediate('Run stopped.');
   } else {
     setStatus(payload && payload.status ? payload.status : 'Run finished.');
   }
@@ -326,14 +412,27 @@ function finishRun(payload){
     snapSlider.value = snapSlider.max;
     sliderRow.style.display = 'flex';
     updateSliderLabel();
-    applySnapshotImmediate(historySnapshots[historySnapshots.length - 1]);
+    if (terminalSqlText) {
+      renderImmediate(terminalSqlText);
+    } else {
+      applySnapshotImmediate(historySnapshots[historySnapshots.length - 1]);
+    }
+  } else if (terminalSqlText) {
+    renderImmediate(terminalSqlText);
   }
 }
 
 async function pollRunState(id){
+  if (terminalStateReached) return;
   try {
     const resp = await fetch('/run/' + id + '?after=' + encodeURIComponent(lastSnapshotCount), { cache: 'no-store' });
     if(!resp.ok){
+      if (resp.status === 429) {
+        const retryAfterHeader = resp.headers.get('Retry-After');
+        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+        startRateLimitCooldown(retryAfter, 'Rate limited while polling. Retrying automatically.');
+        return;
+      }
       setStatus('Polling failed: HTTP ' + resp.status);
       return;
     }
@@ -363,7 +462,12 @@ async function pollRunState(id){
     }
 
     if (data.done) {
+      stopTransports();
+      terminalStateReached = true;
       donePayload = data;
+      if (data.sql_only) {
+        terminalSqlText = normalizeSQLDisplay(data.sql_only);
+      }
       replayAllOnceAndFinalize();
       maybeFinalize();
     }
@@ -373,37 +477,40 @@ async function pollRunState(id){
 }
 
 function startPollingFallback(id){
-  if (fallbackPolling) return;
+  if (fallbackPolling || terminalStateReached) return;
   fallbackPolling = true;
   if (es){ es.close(); es = null; }
   setStatus('SSE unavailable via proxy. Switched to polling fallback.');
 
   const loop = async ()=>{
-    if (!fallbackPolling) return;
+    if (!fallbackPolling || terminalStateReached) return;
     await pollRunState(id);
-    if (!fallbackPolling) return;
+    if (!fallbackPolling || terminalStateReached) return;
     pollTimer = setTimeout(loop, pollDelayMs);
   };
   loop();
 }
 
-function openStream(id){
+function openStream(id, sessionId){
   if (es){ es.close(); es = null; }
   es = new EventSource('/stream/' + id);
   es.onopen = ()=> console.log('SSE opened');
   es.onerror = (e)=>{
+    if (terminalStateReached || sessionId !== runSessionId) return;
     console.warn('SSE error', e);
     const state = es ? es.readyState : -1;
-    setStatus('SSE connection error (state ' + state + '). Falling back to polling.');
+    setStatus('SSE connection issue (state ' + state + '). Falling back to polling.');
     startPollingFallback(id);
   };
   es.addEventListener('snapshot', (ev)=>{
+    if (terminalStateReached || sessionId !== runSessionId) return;
     const obj = JSON.parse(ev.data);
     upsertSnapshot(obj);
     enqueueAnimated(obj);
     lastSnapshotCount = historySnapshots.length;
   });
   es.addEventListener('status', (ev)=>{
+    if (terminalStateReached || sessionId !== runSessionId) return;
     const info = JSON.parse(ev.data);
     if (info && info.msg) {
       lastStatusMsg = info.msg;
@@ -412,8 +519,14 @@ function openStream(id){
     }
   });
   es.addEventListener('done', (ev)=>{
+    if (terminalStateReached || sessionId !== runSessionId) return;
+    stopTransports();
+    terminalStateReached = true;
     const payload = JSON.parse(ev.data);
     donePayload = payload || {};
+    if (payload && payload.sql_only) {
+      terminalSqlText = normalizeSQLDisplay(payload.sql_only);
+    }
     replayAllOnceAndFinalize();
     maybeFinalize();
   });
@@ -423,7 +536,14 @@ snapSlider.addEventListener('input', ()=>{
   if (!historySnapshots.length) return;
   const idx = parseInt(snapSlider.value, 10);
   const snap = historySnapshots[idx];
-  applySnapshotImmediate(snap);
+  if (terminalSqlText && idx === historySnapshots.length - 1) {
+    renderImmediate(terminalSqlText);
+    if (snap) {
+      stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
+    }
+  } else {
+    applySnapshotImmediate(snap);
+  }
   updateSliderLabel();
 });
 
@@ -482,3 +602,4 @@ function processCSV(text){
 
 fitLiveFont();
 setBtnStateIdle();
+renderImmediate('Ready for generation. Submit a prompt to start.');

@@ -1,0 +1,341 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Diffusion LLM Playground</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{
+      --accent: #1f6feb;
+      --muted: #6b7280;
+      --bg: #f7fafc;
+      --card: #ffffff;
+      --mono: 'DejaVu Sans Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+    }
+    html,body { height:100%; margin:0; background:var(--bg); font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; color:#0f172a; }
+    .vh { height:100vh; display:flex; flex-direction:column; }
+    .container { width:100%; max-width:1400px; margin:0 auto; padding:12px; box-sizing:border-box; display:flex; flex-direction:column; gap:12px; flex:1 1 auto; }
+    .live-large { background:var(--card); border-radius:12px; padding:14px; box-shadow:0 8px 28px rgba(2,6,23,0.06); display:flex; gap:14px; align-items:stretch; min-height:52vh; }
+    .live-left { flex:1; display:flex; flex-direction:column; gap:10px; }
+    .live-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .live-header .title { font-weight:700; font-size:16px; color:#0b1220; }
+    .step-pill { background:#eef2ff; color:var(--accent); padding:6px 10px; border-radius:999px; font-weight:700; font-size:14px; }
+    /* lighter gray background for live area and nicer padding */
+    .live-box { flex:1; background:#f3f4f6; border-radius:10px; padding:22px; overflow:auto; display:flex; align-items:center; justify-content:center; min-height:320px; }
+    .sql-display { font-family:var(--mono); font-weight:700; white-space:pre-wrap; word-break:break-word; color:#021024; margin:0; }
+    .right-col { width:min(420px, 100%); display:flex; flex-direction:column; gap:12px; }
+    .controls { background:var(--card); padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(2,6,23,0.04); position:sticky; top:10px; }
+    .label { font-weight:700; margin-bottom:6px; font-size:13px; color:#0b1220; display:block; }
+    input[type=text], textarea, input[type=number], select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #e6eef7; font-size:14px; box-sizing:border-box; }
+    textarea { min-height:80px; resize:vertical; font-family:inherit; }
+    .btn { background:var(--accent); color:white; border:none; padding:12px 16px; border-radius:10px; cursor:pointer; font-weight:700; font-size:15px; width:100%; position:relative; overflow:hidden; }
+    .btn.btn-queued { background:#b46a08; animation: btnShiver 900ms ease-in-out infinite; }
+    .btn.btn-running { background:#0a6dd9; animation: btnPulse 1200ms ease-in-out infinite; }
+    .btn.btn-stopping { background:#8b1f1f; animation:none; opacity:0.92; }
+    .btn.btn-rate-limited { background:#a61b37; animation:none; }
+    .btn .btn-progress-bar { position:absolute; left:0; bottom:0; height:4px; background:rgba(255,255,255,0.86); width:0%; opacity:0; transition:width 220ms linear, opacity 120ms ease; }
+    .btn-ghost { background:transparent; color:var(--accent); border:1px solid #e6eef7; padding:10px 12px; border-radius:8px; cursor:pointer; }
+    .small { font-size:13px; color:var(--muted); }
+    .status { margin-top:6px; background:#ffffff; padding:8px; border-radius:8px; font-family:var(--mono); font-size:13px; max-height:120px; overflow:auto; white-space:pre-wrap; border:1px solid #f0f6ff; }
+    .gif-area { margin-top:8px; display:flex; gap:8px; align-items:center; }
+    .controls-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .footer { color:var(--muted); font-size:13px; margin-top:6px; }
+    @keyframes btnPulse {
+      0% { transform: translateY(0); filter: saturate(1.0); }
+      50% { transform: translateY(-1px); filter: saturate(1.2); }
+      100% { transform: translateY(0); filter: saturate(1.0); }
+    }
+    @keyframes btnShiver {
+      0% { transform: translateX(0); }
+      25% { transform: translateX(1px); }
+      50% { transform: translateX(-1px); }
+      75% { transform: translateX(1px); }
+      100% { transform: translateX(0); }
+    }
+    @media (max-width: 980px) {
+      .live-large { flex-direction:column; min-height:55vh; }
+      .right-col { width:100%; }
+    }
+    .status {
+      display:block;
+      line-height:1.35;
+      min-height:72px;
+      max-height:180px;
+      overflow:auto;
+      text-overflow:clip;
+    }
+.sql-display {
+  transition: filter 20ms cubic-bezier(.2,.9,.2,1), opacity 20ms cubic-bezier(.2,.9,.2,1);
+  will-change: filter, opacity;
+}
+
+.live-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+#liveTextWrapper {
+  width: 100%;
+  min-height: 100px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+#liveTextWrapper pre {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+#liveTextWrapper pre {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  width: 100%;
+}
+/* But on desktop (>=700px), center vertically: */
+@media (min-width: 701px) {
+  #liveTextWrapper pre {
+    align-items: center;
+    justify-content: center;
+  }
+}
+@media (max-width: 700px) {
+  .user-info-dialog {
+    width: 96vw;
+    padding: 16px;
+    font-size: 15px;
+  }
+}
+.tab-header {
+  background: #f5faff;
+  border: 1.1px solid #dde5f7;
+  margin-bottom:8px;
+}
+.tab-btn {
+  flex: 1 1 0;
+  padding: 12px 0;
+  border: none;
+  font-size: 15px;
+  background: none;
+  outline: none;
+  color: #5a5f6c;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  border-bottom: 2.5px solid transparent;
+}
+.tab-btn-active, .tab-btn:focus {
+  background: #eaf3fe;
+  color: #1e4aa6;
+  border-bottom: 2.5px solid var(--accent, #1f6feb);
+  z-index: 1;
+}
+.tab-panes {
+  min-height: 110px;
+}
+.tab-pane {
+  display: none;
+  padding: 0;
+}
+.tab-pane-active {
+  display: block;
+}
+#csvTableWrapper table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--mono), monospace;
+  font-size: 13.5px;
+}
+#csvTableWrapper th, #csvTableWrapper td {
+  border: 1px solid #e4e6f2;
+  padding: 4px 9px;
+  text-align: left;
+  background: #fcfcfd;
+  color: #34425a;
+  max-width: 180px;
+  overflow-wrap: break-word;
+}
+#csvTableWrapper th {
+  background: #f4f6fb;
+  color: #294688;
+  font-weight: 800;
+  position: sticky; top: 0; z-index: 2;
+}
+@media (max-width:850px) {
+  .right-col {
+    width: 100%;
+    display:flex;
+    flex-direction:column;
+  }
+  .controls { position: static; }
+  .live-large { min-height: 62vh; padding: 10px; gap: 10px; }
+  .live-box { min-height: 210px; padding: 12px; }
+  #runBtnWrap { order: 1; margin-top: 10px; }
+  #promptWrap { order: 2; }
+  .tab-header { order: 3; }
+  .tab-panes { order: 4; }
+  #status { order: 5; }
+  #runForm { display:flex; flex-direction:column; }
+}
+
+/* Animated mask / pad runs to smoothly shrink/expand token runs */
+.sql-display .mask-run,
+.sql-display .pad-run,
+.sql-display .char {
+  display: inline-block;
+  white-space: pre;
+  transform-origin: left center;
+  transition: transform 420ms cubic-bezier(.2,.9,.2,1), opacity 420ms cubic-bezier(.2,.9,.2,1);
+  will-change: transform, opacity;
+}
+
+/* Represent a run of underscore mask characters; width based on character count */
+.sql-display .mask-run {
+  --len: 4;
+  width: calc(var(--len) * 0.62ch); /* monospace; adjust multiplier if needed */
+  overflow: hidden;
+}
+
+/* A pad run (represents removed/padded space) — we animate width too */
+.sql-display .pad-run {
+  --len: 1;
+  width: calc(var(--len) * 0.62ch);
+  overflow: hidden;
+  opacity: 0.0;
+}
+
+/* initial collapsed state for new elements (so they can expand) */
+.sql-display .collapsed {
+  transform: scaleX(0);
+  opacity: 0;
+}
+
+/* explicit shrink for elements that should collapse */
+.sql-display .shrink {
+  transform: scaleX(0);
+  opacity: 0;
+}
+
+/* ensure normal state is visible */
+.sql-display .visible {
+  transform: scaleX(1);
+  opacity: 1;
+}
+
+/* keep the pre editable for innerHTML usage */
+.sql-display { white-space: pre-wrap; word-break: break-word; }
+
+  </style>
+</head>
+<body>
+  <div class="vh">
+    <div class="container">
+      <div class="live-large" id="liveLarge">
+        <div class="live-left">
+          <div class="live-header">
+            <div class="title">Text Diffusion Playground</div>
+            <div class="step-pill" id="stepBox">Step — / —</div>
+          </div>
+          <div class="small" id="queueChip" style="display:none; color:#0b4ea2; font-weight:700;">Queued</div>
+          <div class="live-box" id="liveBox" aria-live="polite">
+           <div id="liveTextWrapper" style="width:100%; position:relative; display:flex; align-items:center; justify-content:center; min-height: 100px">
+                <pre id="liveTextFront" class="sql-display" style="position:absolute; inset:0; margin:0; font-size:44px; color:#0b1220; z-index:2;">Ready for generation. Submit a prompt to start.</pre>
+                <pre id="liveTextBack" class="sql-display" style="position:absolute; inset:0; margin:0; font-size:44px; color:#0b1220; z-index:1; opacity:0; filter:blur(12px);"> </pre>
+            </div>
+          </div>
+          <div id="sliderRow" style="width:100%; margin-top:18px; display:none; flex-direction:column; align-items:center; gap:6px;">
+            <input type="range" min="0" value="0" id="snapSlider" style="width:100%;">
+            <div class="small" id="snapSliderLabel"></div>
+         </div>
+        </div>
+        <div class="right-col">
+          <div class="controls">
+            <label class="label">Controls</label>
+           <form id="runForm" autocomplete="off">
+    <!-- Prompt is always visible above the tabs -->
+    <div id="promptWrap">
+      <label class="small" for="prompt"><b>Prompt</b></label>
+      <textarea name="prompt" id="prompt" placeholder="e.g. how many planes are of name a380?" style="margin-bottom:10px;">{{ prompt_prefill }}</textarea>
+    </div>
+
+    <!-- Tab header -->
+    <div class="tab-header" style="display:flex; border-radius:10px; overflow:hidden; margin-bottom:14px; box-shadow:0 2px 12px #eef2f4;">
+      <button type="button" class="tab-btn tab-btn-active" data-tab="data">Data</button>
+      <button type="button" class="tab-btn" data-tab="advanced">Advanced</button>
+    </div>
+    <!-- Tab content -->
+    <div class="tab-panes">
+      <!-- DATA TAB -->
+      <div class="tab-pane tab-pane-active" id="tab-data">
+        <!-- CSV Upload -->
+        <div style="margin-bottom:16px;">
+          <label class="small" for="csvInput"><b>Upload CSV</b></label>
+          <input type="file" id="csvInput" accept=".csv" style="width:100%;margin-top:5px;"/>
+        </div>
+        <!-- Table preview -->
+        <div id="csvTableWrapper" style="background:#f5f9ff;border:1px solid #e5e9f2; border-radius:8px; margin-bottom:14px;max-height:200px;overflow:auto;"></div>
+        <div class="small" style="color:#56677a;">
+          Tip: Table schema is auto-populated in Advanced tab.<br>
+          Only the first 30 rows are previewed.
+        </div>
+      </div>
+      <!-- ADVANCED TAB -->
+      <div class="tab-pane" id="tab-advanced">
+        <label class="small" for="context" style="margin-top:8px;"><b>Context</b></label>
+        <textarea name="context" id="context" placeholder="Table schema will appear here">{{ context_prefill }}</textarea>
+
+        <div class="controls-grid" style="margin-top:12px;">
+          <div>
+            <label class="small">Steps</label>
+            <input name="steps" id="steps" type="number" value="10" min="1" max="500"/>
+          </div>
+          <div>
+            <label class="small">Max Len</label>
+            <input name="max_len" id="max_len" type="number" value="512" min="64" max="4096"/>
+          </div>
+          <div>
+            <label class="small">SQL mask len</label>
+            <input name="sql_len" id="sql_len" type="number" value="64" min="1" max="1024"/>
+          </div>
+          <div>
+            <label class="small">Top-k</label>
+            <input name="top_k" id="top_k" type="number" value="1" min="0" max="2000"/>
+          </div>
+        </div>
+
+        <div class="controls-grid" style="margin-top:10px;">
+          <div>
+            <label class="small">Top-p</label>
+            <input name="top_p" id="top_p" type="number" step="0.01" value="1" min="0" max="1"/>
+          </div>
+          <div>
+            <label class="small">Model Dir</label>
+            <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}" />
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Run button ALWAYS shown -->
+    <div id="runBtnWrap" style="margin-top:16px;">
+      <button id="runBtn" class="btn" type="submit" style="width:100%;font-size:15.5px;font-weight:700;">Run Generation</button>
+    </div>
+  </form>
+
+
+            <div id="status" class="status">Idle.</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script src="/static/inference.js"></script>
+</body>
+</html>
