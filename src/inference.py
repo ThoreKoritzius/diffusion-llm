@@ -428,6 +428,10 @@ TEMPLATE = r"""
 let runId = null;
 let es = null;
 let snapshots = [];
+let pollTimer = null;
+let fallbackPolling = false;
+let lastSnapshotCount = 0;
+let lastStatusMsg = "";
 let runInProgress = false;
 
 const liveText = document.getElementById('liveText');
@@ -560,6 +564,7 @@ async function stopRunIfRunning() {
     try {
       await fetch('/stop/' + runId, { method:'POST' });
     } catch(_) {}
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 }
 
@@ -577,6 +582,10 @@ runBtn.onclick = async function(ev) {
 runForm.addEventListener('submit', async (ev)=>{
   ev.preventDefault();
   if(es){ es.close(); es=null; }
+  if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
+  fallbackPolling = false;
+  lastSnapshotCount = 0;
+  lastStatusMsg = "";
   snapshots = [];
   setStatus("Preparing run...");
   sliderRow.style.display = "none";
@@ -605,46 +614,29 @@ runForm.addEventListener('submit', async (ev)=>{
   }
 });
 
-async function openStream(id){
-  if(es){ es.close(); es=null; }
-  es = new EventSource('/stream/' + id);
-  es.onopen = ()=> console.log("SSE opened");
-  es.onerror = (e)=>{
-    console.warn("SSE error", e);
-    const state = es ? es.readyState : -1;
-    setStatus("SSE connection error (state " + state + "). Check /stream response in Network tab.");
-  };
-  es.addEventListener('snapshot', (ev)=>{
+function applySnapshot(obj){
+  if (!obj) return;
+  snapshots.push(obj);
+  const sqlOnly = extractSQL((obj.text || "").replace(/____/g,'_____')) || "(empty)";
+  animateBlurToText(sqlOnly);
+  stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
+}
 
-    const obj = JSON.parse(ev.data);
-    snapshots.push(obj);
-    const sqlOnly = extractSQL(obj.text.replace(/____/g,'_____')) || "(empty)";
-    animateBlurToText(sqlOnly);
-
-    stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
-  });
-  es.addEventListener('status', (ev)=>{
-    const info = JSON.parse(ev.data);
-    setStatus(info.msg);
-  });
-  function finishBtn() {
-    setBtnStateIdle();
-    runId = null;
+function finishRun(payload){
+  setStatus("Run finished.");
+  if(payload && payload.gif_url){
+    gifLink.href = payload.gif_url;
+    const fname = payload.gif_url.split('/').pop() || 'generation.gif';
+    gifLink.download = fname;
+    gifLink.style.display = "inline-block";
+    gifLink.textContent = "Download GIF";
+  } else {
+    gifLink.style.display = "none";
   }
-  es.addEventListener('done', async (ev)=>{
-    const payload = JSON.parse(ev.data);
-    setStatus("Run finished.");
-    if(payload.gif_url){
-      gifLink.href = payload.gif_url;
-      const fname = payload.gif_url.split('/').pop() || 'generation.gif';
-      gifLink.download = fname;
-      gifLink.style.display = "inline-block";
-      gifLink.textContent = "Download GIF";
-    } else {
-      gifLink.style.display = "none";
-    }
-    if(es){ es.close(); es=null; }
-    finishBtn();
+  if(es){ es.close(); es=null; }
+  if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
+  setBtnStateIdle();
+  runId = null;
 
   if (snapshots.length > 1) {
     snapSlider.max = (snapshots.length - 1).toString();
@@ -654,6 +646,67 @@ async function openStream(id){
   } else {
     sliderRow.style.display = "none";
   }
+}
+
+async function pollRunState(id){
+  try {
+    const resp = await fetch('/run/' + id, { cache: 'no-store' });
+    if(!resp.ok){
+      setStatus("Polling failed: HTTP " + resp.status);
+      return;
+    }
+    const data = await resp.json();
+    const list = data.snapshots || [];
+    while (lastSnapshotCount < list.length) {
+      applySnapshot(list[lastSnapshotCount]);
+      lastSnapshotCount += 1;
+    }
+    if (data.status && data.status !== lastStatusMsg) {
+      lastStatusMsg = data.status;
+      setStatus(data.status);
+    }
+    if (data.done) {
+      finishRun(data);
+    }
+  } catch (e) {
+    setStatus("Polling exception: " + e.toString());
+  }
+}
+
+function startPollingFallback(id){
+  if (fallbackPolling) return;
+  fallbackPolling = true;
+  if(es){ es.close(); es=null; }
+  setStatus("SSE unavailable via proxy. Switched to polling fallback.");
+  pollRunState(id);
+  pollTimer = setInterval(()=>pollRunState(id), 1000);
+}
+
+async function openStream(id){
+  if(es){ es.close(); es=null; }
+  es = new EventSource('/stream/' + id);
+  es.onopen = ()=> console.log("SSE opened");
+  es.onerror = (e)=>{
+    console.warn("SSE error", e);
+    const state = es ? es.readyState : -1;
+    setStatus("SSE connection error (state " + state + "). Falling back to polling.");
+    startPollingFallback(id);
+  };
+  es.addEventListener('snapshot', (ev)=>{
+    const obj = JSON.parse(ev.data);
+    applySnapshot(obj);
+    lastSnapshotCount = snapshots.length;
+  });
+  es.addEventListener('status', (ev)=>{
+    const info = JSON.parse(ev.data);
+    if (info && info.msg) {
+      lastStatusMsg = info.msg;
+      setStatus(info.msg);
+    }
+  });
+  es.addEventListener('done', async (ev)=>{
+    const payload = JSON.parse(ev.data);
+    finishRun(payload || {});
   });
 }
 
@@ -1454,6 +1507,24 @@ def stream(run_id):
     resp.headers["X-Accel-Buffering"] = "no"
     resp.headers["Connection"] = "keep-alive"
     return resp
+
+
+@app.route("/run/<run_id>")
+@limiter.exempt
+def run_state(run_id):
+    with RUNS_LOCK:
+        run = RUNS.get(run_id)
+        if not run:
+            return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+        return jsonify({
+            "run_id": run_id,
+            "state": run.get("state"),
+            "status": run.get("status"),
+            "done": bool(run.get("done")),
+            "sql_only": run.get("sql_only"),
+            "gif_url": run.get("gif_url"),
+            "snapshots": run.get("snapshots", []),
+        })
 
 
 @app.route("/gif/<filename>")
