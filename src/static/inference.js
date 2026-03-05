@@ -138,6 +138,7 @@ function syncQueuedEstimate(queuePosition, etaSeconds) {
 
 function setProgressHidden() {
   runBtn.dataset.progress = 'hidden';
+  runBtn.style.setProperty('--pct', '0%');
   runBtnProgress.style.width = '0%';
 }
 
@@ -148,8 +149,9 @@ function setProgressIndeterminate() {
 
 function setProgressValue(pct) {
   runBtn.dataset.progress = 'visible';
-  const clamped = Math.max(0, Math.min(100, Math.round(pct || 0)));
-  runBtnProgress.style.width = `${clamped}%`;
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  runBtn.style.setProperty('--pct', `${clamped}%`);
+  runBtnProgress.style.width = `${Math.round(clamped)}%`;
 }
 
 function setUiState(mode, data = {}) {
@@ -197,7 +199,7 @@ function setUiState(mode, data = {}) {
   if (mode === UI_MODES.RATE_LIMITED) {
     stopQueueCountdown();
     runBtn.disabled = true;
-    runBtnLabel.textContent = `Rate limited • ${data.remaining || 0}s`;
+    runBtnLabel.textContent = `Rate limited • retry in ${data.remaining || 0}s`;
     setQueueChip('Rate limited', 'rate_limited');
     setProgressValue(data.progressPct || 100);
     return;
@@ -279,6 +281,7 @@ function fitLiveFont() {
 window.addEventListener('resize', fitLiveFont);
 
 let animating = false;
+let pendingAnimText = null;
 function animateBlurToText(newText) {
   if (prefersReducedMotion.matches) {
     renderImmediate(newText);
@@ -286,11 +289,14 @@ function animateBlurToText(newText) {
   }
 
   if (animating) {
+    // Update the pending text so the in-flight timeout picks up the latest value.
+    pendingAnimText = newText;
     liveFront.textContent = newText;
     fitLiveFontForElem(liveFront);
     return;
   }
 
+  pendingAnimText = newText;
   liveBack.textContent = newText || '';
   fitLiveFontForElem(liveBack);
   liveBack.style.filter = 'blur(8px)';
@@ -305,7 +311,10 @@ function animateBlurToText(newText) {
     liveFront.style.opacity = '0';
 
     setTimeout(() => {
-      liveFront.textContent = newText || '';
+      // Use pendingAnimText, not the stale closure value, so any update during
+      // the animation (e.g. the terminal clean frame) is preserved.
+      const finalText = pendingAnimText || '';
+      liveFront.textContent = finalText;
       fitLiveFontForElem(liveFront);
       liveFront.style.opacity = '1';
       liveFront.style.zIndex = '2';
@@ -397,9 +406,11 @@ function updateSliderLabel() {
 
 function applySnapshotAnimated(snap) {
   if (!snap) return;
-  const text = isTerminalSnapshot(snap)
+  const isTerm = isTerminalSnapshot(snap);
+  const text = isTerm
     ? sanitizeFinalSql(snapshotText(snap))
     : snapshotText(snap);
+  if (isTerm) console.debug('[diffusion] applySnapshotAnimated TERMINAL', {step: snap.step, total: snap.total_steps, sql_only: snap.sql_only, text});
   animateBlurToText(text);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
 }
@@ -438,20 +449,30 @@ function replayAllOnceAndFinalize() {
   // Replay all non-terminal history steps, then append one canonical terminal frame.
   pendingSnapshots = historySnapshots.filter((snap) => !isTerminalSnapshot(snap));
   const terminalFromHistory = historySnapshots.find((snap) => isTerminalSnapshot(snap));
+  console.debug('[diffusion] replayAllOnceAndFinalize', {
+    historyLen: historySnapshots.length,
+    nonTerminalLen: pendingSnapshots.length,
+    terminalFromHistory: terminalFromHistory ? {step: terminalFromHistory.step, total: terminalFromHistory.total_steps, sql_only: terminalFromHistory.sql_only} : null,
+    terminalSqlText,
+  });
   const terminalStep = terminalFromHistory
     ? Number(terminalFromHistory.step)
     : (historySnapshots.length ? Number(historySnapshots[historySnapshots.length - 1].step) : 0);
   const terminalTotal = terminalFromHistory
     ? Number(terminalFromHistory.total_steps)
     : (historySnapshots.length ? Number(historySnapshots[historySnapshots.length - 1].total_steps) : terminalStep);
-  if (terminalSqlText) {
+  const resolvedTerminalText = terminalSqlText || (terminalFromHistory ? sanitizeFinalSql(snapshotText(terminalFromHistory)) : '');
+  console.debug('[diffusion] resolvedTerminalText:', resolvedTerminalText);
+  if (resolvedTerminalText) {
+    if (!terminalSqlText) terminalSqlText = resolvedTerminalText;
     pendingSnapshots.push({
       step: Number.isFinite(terminalStep) ? terminalStep : 0,
       total_steps: Number.isFinite(terminalTotal) ? terminalTotal : (Number.isFinite(terminalStep) ? terminalStep : 0),
-      sql_only: sanitizeFinalSql(terminalSqlText),
-      text: `<SQL>${sanitizeFinalSql(terminalSqlText)}</SQL>`,
+      sql_only: resolvedTerminalText,
+      text: `<SQL>${resolvedTerminalText}</SQL>`,
     });
   }
+  console.debug('[diffusion] pendingSnapshots after push:', pendingSnapshots.length, 'last sql_only:', pendingSnapshots[pendingSnapshots.length-1]?.sql_only);
   if (!pendingSnapshots.length) {
     maybeFinalize();
     return;
@@ -473,8 +494,11 @@ function finishRun(payload) {
     terminalSqlText = sanitizeFinalSql(payload.sql_only);
   }
   if (!terminalSqlText && historySnapshots.length > 0) {
-    terminalSqlText = sanitizeFinalSql(snapshotText(historySnapshots[historySnapshots.length - 1]));
+    const lastTerminal = historySnapshots.find((s) => isTerminalSnapshot(s));
+    const lastSnap = lastTerminal || historySnapshots[historySnapshots.length - 1];
+    terminalSqlText = sanitizeFinalSql(snapshotText(lastSnap));
   }
+  console.debug('[diffusion] finishRun', {terminalSqlText, payloadSqlOnly: payload?.sql_only, historyLen: historySnapshots.length});
 
   if (payload && payload.state === 'error') {
     setStatus(payload.status || 'Run failed.');
@@ -553,23 +577,25 @@ async function startRateLimitCooldown(retryAfterSeconds, message) {
     clearInterval(rateLimitTimer);
     rateLimitTimer = null;
   }
-  const total = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? Math.ceil(retryAfterSeconds) : 10;
-  let remaining = total;
+  const totalMs = (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? Math.ceil(retryAfterSeconds) : 10) * 1000;
+  const startMs = Date.now();
   setStatus(message || 'Rate limited. Please retry shortly.');
-  setUiState(UI_MODES.RATE_LIMITED, { remaining, progressPct: 100 });
+  setUiState(UI_MODES.RATE_LIMITED, { remaining: Math.ceil(totalMs / 1000), progressPct: 100 });
 
   rateLimitTimer = setInterval(() => {
-    remaining -= 1;
-    if (remaining <= 0) {
+    const elapsed = Date.now() - startMs;
+    const remainingMs = totalMs - elapsed;
+    if (remainingMs <= 0) {
       clearInterval(rateLimitTimer);
       rateLimitTimer = null;
       setStatus('Ready.');
       setUiState(UI_MODES.IDLE);
       return;
     }
-    const pct = Math.max(0, Math.round((remaining / total) * 100));
+    const remaining = Math.ceil(remainingMs / 1000);
+    const pct = Math.max(0, (remainingMs / totalMs) * 100);
     setUiState(UI_MODES.RATE_LIMITED, { remaining, progressPct: pct });
-  }, 1000);
+  }, 80);
 }
 
 async function pollRunState(id) {
@@ -607,7 +633,7 @@ async function pollRunState(id) {
 
     if (data.state === 'queued') {
       setQueuedUi(data.queue_position, data.eta_seconds, data.eta_confidence);
-      pollDelayMs = 800;
+      pollDelayMs = 500;
     } else if (data.state === 'running') {
       updateRunningUi(data.status || '');
       pollDelayMs = 250;

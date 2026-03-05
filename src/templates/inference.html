@@ -217,18 +217,19 @@
     }
 
     .run-btn {
+      --pct: 0%;
+      --btn-base: var(--color-accent);
       width: 100%;
       min-height: 50px;
       border: 0;
       padding: 12px 16px;
-      background: var(--color-accent);
+      background: var(--btn-base);
       color: #fff;
       font-size: 15px;
       font-weight: 700;
       cursor: pointer;
       position: relative;
       overflow: hidden;
-      transition: background-color 180ms ease;
     }
 
     .run-btn:disabled {
@@ -236,17 +237,26 @@
     }
 
     .run-btn[data-mode="queued"] {
-      background: var(--color-warn);
+      --btn-base: var(--color-warn);
     }
 
     .run-btn[data-mode="running"],
     .run-btn[data-mode="finalizing"] {
-      background: var(--color-accent);
+      --btn-base: var(--color-accent);
     }
 
     .run-btn[data-mode="rate_limited"],
     .run-btn[data-mode="error"] {
-      background: var(--color-danger);
+      --btn-base: var(--color-danger);
+    }
+
+    /* Rate-limited: full-button fill draining left as countdown */
+    .run-btn[data-mode="rate_limited"] {
+      background: linear-gradient(
+        to right,
+        color-mix(in srgb, #fff 22%, var(--btn-base)) var(--pct),
+        color-mix(in srgb, #000 25%, var(--btn-base)) var(--pct)
+      );
     }
 
     .run-btn-label {
@@ -254,12 +264,13 @@
       z-index: 2;
     }
 
+    /* Thin bottom stripe for running/queued/finalizing */
     .btn-progress-track {
       position: absolute;
+      bottom: 0;
       left: 0;
       right: 0;
-      bottom: 0;
-      height: 4px;
+      height: 5px;
       background: rgba(255, 255, 255, 0.25);
       z-index: 1;
       opacity: 0;
@@ -270,7 +281,7 @@
       height: 100%;
       width: 0%;
       background: rgba(255, 255, 255, 0.92);
-      transition: width 200ms linear;
+      transition: width 80ms linear;
     }
 
     .run-btn[data-progress="visible"] .btn-progress-track {

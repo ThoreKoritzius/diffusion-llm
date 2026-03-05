@@ -931,7 +931,7 @@ def run_denoising_generation_callback(
                 s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
                 s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
                 s_clean_final = replace_sql_section(s_clean, final_sql_only)
-                snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": step_idx+1, "total_steps": total_steps})
+                snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": total_steps, "total_steps": total_steps})
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
             break
