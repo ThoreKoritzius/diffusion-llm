@@ -37,8 +37,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 import numpy as np
 import torch
+import redis
 from transformers import AutoTokenizer, RobertaTokenizer, RobertaForMaskedLM
-from queue import Queue, Empty
 
 # -------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sql-len", type=int, default=128)
     parser.add_argument("--enable-gif", action="store_true", help="Enable GIF generation for runs")
     parser.add_argument("--run-ttl-seconds", type=int, default=900)
+    parser.add_argument("--worker", action="store_true", help="Run worker loop instead of web server")
+    parser.add_argument("--redis-url", type=str, default=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
     return parser
 
 
@@ -93,6 +95,8 @@ MAX_MAX_LEN = max(8, args.max_max_len)
 MAX_SQL_LEN = max(1, args.max_sql_len)
 ENABLE_GIF = bool(args.enable_gif)
 RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
+IS_WORKER = bool(args.worker)
+REDIS_URL = args.redis_url
 
 # -------------------------
 # Flask app & template
@@ -131,7 +135,7 @@ TEMPLATE = r"""
     .live-header .title { font-weight:700; font-size:16px; color:#0b1220; }
     .step-pill { background:#eef2ff; color:var(--accent); padding:6px 10px; border-radius:999px; font-weight:700; font-size:14px; }
     /* lighter gray background for live area and nicer padding */
-    .live-box { flex:1; background:#f3f4f6; border-radius:10px; padding:22px; overflow:auto; display:flex; align-items:center; justify-content:center; }
+    .live-box { flex:1; background:#f3f4f6; border-radius:10px; padding:22px; overflow:auto; display:flex; align-items:center; justify-content:center; min-height:320px; }
     .sql-display { font-family:var(--mono); font-weight:700; white-space:pre-wrap; word-break:break-word; color:#021024; margin:0; }
     .right-col { width:min(420px, 100%); display:flex; flex-direction:column; gap:12px; }
     .controls { background:var(--card); padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(2,6,23,0.04); position:sticky; top:10px; }
@@ -263,10 +267,18 @@ TEMPLATE = r"""
 @media (max-width:850px) {
   .right-col {
     width: 100%;
+    display:flex;
+    flex-direction:column;
   }
   .controls { position: static; }
   .live-large { min-height: 62vh; padding: 10px; gap: 10px; }
-  .live-box { min-height: 280px; padding: 12px; }
+  .live-box { min-height: 210px; padding: 12px; }
+  #runBtnWrap { order: 1; margin-top: 10px; }
+  #promptWrap { order: 2; }
+  .tab-header { order: 3; }
+  .tab-panes { order: 4; }
+  #status { order: 5; }
+  #runForm { display:flex; flex-direction:column; }
 }
 
 /* Animated mask / pad runs to smoothly shrink/expand token runs */
@@ -327,6 +339,7 @@ TEMPLATE = r"""
             <div class="title">Text Diffusion Playground</div>
             <div class="step-pill" id="stepBox">Step — / —</div>
           </div>
+          <div class="small" id="queueChip" style="display:none; color:#0b4ea2; font-weight:700;">Queued</div>
           <div class="live-box" id="liveBox" aria-live="polite">
            <div id="liveTextWrapper" style="width:100%; position:relative; display:flex; align-items:center; justify-content:center; min-height: 100px">
                 <pre id="liveTextFront" class="sql-display" style="position:absolute; inset:0; margin:0; font-size:44px; color:#0b1220; z-index:2;">Waiting — enter prompt/context and press Run</pre>
@@ -343,8 +356,10 @@ TEMPLATE = r"""
             <label class="label">Controls</label>
            <form id="runForm" autocomplete="off">
     <!-- Prompt is always visible above the tabs -->
-    <label class="small" for="prompt"><b>Prompt</b></label>
-    <textarea name="prompt" id="prompt" placeholder="e.g. how many planes are of name a380?" style="margin-bottom:10px;">{{ prompt_prefill }}</textarea>
+    <div id="promptWrap">
+      <label class="small" for="prompt"><b>Prompt</b></label>
+      <textarea name="prompt" id="prompt" placeholder="e.g. how many planes are of name a380?" style="margin-bottom:10px;">{{ prompt_prefill }}</textarea>
+    </div>
 
     <!-- Tab header -->
     <div class="tab-header" style="display:flex; border-radius:10px; overflow:hidden; margin-bottom:14px; box-shadow:0 2px 12px #eef2f4;">
@@ -404,7 +419,7 @@ TEMPLATE = r"""
       </div>
     </div>
     <!-- Run button ALWAYS shown -->
-    <div style="margin-top:16px;">
+    <div id="runBtnWrap" style="margin-top:16px;">
       <button id="runBtn" class="btn" type="submit" style="width:100%;font-size:15.5px;font-weight:700;">Run Generation</button>
     </div>
   </form>
@@ -427,8 +442,9 @@ TEMPLATE = r"""
 <script>
 let runId = null;
 let es = null;
-let snapshots = [];
+let historySnapshots = [];
 let pollTimer = null;
+let pollDelayMs = 250;
 let fallbackPolling = false;
 let lastSnapshotCount = 0;
 let lastStatusMsg = "";
@@ -446,6 +462,7 @@ const runForm = document.getElementById('runForm');
 const sliderRow = document.getElementById('sliderRow');
 const snapSlider = document.getElementById('snapSlider');
 const snapSliderLabel = document.getElementById('snapSliderLabel');
+const queueChip = document.getElementById('queueChip');
 
 function setStatus(s){ statusBox.textContent = s; }
 const liveFront = document.getElementById('liveTextFront');
@@ -552,20 +569,57 @@ function extractSQL(s){
 function normalizeSQLDisplay(sql){
   if(!sql) return "(empty)";
   let s = String(sql);
-  s = s.replace(/_____+/g, " ").replace(/____/g, " ");
+  s = s.replace(/_____+/g, "_____");
   s = s.replace(/\s{2,}/g, " ").trim();
   return s || "(empty)";
 }
 
-function setBtnStateRunning() {
+function setQueueChip(text) {
+  if (!text) {
+    queueChip.style.display = "none";
+    queueChip.textContent = "";
+    return;
+  }
+  queueChip.style.display = "block";
+  queueChip.textContent = text;
+}
+
+function setBtnStateRunning(label) {
   runInProgress = true;
-  runBtn.textContent = "Stop Generation";
+  runBtn.textContent = label || "Stop Generation";
   runBtn.disabled = false;
 }
 function setBtnStateIdle() {
   runInProgress = false;
   runBtn.textContent = "Run Generation";
   runBtn.disabled = false;
+  setQueueChip("");
+}
+
+function updateRunUx(state, queuePos, etaSeconds, statusMsg){
+  if (state === "queued") {
+    const pos = queuePos ? `#${queuePos}` : "#?";
+    const eta = etaSeconds ? `~${etaSeconds}s` : "~estimating";
+    setBtnStateRunning(`Cancel • Queued ${pos} ${eta}`);
+    setQueueChip(`Queued ${pos} ${eta}`);
+    return;
+  }
+  if (state === "running") {
+    if (statusMsg && statusMsg.startsWith("step ")) {
+      setBtnStateRunning(`Stop • ${statusMsg}`);
+      setQueueChip(`Running (${statusMsg})`);
+    } else {
+      setBtnStateRunning("Stop • Running…");
+      setQueueChip("Running");
+    }
+    return;
+  }
+  if (state === "stopping") {
+    setBtnStateRunning("Stopping…");
+    setQueueChip("Stopping");
+    return;
+  }
+  setBtnStateIdle();
 }
 
 async function stopRunIfRunning() {
@@ -603,13 +657,13 @@ runForm.addEventListener('submit', async (ev)=>{
   lastStatusMsg = "";
   pendingSnapshots = [];
   donePayload = null;
-  snapshots = [];
+  historySnapshots = [];
   setStatus("Preparing run...");
   sliderRow.style.display = "none";
 
   gifLink.style.display = "none";
 
-  setBtnStateRunning();
+  setBtnStateRunning("Cancel • Queued");
 
   const form = new FormData(ev.target);
   setStatus("Sending run request to server (deterministic)...");
@@ -623,6 +677,7 @@ runForm.addEventListener('submit', async (ev)=>{
     }
     const j = await resp.json();
     runId = j.run_id;
+    updateRunUx(j.state, j.queue_position, j.eta_seconds, "");
     setStatus("Run started (id: " + runId + "). Streaming updates...");
     openStream(runId);
   } catch(e){
@@ -633,7 +688,6 @@ runForm.addEventListener('submit', async (ev)=>{
 
 function applySnapshot(obj){
   if (!obj) return;
-  snapshots.push(obj);
   const sqlOnly = normalizeSQLDisplay(obj.sql_only || extractSQL((obj.text || "").replace(/____/g,'_____')));
   animateBlurToText(sqlOnly);
   stepBox.textContent = `Step ${obj.step} / ${obj.total_steps}`;
@@ -684,8 +738,8 @@ function finishRun(payload){
   setBtnStateIdle();
   runId = null;
 
-  if (snapshots.length > 1) {
-    snapSlider.max = (snapshots.length - 1).toString();
+  if (historySnapshots.length > 1) {
+    snapSlider.max = (historySnapshots.length - 1).toString();
     snapSlider.value = snapSlider.max;
     sliderRow.style.display = "flex";
     updateSliderLabel();
@@ -703,12 +757,20 @@ async function pollRunState(id){
     }
     const data = await resp.json();
     const list = data.snapshots || [];
-    for (const snap of list) enqueueSnapshot(snap);
+    for (const snap of list) historySnapshots.push(snap);
+    if (list.length === 1) {
+      enqueueSnapshot(list[0]);
+    } else if (list.length > 1) {
+      enqueueSnapshot(list[0]);
+      enqueueSnapshot(list[list.length - 1]);
+    }
     if (typeof data.snapshot_count === "number") {
       lastSnapshotCount = data.snapshot_count;
     } else {
       lastSnapshotCount += list.length;
     }
+    updateRunUx(data.state, data.queue_position, data.eta_seconds, data.status || "");
+    pollDelayMs = (data.state === "queued") ? 800 : 250;
     if (data.status && data.status !== lastStatusMsg) {
       lastStatusMsg = data.status;
       setStatus(data.status);
@@ -727,10 +789,13 @@ function startPollingFallback(id){
   fallbackPolling = true;
   if(es){ es.close(); es=null; }
   setStatus("SSE unavailable via proxy. Switched to polling fallback.");
-  pollRunState(id);
-  pollTimer = setInterval(()=>{
-    pollRunState(id);
-  }, 250);
+  const loop = async ()=>{
+    if (!fallbackPolling) return;
+    await pollRunState(id);
+    if (!fallbackPolling) return;
+    pollTimer = setTimeout(loop, pollDelayMs);
+  };
+  loop();
 }
 
 async function openStream(id){
@@ -745,14 +810,16 @@ async function openStream(id){
   };
   es.addEventListener('snapshot', (ev)=>{
     const obj = JSON.parse(ev.data);
+    historySnapshots.push(obj);
     enqueueSnapshot(obj);
-    lastSnapshotCount = snapshots.length;
+    lastSnapshotCount = historySnapshots.length;
   });
   es.addEventListener('status', (ev)=>{
     const info = JSON.parse(ev.data);
     if (info && info.msg) {
       lastStatusMsg = info.msg;
       setStatus(info.msg);
+      updateRunUx("running", null, null, info.msg);
     }
   });
   es.addEventListener('done', async (ev)=>{
@@ -763,20 +830,20 @@ async function openStream(id){
 }
 
 function updateSliderLabel() {
-  if (!snapshots.length) {
+  if (!historySnapshots.length) {
     snapSliderLabel.innerText = "";
     return;
   }
   const idx = parseInt(snapSlider.value);
-  const snap = snapshots[idx] || {};
-  snapSliderLabel.innerText = `Step ${snap.step || (idx+1)} / ${snap.total_steps || snapshots.length}`;
+  const snap = historySnapshots[idx] || {};
+  snapSliderLabel.innerText = `Step ${snap.step || (idx+1)} / ${snap.total_steps || historySnapshots.length}`;
 }
 
 // User moves slider => show that snapshot
 snapSlider.addEventListener('input', ()=>{
-  if (!snapshots.length) return;
+  if (!historySnapshots.length) return;
   const idx = parseInt(snapSlider.value);
-  const snap = snapshots[idx];
+  const snap = historySnapshots[idx];
   const sqlOnly = normalizeSQLDisplay(snap.sql_only || extractSQL((snap.text || "").replace(/____/g,'_____')));
   animateBlurToText(sqlOnly);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
@@ -848,13 +915,29 @@ function processCSV(text){
 # -------------------------
 # Run storage / state
 # -------------------------
-RUNS: Dict[str, Dict] = {}  # run_id -> per-run state
-RUNS_LOCK = threading.RLock()
-RUN_QUEUE: Queue = Queue(maxsize=MAX_QUEUED_RUNS)
-RUN_SEMAPHORE = threading.BoundedSemaphore(value=MAX_CONCURRENT_RUNS)
 MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}
 MODEL_VALIDATION_CACHE: Dict[str, Dict] = {}
 OUT_DIR = os.path.join(os.path.abspath("."), "generated_gifs")
+REDIS_CLIENT = None
+
+QUEUE_KEY = "diffusion:queue"
+ACTIVE_SET_KEY = "diffusion:active"
+METRICS_KEY = "diffusion:metrics"
+
+
+def run_key(run_id: str) -> str:
+    return f"diffusion:run:{run_id}"
+
+
+def snaps_key(run_id: str) -> str:
+    return f"diffusion:run:{run_id}:snaps"
+
+
+def get_redis() -> redis.Redis:
+    global REDIS_CLIENT
+    if REDIS_CLIENT is None:
+        REDIS_CLIENT = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    return REDIS_CLIENT
 
 
 def now_ts() -> float:
@@ -878,21 +961,119 @@ def extract_sql_only_from_text(s: str) -> str:
         return s.strip()
 
 
-def update_run(run_id: str, **updates) -> None:
-    with RUNS_LOCK:
-        if run_id in RUNS:
-            RUNS[run_id].update(updates)
-            RUNS[run_id]["updated_at"] = now_ts()
+def to_redis_value(v):
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (dict, list)):
+        return json.dumps(v)
+    return str(v)
 
 
-def append_snapshot(run_id: str, snapshot_obj: Dict) -> None:
-    with RUNS_LOCK:
-        run = RUNS.get(run_id)
-        if not run:
-            return
-        run["snapshots"].append(snapshot_obj)
-        run["snapshot_queue"].put(snapshot_obj)
-        run["updated_at"] = now_ts()
+def from_redis_run(raw: Dict[str, str]) -> Dict:
+    if not raw:
+        return {}
+    out = dict(raw)
+    out["done"] = out.get("done", "0") == "1"
+    out["timed_out"] = out.get("timed_out", "0") == "1"
+    out["cancel_requested"] = out.get("cancel_requested", "0") == "1"
+    for k in ("created_at", "updated_at", "started_at", "finished_at"):
+        if out.get(k):
+            try:
+                out[k] = float(out[k])
+            except ValueError:
+                out[k] = None
+        else:
+            out[k] = None
+    if out.get("snapshot_count"):
+        try:
+            out["snapshot_count"] = int(out["snapshot_count"])
+        except ValueError:
+            out["snapshot_count"] = 0
+    else:
+        out["snapshot_count"] = 0
+    if out.get("payload"):
+        try:
+            out["payload"] = json.loads(out["payload"])
+        except json.JSONDecodeError:
+            out["payload"] = {}
+    else:
+        out["payload"] = {}
+    return out
+
+
+def redis_set_run(run_id: str, mapping: Dict) -> None:
+    r = get_redis()
+    payload = {k: to_redis_value(v) for k, v in mapping.items()}
+    if payload:
+        r.hset(run_key(run_id), mapping=payload)
+    r.expire(run_key(run_id), RUN_TTL_SECONDS)
+    r.expire(snaps_key(run_id), RUN_TTL_SECONDS)
+
+
+def redis_get_run(run_id: str) -> Dict:
+    r = get_redis()
+    return from_redis_run(r.hgetall(run_key(run_id)))
+
+
+def redis_update_run(run_id: str, **updates) -> None:
+    updates["updated_at"] = now_ts()
+    redis_set_run(run_id, updates)
+
+
+def redis_append_snapshot(run_id: str, snapshot_obj: Dict) -> None:
+    r = get_redis()
+    pipe = r.pipeline()
+    pipe.rpush(snaps_key(run_id), json.dumps(snapshot_obj))
+    pipe.hincrby(run_key(run_id), "snapshot_count", 1)
+    pipe.hset(run_key(run_id), "updated_at", to_redis_value(now_ts()))
+    pipe.expire(run_key(run_id), RUN_TTL_SECONDS)
+    pipe.expire(snaps_key(run_id), RUN_TTL_SECONDS)
+    pipe.execute()
+
+
+def redis_get_snapshot_delta(run_id: str, after_idx: int) -> tuple[int, List[Dict]]:
+    r = get_redis()
+    total = r.llen(snaps_key(run_id))
+    if after_idx < 0:
+        after_idx = 0
+    if after_idx >= total:
+        return total, []
+    rows = r.lrange(snaps_key(run_id), after_idx, -1)
+    out = []
+    for row in rows:
+        try:
+            out.append(json.loads(row))
+        except json.JSONDecodeError:
+            continue
+    return total, out
+
+
+def queue_position(run_id: str) -> int | None:
+    r = get_redis()
+    q = r.lrange(QUEUE_KEY, 0, -1)
+    try:
+        return q.index(run_id) + 1
+    except ValueError:
+        return None
+
+
+def active_worker_count() -> int:
+    return int(get_redis().scard(ACTIVE_SET_KEY))
+
+
+def estimate_eta_seconds(position: int | None) -> int | None:
+    if position is None:
+        return None
+    raw = get_redis().hget(METRICS_KEY, "avg_duration")
+    if raw is None:
+        return None
+    try:
+        avg = float(raw)
+    except ValueError:
+        return None
+    return max(1, int(round(avg * position)))
 
 
 def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
@@ -909,7 +1090,7 @@ def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
 
 
 def set_run_terminal(run_id: str, state: str, status: str) -> None:
-    update_run(run_id, state=state, status=status, done=True, finished_at=now_ts())
+    redis_update_run(run_id, state=state, status=status, done=True, finished_at=now_ts())
 
 
 def validate_model_dir(model_dir: str) -> tuple[bool, str]:
@@ -956,38 +1137,35 @@ def validate_model_dir(model_dir: str) -> tuple[bool, str]:
 
 def build_should_stop_cb(run_id: str, start_time: float):
     def _should_stop() -> bool:
-        with RUNS_LOCK:
-            run = RUNS.get(run_id)
-            if not run:
-                return True
-            if run.get("cancel_event") and run["cancel_event"].is_set():
-                run["timed_out"] = run.get("timed_out", False)
-                return True
-            if (now_ts() - start_time) > REQUEST_TIMEOUT_SECONDS:
-                run["timed_out"] = True
-                if run.get("cancel_event"):
-                    run["cancel_event"].set()
-                return True
-            return False
+        run = redis_get_run(run_id)
+        if not run:
+            return True
+        if run.get("cancel_requested"):
+            return True
+        if (now_ts() - start_time) > REQUEST_TIMEOUT_SECONDS:
+            redis_update_run(run_id, timed_out=True, cancel_requested=True)
+            return True
+        return False
     return _should_stop
 
 
 def process_run(run_id: str) -> None:
-    with RUNS_LOCK:
-        run = RUNS.get(run_id)
+    run = redis_get_run(run_id)
     if not run:
         return
     start_time = now_ts()
-    update_run(run_id, state="running", status="running (loading model)", started_at=start_time)
+    r = get_redis()
+    r.sadd(ACTIVE_SET_KEY, run_id)
+    redis_update_run(run_id, state="running", status="running (loading model)", started_at=start_time)
     try:
         payload = run["payload"]
         should_stop = build_should_stop_cb(run_id, start_time)
 
         def status_cb(msg):
-            update_run(run_id, status=str(msg))
+            redis_update_run(run_id, status=str(msg))
 
         def on_snapshot_callback(snapshot_obj):
-            append_snapshot(run_id, snapshot_obj)
+            redis_append_snapshot(run_id, snapshot_obj)
 
         res = run_denoising_generation_callback(
             payload["prompt"],
@@ -1004,56 +1182,69 @@ def process_run(run_id: str) -> None:
             deterministic_seed=DEFAULT_SEED,
             should_stop=should_stop,
         )
-        update_run(run_id, sql_only=res.get("sql_only"), display=res.get("display"))
+        redis_update_run(run_id, sql_only=res.get("sql_only"), display=res.get("display"))
 
         if ENABLE_GIF and not should_stop():
             os.makedirs(OUT_DIR, exist_ok=True)
-            update_run(run_id, status="building GIF")
+            redis_update_run(run_id, status="building GIF")
             gif_size = parse_gif_size(payload["gif_size_text"])
-            gif_bytes = build_gif_bytes_from_snapshots(run["snapshots"], size=gif_size, interval_ms=500)
+            _count, snaps = redis_get_snapshot_delta(run_id, 0)
+            gif_bytes = build_gif_bytes_from_snapshots(snaps, size=gif_size, interval_ms=500)
             out_name = secure_filename(f"generation_{run_id}.gif")
             out_path = os.path.join(OUT_DIR, out_name)
             with open(out_path, "wb") as f:
                 f.write(gif_bytes)
-            update_run(run_id, gif_url=f"/gif/{out_name}", status=f"GIF written to {out_path}")
+            redis_update_run(run_id, gif_url=f"/gif/{out_name}", status=f"GIF written to {out_path}")
 
         if should_stop():
-            with RUNS_LOCK:
-                timed_out = RUNS.get(run_id, {}).get("timed_out", False)
+            timed_out = redis_get_run(run_id).get("timed_out", False)
             if timed_out:
                 set_run_terminal(run_id, state="timed_out", status="timed out")
             else:
                 set_run_terminal(run_id, state="stopped", status="stopped by user")
         else:
             set_run_terminal(run_id, state="done", status="done")
+            elapsed = max(0.01, now_ts() - start_time)
+            prev_avg = r.hget(METRICS_KEY, "avg_duration")
+            prev_n = r.hget(METRICS_KEY, "count")
+            try:
+                prev_avg_f = float(prev_avg) if prev_avg else 0.0
+                prev_n_i = int(prev_n) if prev_n else 0
+            except ValueError:
+                prev_avg_f = 0.0
+                prev_n_i = 0
+            new_n = prev_n_i + 1
+            new_avg = elapsed if prev_n_i == 0 else ((prev_avg_f * prev_n_i) + elapsed) / new_n
+            r.hset(METRICS_KEY, mapping={"avg_duration": new_avg, "count": new_n})
     except TimeoutError:
         set_run_terminal(run_id, state="timed_out", status="timed out")
     except Exception as e:
         tb = traceback.format_exc(limit=4)
         set_run_terminal(run_id, state="error", status=f"error: {e}\n{tb}")
     finally:
-        RUN_SEMAPHORE.release()
+        r.srem(ACTIVE_SET_KEY, run_id)
 
 
-def queue_dispatch_loop():
+def worker_loop():
+    r = get_redis()
     while True:
-        run_id = RUN_QUEUE.get()
-        RUN_SEMAPHORE.acquire()
-        th = threading.Thread(target=process_run, args=(run_id,), daemon=True)
-        th.start()
+        job = r.blpop(QUEUE_KEY, timeout=3)
+        if not job:
+            continue
+        _queue_name, run_id = job
+        run = redis_get_run(run_id)
+        if not run:
+            continue
+        if run.get("cancel_requested"):
+            set_run_terminal(run_id, state="stopped", status="stopped while queued")
+            continue
+        process_run(run_id)
 
 
 def cleanup_loop():
     while True:
         time.sleep(60)
         cutoff = now_ts() - RUN_TTL_SECONDS
-        to_delete = []
-        with RUNS_LOCK:
-            for run_id, run in RUNS.items():
-                if run.get("done") and run.get("updated_at", run.get("created_at", 0)) < cutoff:
-                    to_delete.append(run_id)
-            for run_id in to_delete:
-                RUNS.pop(run_id, None)
         if ENABLE_GIF and os.path.isdir(OUT_DIR):
             for name in os.listdir(OUT_DIR):
                 if not name.endswith(".gif"):
@@ -1064,10 +1255,6 @@ def cleanup_loop():
                         os.remove(path)
                 except OSError:
                     pass
-
-
-threading.Thread(target=queue_dispatch_loop, daemon=True).start()
-threading.Thread(target=cleanup_loop, daemon=True).start()
 
 # -------------------------
 # Utilities: GIF font fitting (bigger min size)
@@ -1478,7 +1665,18 @@ def json_http_errors(e):
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"ok": True, "active_limit": MAX_CONCURRENT_RUNS, "queue_limit": MAX_QUEUED_RUNS}), 200
+    try:
+        get_redis().ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+    return jsonify({
+        "ok": redis_ok,
+        "redis_ok": redis_ok,
+        "active_limit": MAX_CONCURRENT_RUNS,
+        "queue_limit": MAX_QUEUED_RUNS,
+        "active_worker_count": active_worker_count() if redis_ok else 0,
+    }), (200 if redis_ok else 503)
 
 
 @app.route("/")
@@ -1532,92 +1730,92 @@ def start_run():
     if top_p < 0 or top_p > 1:
         return jsonify({"error": "invalid_input", "message": "top_p must be in [0, 1]"}), 400
 
-    run_id = uuid.uuid4().hex
-    run = {
-        "snapshots": [],
-        "snapshot_queue": Queue(),
-        "status": "queued",
-        "state": "queued",
-        "done": False,
-        "timed_out": False,
-        "sql_only": None,
-        "display": None,
-        "gif_url": None,
-        "created_at": now_ts(),
-        "updated_at": now_ts(),
-        "started_at": None,
-        "finished_at": None,
-        "cancel_event": threading.Event(),
-        "payload": {
-            "prompt": prompt,
-            "context": context,
-            "steps": steps,
-            "max_len": max_len,
-            "sql_len": sql_len,
-            "top_k": top_k,
-            "top_p": top_p,
-            "model_dir": model_dir,
-            "gif_size_text": gif_size_text,
-        },
-    }
-    with RUNS_LOCK:
-        RUNS[run_id] = run
-
-    try:
-        RUN_QUEUE.put_nowait(run_id)
-    except Exception:
-        with RUNS_LOCK:
-            RUNS.pop(run_id, None)
+    r = get_redis()
+    if r.llen(QUEUE_KEY) >= MAX_QUEUED_RUNS:
         return jsonify({
             "error": "queue_full",
             "message": "Server is busy. Try again shortly.",
             "max_queued_runs": MAX_QUEUED_RUNS,
         }), 503
 
-    return jsonify({"run_id": run_id, "state": "queued"})
+    run_id = uuid.uuid4().hex
+    payload = {
+        "prompt": prompt,
+        "context": context,
+        "steps": steps,
+        "max_len": max_len,
+        "sql_len": sql_len,
+        "top_k": top_k,
+        "top_p": top_p,
+        "model_dir": model_dir,
+        "gif_size_text": gif_size_text,
+    }
+    redis_set_run(run_id, {
+        "state": "queued",
+        "status": "queued",
+        "done": False,
+        "timed_out": False,
+        "cancel_requested": False,
+        "sql_only": "",
+        "display": "",
+        "gif_url": "",
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+        "started_at": "",
+        "finished_at": "",
+        "snapshot_count": 0,
+        "payload": payload,
+    })
+    r.rpush(QUEUE_KEY, run_id)
+    pos = queue_position(run_id)
+    eta = estimate_eta_seconds(pos)
+    return jsonify({
+        "run_id": run_id,
+        "state": "queued",
+        "queue_position": pos,
+        "eta_seconds": eta,
+        "queue_token": run_id,
+    })
 
 
 @app.route("/stream/<run_id>")
 @limiter.exempt
 def stream(run_id):
-    with RUNS_LOCK:
-        if run_id not in RUNS:
-            return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+    run = redis_get_run(run_id)
+    if not run:
+        return jsonify({"error": "not_found", "message": "run_id not found"}), 404
 
     def event_stream():
-        with RUNS_LOCK:
-            q = RUNS[run_id]["snapshot_queue"]
+        cursor = 0
         last_status = ""
         done_sent = False
         last_heartbeat = time.time()
         while True:
-            try:
-                snap = q.get(timeout=0.4)
+            _, snaps = redis_get_snapshot_delta(run_id, cursor)
+            for snap in snaps:
                 yield f"event: snapshot\\ndata: {json.dumps(snap)}\\n\\n"
-            except Empty:
-                pass
+                cursor += 1
 
-            with RUNS_LOCK:
-                run = RUNS.get(run_id)
-                if not run:
-                    break
-                st = run.get("status", "")
+            run_now = redis_get_run(run_id)
+            if not run_now:
+                break
+            st = run_now.get("status", "")
             if st != last_status:
                 last_status = st
                 yield f"event: status\\ndata: {json.dumps({'msg': st})}\\n\\n"
 
-            with RUNS_LOCK:
-                run = RUNS.get(run_id)
-                if not run:
-                    break
-                is_done = run.get("done")
-                payload = {"sql_only": run.get("sql_only"), "gif_url": run.get("gif_url"), "state": run.get("state")}
+            is_done = run_now.get("done")
+            payload = {
+                "sql_only": run_now.get("sql_only"),
+                "gif_url": run_now.get("gif_url"),
+                "state": run_now.get("state"),
+            }
             if is_done and not done_sent:
                 yield f"event: done\\ndata: {json.dumps(payload)}\\n\\n"
                 done_sent = True
                 break
 
-            # Keep SSE alive through proxies/load balancers while queued/running.
+            time.sleep(0.20)
             now = time.time()
             if now - last_heartbeat >= 10:
                 yield ": keepalive\\n\\n"
@@ -1638,25 +1836,41 @@ def run_state(run_id):
         after_idx = max(0, int(after))
     except ValueError:
         after_idx = 0
-    with RUNS_LOCK:
-        run = RUNS.get(run_id)
-        if not run:
-            return jsonify({"error": "not_found", "message": "run_id not found"}), 404
-        all_snaps = run.get("snapshots", [])
-        snap_count = len(all_snaps)
-        if after_idx > snap_count:
-            after_idx = snap_count
-        delta = all_snaps[after_idx:]
-        return jsonify({
-            "run_id": run_id,
-            "state": run.get("state"),
-            "status": run.get("status"),
-            "done": bool(run.get("done")),
-            "sql_only": run.get("sql_only"),
-            "gif_url": run.get("gif_url"),
-            "snapshot_count": snap_count,
-            "snapshots": delta,
-        })
+    run = redis_get_run(run_id)
+    if not run:
+        return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+    snap_count, delta = redis_get_snapshot_delta(run_id, after_idx)
+    pos = queue_position(run_id) if run.get("state") == "queued" else None
+    return jsonify({
+        "run_id": run_id,
+        "state": run.get("state"),
+        "status": run.get("status"),
+        "done": bool(run.get("done")),
+        "sql_only": run.get("sql_only"),
+        "gif_url": run.get("gif_url"),
+        "snapshot_count": snap_count,
+        "snapshots": delta,
+        "queue_position": pos,
+        "eta_seconds": estimate_eta_seconds(pos),
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+    })
+
+
+@app.route("/queue/<run_id>")
+@limiter.exempt
+def queue_state(run_id):
+    run = redis_get_run(run_id)
+    if not run:
+        return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+    pos = queue_position(run_id) if run.get("state") == "queued" else None
+    return jsonify({
+        "run_id": run_id,
+        "state": run.get("state"),
+        "queue_position": pos,
+        "eta_seconds": estimate_eta_seconds(pos),
+        "active_worker_count": active_worker_count(),
+    })
 
 
 @app.route("/gif/<filename>")
@@ -1675,14 +1889,15 @@ def serve_gif(filename):
 
 @app.route("/stop/<run_id>", methods=["POST"])
 def stop_run(run_id):
-    with RUNS_LOCK:
-        run = RUNS.get(run_id)
-        if not run:
-            return jsonify({"error": "not_found", "message": "run_id not found"}), 404
-        run["cancel_event"].set()
-        run["state"] = "stopped"
-        run["status"] = "stopping..."
-        run["updated_at"] = now_ts()
+    run = redis_get_run(run_id)
+    if not run:
+        return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+    r = get_redis()
+    removed = r.lrem(QUEUE_KEY, 1, run_id)
+    if removed > 0:
+        redis_update_run(run_id, state="stopped", status="stopped while queued", cancel_requested=True, done=True, finished_at=now_ts())
+    else:
+        redis_update_run(run_id, state="stopping", status="stopping...", cancel_requested=True)
     return jsonify({"ok": True, "run_id": run_id})
 
 
@@ -1690,6 +1905,11 @@ def stop_run(run_id):
 # Start server
 # -------------------------
 if __name__ == "__main__":
+    threading.Thread(target=cleanup_loop, daemon=True).start()
+    if IS_WORKER:
+        print("Starting worker loop with Redis:", REDIS_URL)
+        worker_loop()
+        raise SystemExit(0)
     url = f"http://{HOST}:{PORT}/"
     if not args.no_open:
         def _open():

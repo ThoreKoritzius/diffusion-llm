@@ -8,7 +8,8 @@ A masked language model implementing diffusion-style text denoising for SQL gene
 
 - Diffusion-style masking and denoising for SQL spans.
 - Training pipeline (`src/train.py`) on text-to-SQL data.
-- Public-ready Flask playground (`src/inference.py`) with SSE streaming updates.
+- Public-ready Flask playground (`src/inference.py`) with SSE + polling fallback.
+- Redis-backed queue + worker for stable queue position/ETA and run TTL.
 - CPU safety controls for public deployment:
   - strict single-flight inference (default 1 active run)
   - bounded queue (default 3)
@@ -61,13 +62,13 @@ Set model location:
 export MODEL_DIR=/host/model
 ```
 
-Start service:
+Start web + worker + redis:
 
 ```bash
 docker compose up -d --build
 ```
 
-Service listens on `:7860` and is designed to be put behind Caddy/Nginx.
+Web service listens on `:7860` and is designed to be put behind Caddy/Nginx.
 
 ## Production Runtime Defaults
 
@@ -87,10 +88,14 @@ Service listens on `:7860` and is designed to be put behind Caddy/Nginx.
 ## Public API Behavior
 
 - `POST /start`
-  - `200` with `{run_id, state}` when accepted.
+  - `200` with `{run_id, state, queue_position, eta_seconds, queue_token}` when accepted.
   - `400` for validation errors.
   - `429` when rate-limited.
   - `503` when queue is full.
+- `GET /run/<run_id>?after=<n>`
+  - Incremental run state + snapshot deltas.
+- `GET /queue/<run_id>`
+  - Queue position and ETA info.
 - `GET /stream/<run_id>`
   - Server-sent events: `snapshot`, `status`, `done`.
 - `POST /stop/<run_id>`
@@ -111,6 +116,8 @@ Service listens on `:7860` and is designed to be put behind Caddy/Nginx.
 - `--max-sql-len`
 - `--enable-gif`
 - `--run-ttl-seconds`
+- `--worker`
+- `--redis-url`
 
 ## CPU Tuning Notes
 
