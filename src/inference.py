@@ -100,6 +100,9 @@ RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
 IS_WORKER = bool(args.worker)
 REDIS_URL = args.redis_url
 INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
+CHARS_PER_TOKEN_EST = 3.0
+STRUCTURE_TOKEN_RESERVE = 32
+PROMPT_BUDGET_RATIO = 0.35
 
 # -------------------------
 # Flask app & template
@@ -157,17 +160,38 @@ def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
 
 
+def compute_char_heuristic_limits(max_len: int, sql_len: int) -> Dict[str, int]:
+    max_len = max(8, int(max_len))
+    sql_len = max(1, int(sql_len))
+    effective_sql_reserve = max(sql_len, 16)
+    text_token_budget = max(32, max_len - effective_sql_reserve - STRUCTURE_TOKEN_RESERVE)
+    combined_char_budget = int(math.floor(text_token_budget * CHARS_PER_TOKEN_EST))
+    prompt_char_cap = max(120, int(math.floor(combined_char_budget * PROMPT_BUDGET_RATIO)))
+    context_char_cap = max(240, combined_char_budget - prompt_char_cap)
+    return {
+        "effective_sql_reserve": effective_sql_reserve,
+        "text_token_budget": text_token_budget,
+        "combined_char_budget": combined_char_budget,
+        "prompt_char_cap": prompt_char_cap,
+        "context_char_cap": context_char_cap,
+    }
+
+
 def extract_sql_only_from_text(s: str) -> str:
     if not s:
         return ""
     start_marker = "<SQL>"
     end_marker = "</SQL>"
-    try:
-        start_idx = s.index(start_marker) + len(start_marker)
-        end_idx = s.index(end_marker, start_idx)
-        return s[start_idx:end_idx].strip()
-    except ValueError:
-        return s.strip()
+    start_idx = s.rfind(start_marker)
+    if start_idx == -1:
+        return ""
+    start_idx += len(start_marker)
+    end_idx = s.find(end_marker, start_idx)
+    if end_idx == -1:
+        return s[start_idx:].strip()
+    if end_idx < start_idx:
+        return ""
+    return s[start_idx:end_idx].strip()
 
 
 def strip_final_masks(sql_text: str) -> str:
@@ -668,12 +692,13 @@ def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), inter
     # Helper to extract the body text from snapshot (same logic as before)
     def _body_from_snap(snap):
         s = snap.get("text") if isinstance(snap, dict) else str(snap)
-        start = s.find("<SQL>")
-        end = s.find("</SQL>")
-        if start != -1 and end != -1:
-            body = s[start+len("<SQL>"):end].strip()
+        start = s.rfind("<SQL>")
+        if start == -1:
+            body = ""
         else:
-            body = s
+            start += len("<SQL>")
+            end = s.find("</SQL>", start)
+            body = s[start:end].strip() if end != -1 else s[start:].strip()
         if not body.strip():
             body = "(empty)"
         return body
@@ -822,13 +847,35 @@ def run_denoising_generation_callback(
 
     sql_open_id = tokenizer.convert_tokens_to_ids("<SQL>")
     sql_close_id = tokenizer.convert_tokens_to_ids("</SQL>")
+    sql_open_seq = tokenizer.encode("<SQL>", add_special_tokens=False)
+    sql_close_seq = tokenizer.encode("</SQL>", add_special_tokens=False)
 
     def find_first_index(tensor, val):
         matches = (tensor == val).nonzero(as_tuple=True)[0]
         return matches[0].item() if len(matches) > 0 else None
 
+    def find_subseq(haystack, needle, start=0):
+        if not needle:
+            return None
+        n = len(needle)
+        end = len(haystack) - n + 1
+        for i in range(max(0, start), max(0, end)):
+            if haystack[i:i + n] == needle:
+                return i
+        return None
+
     orig_sql_open_idx = find_first_index(input_ids_full, sql_open_id)
     orig_sql_close_idx = find_first_index(input_ids_full, sql_close_id)
+
+    # Robust marker detection for tokenizers where the SQL tags may be multi-token.
+    ids_list = input_ids_full.tolist()
+    seq_open_start = find_subseq(ids_list, sql_open_seq) if sql_open_seq else None
+    seq_open_end = (seq_open_start + len(sql_open_seq) - 1) if seq_open_start is not None else None
+    seq_close_start = find_subseq(ids_list, sql_close_seq, start=(seq_open_end + 1 if seq_open_end is not None else 0)) if sql_close_seq else None
+    if seq_open_end is not None:
+        orig_sql_open_idx = seq_open_end
+    if seq_close_start is not None:
+        orig_sql_close_idx = seq_close_start
 
     if orig_sql_open_idx is None or orig_sql_close_idx is None:
         txt = full_text
@@ -841,10 +888,24 @@ def run_denoising_generation_callback(
         token_start = next((i for i, (s, e) in enumerate(offsets) if e > content_start_char), None)
         tokens_covering = [i for i, (s, e) in enumerate(offsets) if s < content_end_char and e > content_start_char]
         token_end = tokens_covering[-1] + 1 if tokens_covering else None
-        if token_start is None or token_end is None:
-            raise RuntimeError("Failed to compute token span for SQL content (fallback).")
-        orig_sql_open_idx = max(0, token_start - 1)
-        orig_sql_close_idx = token_end
+        if token_start is not None and token_end is not None:
+            orig_sql_open_idx = max(0, token_start - 1)
+            orig_sql_close_idx = token_end
+
+    if orig_sql_open_idx is None or orig_sql_close_idx is None:
+        # Last-resort fallback: synthesize an empty SQL span near the sequence tail.
+        # This avoids hard-failing on unusual offset mappings / truncation artifacts.
+        tail = int(attn_full.sum().item()) - 1
+        tail = max(0, min(max_len - 2, tail))
+        if orig_sql_open_idx is None:
+            orig_sql_open_idx = tail
+        if orig_sql_close_idx is None:
+            orig_sql_close_idx = min(max_len - 1, int(orig_sql_open_idx) + 1)
+        if 0 <= int(orig_sql_open_idx) < max_len:
+            input_ids_full[int(orig_sql_open_idx)] = sql_open_id
+        if 0 <= int(orig_sql_close_idx) < max_len:
+            input_ids_full[int(orig_sql_close_idx)] = sql_close_id
+        log("[WARN] Could not locate SQL tag span reliably; using synthesized fallback span.")
 
     sql_open_idx = int(orig_sql_open_idx)
     sql_close_idx = int(orig_sql_close_idx)
@@ -855,7 +916,15 @@ def run_denoising_generation_callback(
     if sql_close_idx <= sql_open_idx + 1:
         max_possible = max_len - (sql_open_idx + 2)
         if max_possible <= 0:
-            raise RuntimeError("Not enough room in sequence to insert SQL content masks.")
+            # Sequence is full/truncated and SQL markers ended up at the tail.
+            # Reclaim room by shifting the SQL span left and overwriting suffix tokens.
+            reserve_sql_len = max(1, min(sql_len_request, max(1, max_len - 2)))
+            sql_open_idx = max(0, max_len - reserve_sql_len - 2)
+            max_possible = max_len - (sql_open_idx + 2)
+            log(
+                f"[WARN] SQL span had no room at tail; shifted span left "
+                f"to index {sql_open_idx} and reserved {max_possible} token(s)."
+            )
         sql_len = min(sql_len_request, max_possible)
         new_close_idx = sql_open_idx + 1 + sql_len
         log(f"[INFO] empty SQL region — inserting {sql_len} mask tokens")
@@ -1045,6 +1114,7 @@ def index():
         prompt_prefill=args.prompt or default_prompt,
         context_prefill=args.context or default_context,
         model_dir=DEFAULT_MODEL_DIR or "",
+        max_model_len=MAX_MAX_LEN,
         model_param_count=model_info.get("param_count"),
         model_param_count_display=model_info.get("param_count_display", "unknown"),
         inference_dtype_requested=INFERENCE_DTYPE,
@@ -1091,6 +1161,30 @@ def start_run():
         return jsonify({"error": "invalid_input", "message": "top_k must be 0..200"}), 400
     if top_p < 0 or top_p > 1:
         return jsonify({"error": "invalid_input", "message": "top_p must be in [0, 1]"}), 400
+
+    limits = compute_char_heuristic_limits(max_len=max_len, sql_len=sql_len)
+    prompt_cap = limits["prompt_char_cap"]
+    context_cap = limits["context_char_cap"]
+    combined_cap = limits["combined_char_budget"]
+    if len(prompt) > prompt_cap:
+        return jsonify({
+            "error": "invalid_input",
+            "message": f"Prompt too long for current settings ({len(prompt)}>{prompt_cap} chars; max_len={max_len}, sql_len={sql_len}).",
+        }), 400
+    if len(context) > context_cap:
+        return jsonify({
+            "error": "invalid_input",
+            "message": f"Context too long for current settings ({len(context)}>{context_cap} chars; max_len={max_len}, sql_len={sql_len}).",
+        }), 400
+    if (len(prompt) + len(context)) > combined_cap:
+        return jsonify({
+            "error": "invalid_input",
+            "message": (
+                f"Prompt+Context too long for current settings "
+                f"({len(prompt) + len(context)}>{combined_cap} chars; "
+                f"prompt_cap={prompt_cap}, context_cap={context_cap}, max_len={max_len}, sql_len={sql_len})."
+            ),
+        }), 400
 
     r = get_redis()
     if r.llen(QUEUE_KEY) >= MAX_QUEUED_RUNS:

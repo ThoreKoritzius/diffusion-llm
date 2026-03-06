@@ -17,6 +17,10 @@ let pendingSnapshots = [];
 let donePayload = null;
 let lastSnapshotCount = 0;
 let lastStatusMsg = "";
+let lastCompletedSnapshots = [];
+let lastCompletedTerminalSql = "";
+let lastCompletedSignature = "";
+let pendingRunSignature = "";
 
 let queueEtaBaseline = null;
 let queueEtaSeconds = null;
@@ -36,6 +40,10 @@ const snapSlider = document.getElementById('snapSlider');
 const snapSliderLabel = document.getElementById('snapSliderLabel');
 const queueChip = document.getElementById('queueChip');
 const liveTokenPre = document.getElementById('liveTokenPre');
+const promptInput = document.getElementById('prompt');
+const contextInput = document.getElementById('context');
+const sqlLenInput = document.getElementById('sql_len');
+const maxLenInput = document.getElementById('max_len');
 
 const viewTabs = Array.from(document.querySelectorAll('.view-tab'));
 const inferencePanel = document.getElementById('view-inference');
@@ -53,6 +61,10 @@ const UI_MODES = {
   ERROR: 'error',
 };
 
+const CHARS_PER_TOKEN_EST = 3.0;
+const STRUCTURE_TOKEN_RESERVE = 32;
+const PROMPT_BUDGET_RATIO = 0.35;
+
 function setStatus(msg) {
   statusBox.textContent = msg || '';
 }
@@ -60,6 +72,46 @@ function setStatus(msg) {
 function setQueueChip(text, state = '') {
   queueChip.textContent = text || '';
   queueChip.dataset.state = state;
+}
+
+function cloneSnapshots(snaps) {
+  return (snaps || []).map((snap) => ({ ...snap }));
+}
+
+function buildRunSignature(form) {
+  const fields = [
+    'prompt',
+    'context',
+    'steps',
+    'max_len',
+    'sql_len',
+    'top_k',
+    'top_p',
+    'model_dir',
+  ];
+  const data = {};
+  fields.forEach((k) => {
+    data[k] = String(form.get(k) || '');
+  });
+  return JSON.stringify(data);
+}
+
+function replayCachedRunIfAvailable(signature) {
+  if (!signature || !lastCompletedSignature || signature !== lastCompletedSignature) return false;
+  if (!lastCompletedSnapshots.length) return false;
+  resetRunState();
+  historySnapshots = cloneSnapshots(lastCompletedSnapshots);
+  historyByStep = new Map(
+    historySnapshots.map((snap, idx) => {
+      const step = Number(snap.step);
+      return [Number.isFinite(step) ? step : idx, snap];
+    }),
+  );
+  terminalSqlText = lastCompletedTerminalSql || '';
+  donePayload = { state: 'done', status: 'replayed previous run' };
+  setStatus('Replaying previous generation...');
+  replayAllOnceAndFinalize();
+  return true;
 }
 
 function formatCountdown(seconds) {
@@ -356,12 +408,17 @@ function renderImmediate(text) {
 }
 
 function extractSQL(s) {
-  const start = s.indexOf('<SQL>');
-  const end = s.indexOf('</SQL>');
-  if (start !== -1 && end !== -1) {
-    return s.substring(start + 5, end).trim();
+  const safe = String(s || '');
+  const start = safe.lastIndexOf('<SQL>');
+  if (start === -1) {
+    return '';
   }
-  return s;
+  const bodyStart = start + 5;
+  const end = safe.indexOf('</SQL>', bodyStart);
+  if (end === -1) {
+    return safe.substring(bodyStart).trim();
+  }
+  return safe.substring(bodyStart, end).trim();
 }
 
 function normalizeSQLDisplay(sql) {
@@ -514,6 +571,7 @@ function finishRun(payload) {
     terminalSqlText = sanitizeFinalSql(snapshotText(lastSnap));
   }
   if (payload && payload.state === 'error') {
+    pendingRunSignature = '';
     setStatus(payload.status || 'Run failed.');
     renderImmediate('Run failed. Check status for details.');
     setUiState(UI_MODES.ERROR);
@@ -522,6 +580,7 @@ function finishRun(payload) {
   }
 
   if (payload && payload.state === 'timed_out') {
+    pendingRunSignature = '';
     setStatus(payload.status || 'Run timed out.');
     renderImmediate('Run timed out.');
     setUiState(UI_MODES.IDLE);
@@ -529,11 +588,19 @@ function finishRun(payload) {
   }
 
   if (payload && payload.state === 'stopped') {
+    pendingRunSignature = '';
     setStatus(payload.status || 'Run stopped.');
     renderImmediate('Run stopped.');
     setUiState(UI_MODES.IDLE);
     return;
   }
+
+  if (historySnapshots.length > 0) {
+    lastCompletedSnapshots = cloneSnapshots(historySnapshots);
+    lastCompletedTerminalSql = terminalSqlText || '';
+    if (pendingRunSignature) lastCompletedSignature = pendingRunSignature;
+  }
+  pendingRunSignature = '';
 
   setStatus('Completed.');
 
@@ -744,13 +811,19 @@ function openStream(id, sessionId) {
 
 runForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
+  const active = document.activeElement === promptInput ? promptInput : (document.activeElement === contextInput ? contextInput : null);
+  applyCharLimits(active);
+  const form = new FormData(runForm);
+  const runSignature = buildRunSignature(form);
+  if (replayCachedRunIfAvailable(runSignature)) {
+    return;
+  }
+  pendingRunSignature = runSignature;
   resetRunState();
 
   renderImmediate('Queueing request...');
   setUiState(UI_MODES.QUEUED, { queuePosition: null, etaSeconds: null });
   setStatus('Submitting run...');
-
-  const form = new FormData(runForm);
 
   try {
     const resp = await fetch('/start', { method: 'POST', body: form });
@@ -768,6 +841,7 @@ runForm.addEventListener('submit', async (ev) => {
       }
 
       const msg = bodyJson && bodyJson.message ? bodyJson.message : bodyText;
+      pendingRunSignature = '';
       setStatus(`Error: ${msg}`);
       setUiState(UI_MODES.ERROR);
       setTimeout(() => setUiState(UI_MODES.IDLE), 800);
@@ -779,6 +853,7 @@ runForm.addEventListener('submit', async (ev) => {
     setQueuedUi(payload.queue_position, payload.eta_seconds, payload.eta_confidence);
     openStream(runId, runSessionId);
   } catch (err) {
+    pendingRunSignature = '';
     setStatus(`Error: ${err}`);
     setUiState(UI_MODES.ERROR);
     setTimeout(() => setUiState(UI_MODES.IDLE), 800);
@@ -838,8 +913,10 @@ function processCSV(text) {
 
   const colDefs = headers.map((h, i) => `  ${h} ${types[i] || 'TEXT'}`).join(',\n');
   const createStmt = `CREATE TABLE table_name (\n${colDefs}\n);`;
-  const context = document.getElementById('context');
-  if (context) context.value = createStmt;
+  if (contextInput) {
+    contextInput.value = createStmt;
+    applyCharLimits(contextInput);
+  }
 }
 
 // Slider live-value display
@@ -857,24 +934,105 @@ bindSlider('sql_len', 'sqlLenVal', null);
 bindSlider('top_k',   'topKVal',   null);
 bindSlider('top_p',   'topPVal',   (v) => parseFloat(v).toFixed(2));
 
-// Char counters for textareas
-function bindCharCount(textareaId, counterId) {
-  const ta = document.getElementById(textareaId);
-  const counter = document.getElementById(counterId);
-  if (!ta || !counter) return;
-  const max = parseInt(ta.getAttribute('maxlength') || '0', 10);
-  const update = () => {
-    const len = ta.value.length;
-    counter.textContent = max ? `${len} / ${max}` : `${len}`;
-    counter.className = 'char-count' +
-      (max && len >= max ? ' at-limit' : max && len >= max * 0.85 ? ' near-limit' : '');
-  };
-  update();
-  ta.addEventListener('input', update);
+const promptCount = document.getElementById('promptCount');
+const contextCount = document.getElementById('contextCount');
+
+function computeCharHeuristicLimits() {
+  const maxLen = Math.max(8, parseInt(maxLenInput && maxLenInput.value ? maxLenInput.value : '512', 10) || 512);
+  const sqlLen = Math.max(1, parseInt(sqlLenInput && sqlLenInput.value ? sqlLenInput.value : '64', 10) || 64);
+  const effectiveSqlReserve = Math.max(sqlLen, 16);
+  const textTokenBudget = Math.max(32, maxLen - effectiveSqlReserve - STRUCTURE_TOKEN_RESERVE);
+  const combinedCharBudget = Math.floor(textTokenBudget * CHARS_PER_TOKEN_EST);
+  const promptCharCap = Math.max(120, Math.floor(combinedCharBudget * PROMPT_BUDGET_RATIO));
+  const contextCharCap = Math.max(240, combinedCharBudget - promptCharCap);
+  return { promptCharCap, contextCharCap, combinedCharBudget };
 }
 
-bindCharCount('prompt',  'promptCount');
-bindCharCount('context', 'contextCount');
+function truncateFieldTail(field, targetLen) {
+  if (!field) return;
+  const safeTarget = Math.max(0, targetLen);
+  const oldVal = field.value || '';
+  if (oldVal.length <= safeTarget) return;
+  const selectionStart = typeof field.selectionStart === 'number' ? field.selectionStart : oldVal.length;
+  const selectionEnd = typeof field.selectionEnd === 'number' ? field.selectionEnd : oldVal.length;
+  const nextVal = oldVal.slice(0, safeTarget);
+  field.value = nextVal;
+  const nextStart = Math.min(selectionStart, nextVal.length);
+  const nextEnd = Math.min(selectionEnd, nextVal.length);
+  try {
+    field.setSelectionRange(nextStart, nextEnd);
+  } catch (_ignored) {}
+}
+
+function enforceCombinedBudget(activeField, limits) {
+  if (!promptInput || !contextInput) return;
+  const overflow = (promptInput.value.length + contextInput.value.length) - limits.combinedCharBudget;
+  if (overflow <= 0) return;
+  if (activeField === promptInput) {
+    truncateFieldTail(promptInput, promptInput.value.length - overflow);
+    return;
+  }
+  if (activeField === contextInput) {
+    truncateFieldTail(contextInput, contextInput.value.length - overflow);
+    return;
+  }
+  // Non-input caller (e.g. slider change): trim context first, then prompt.
+  const cutContext = Math.min(overflow, contextInput.value.length);
+  truncateFieldTail(contextInput, contextInput.value.length - cutContext);
+  const remaining = (promptInput.value.length + contextInput.value.length) - limits.combinedCharBudget;
+  if (remaining > 0) {
+    truncateFieldTail(promptInput, promptInput.value.length - remaining);
+  }
+}
+
+function updateCharCounters(limits) {
+  if (promptInput && promptCount) {
+    const len = promptInput.value.length;
+    promptCount.textContent = `${len} / ${limits.promptCharCap}`;
+    promptCount.className = 'char-count' +
+      (len >= limits.promptCharCap ? ' at-limit' : len >= limits.promptCharCap * 0.85 ? ' near-limit' : '');
+  }
+  if (contextInput && contextCount) {
+    const len = contextInput.value.length;
+    contextCount.textContent = `${len} / ${limits.contextCharCap}`;
+    contextCount.className = 'char-count' +
+      (len >= limits.contextCharCap ? ' at-limit' : len >= limits.contextCharCap * 0.85 ? ' near-limit' : '');
+  }
+}
+
+function applyCharLimits(activeField = null) {
+  if (!promptInput || !contextInput) return;
+  const limits = computeCharHeuristicLimits();
+  if (activeField === promptInput) {
+    truncateFieldTail(promptInput, limits.promptCharCap);
+  } else if (activeField === contextInput) {
+    truncateFieldTail(contextInput, limits.contextCharCap);
+  } else {
+    truncateFieldTail(promptInput, limits.promptCharCap);
+    truncateFieldTail(contextInput, limits.contextCharCap);
+  }
+  enforceCombinedBudget(activeField, limits);
+  updateCharCounters(limits);
+}
+
+if (promptInput) {
+  promptInput.addEventListener('input', () => {
+    applyCharLimits(promptInput);
+  });
+}
+if (contextInput) {
+  contextInput.addEventListener('input', () => {
+    applyCharLimits(contextInput);
+  });
+}
+if (sqlLenInput) {
+  sqlLenInput.addEventListener('input', () => {
+    const active = document.activeElement === promptInput ? promptInput : (document.activeElement === contextInput ? contextInput : null);
+    applyCharLimits(active);
+  });
+}
+
+applyCharLimits();
 
 document.getElementById('csvInput').addEventListener('change', (ev) => {
   const file = ev.target.files[0];
