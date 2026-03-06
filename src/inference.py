@@ -772,7 +772,7 @@ def run_denoising_generation_callback(
     prompt_text: str,
     context_text: str,
     model_dir: str,
-    n_steps: int = 10,
+    n_steps: int = 11,
     max_len: int = 512,
     top_k: int = 1,
     top_p: float = 1,
@@ -1031,7 +1031,7 @@ def healthz():
 
 @app.route("/")
 def index():
-    default_prompt = "how many planes are of name a380?"
+    default_prompt = "how many planes are of name 747?"
     default_context = "CREATE TABLE planes (id INT, name TEXT)"
     model_info = get_model_info(DEFAULT_MODEL_DIR)
     effective_dtype = resolve_model_dtype(get_inference_device())[1]
@@ -1062,7 +1062,7 @@ def start_run():
     model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
     gif_size_text = form.get("gif_size", "").strip()
     try:
-        steps = int(form.get("steps", "10"))
+        steps = int(form.get("steps", "11"))
         max_len = int(form.get("max_len", "512"))
         sql_len = int(form.get("sql_len", "64"))
         top_k = int(form.get("top_k", "1"))
@@ -1087,8 +1087,8 @@ def start_run():
         return jsonify({"error": "invalid_input", "message": f"max_len must be 8..{MAX_MAX_LEN}"}), 400
     if sql_len < 1 or sql_len > MAX_SQL_LEN:
         return jsonify({"error": "invalid_input", "message": f"sql_len must be 1..{MAX_SQL_LEN}"}), 400
-    if top_k < 0:
-        return jsonify({"error": "invalid_input", "message": "top_k must be >= 0"}), 400
+    if top_k < 0 or top_k > 200:
+        return jsonify({"error": "invalid_input", "message": "top_k must be 0..200"}), 400
     if top_p < 0 or top_p > 1:
         return jsonify({"error": "invalid_input", "message": "top_p must be in [0, 1]"}), 400
 

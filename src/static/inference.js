@@ -842,6 +842,40 @@ function processCSV(text) {
   if (context) context.value = createStmt;
 }
 
+// Slider live-value display
+function bindSlider(inputId, displayId, fmt) {
+  const input = document.getElementById(inputId);
+  const display = document.getElementById(displayId);
+  if (!input || !display) return;
+  const update = () => { display.textContent = fmt ? fmt(input.value) : input.value; };
+  update();
+  input.addEventListener('input', update);
+}
+
+bindSlider('steps',   'stepsVal',  null);
+bindSlider('sql_len', 'sqlLenVal', null);
+bindSlider('top_k',   'topKVal',   null);
+bindSlider('top_p',   'topPVal',   (v) => parseFloat(v).toFixed(2));
+
+// Char counters for textareas
+function bindCharCount(textareaId, counterId) {
+  const ta = document.getElementById(textareaId);
+  const counter = document.getElementById(counterId);
+  if (!ta || !counter) return;
+  const max = parseInt(ta.getAttribute('maxlength') || '0', 10);
+  const update = () => {
+    const len = ta.value.length;
+    counter.textContent = max ? `${len} / ${max}` : `${len}`;
+    counter.className = 'char-count' +
+      (max && len >= max ? ' at-limit' : max && len >= max * 0.85 ? ' near-limit' : '');
+  };
+  update();
+  ta.addEventListener('input', update);
+}
+
+bindCharCount('prompt',  'promptCount');
+bindCharCount('context', 'contextCount');
+
 document.getElementById('csvInput').addEventListener('change', (ev) => {
   const file = ev.target.files[0];
   if (!file) return;

@@ -181,12 +181,10 @@
     .tok.masked {
       display: inline-block;
       border-radius: 3px;
-      background: linear-gradient(
-        90deg,
-        #b0bfd6 0%,
-        #d0dff0 45%,
-        #b0bfd6 100%
-      );
+      background: linear-gradient(90deg,
+          #b0bfd6 0%,
+          #d0dff0 45%,
+          #b0bfd6 100%);
       background-size: 250% 100%;
       animation: tok-shimmer 1.2s ease-in-out infinite;
       color: transparent;
@@ -203,8 +201,13 @@
     }
 
     @keyframes tok-shimmer {
-      0%   { background-position: 100% 0; }
-      100% { background-position: -100% 0; }
+      0% {
+        background-position: 100% 0;
+      }
+
+      100% {
+        background-position: -100% 0;
+      }
     }
 
     .slider-row {
@@ -277,11 +280,9 @@
 
     /* Rate-limited: full-button fill draining left as countdown */
     .run-btn[data-mode="rate_limited"] {
-      background: linear-gradient(
-        to right,
-        color-mix(in srgb, #fff 22%, var(--btn-base)) var(--pct),
-        color-mix(in srgb, #000 25%, var(--btn-base)) var(--pct)
-      );
+      background: linear-gradient(to right,
+          color-mix(in srgb, #fff 22%, var(--btn-base)) var(--pct),
+          color-mix(in srgb, #000 25%, var(--btn-base)) var(--pct));
     }
 
     .run-btn-label {
@@ -365,10 +366,34 @@
       min-height: 84px;
     }
 
+    .field-wrap {
+      display: grid;
+      gap: 4px;
+    }
+
+    .field-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .char-count {
+      font-size: 11px;
+      color: var(--color-muted);
+      font-family: var(--mono);
+    }
+
+    .char-count.near-limit {
+      color: var(--color-warn);
+    }
+
+    .char-count.at-limit {
+      color: var(--color-danger);
+    }
+
     .advanced-block {
       border: 1px solid var(--color-border);
       background: #f9fbff;
-      padding: var(--space-2);
     }
 
     .advanced-block>summary {
@@ -377,24 +402,99 @@
       font-weight: 700;
       color: var(--color-muted);
       list-style: none;
-      min-height: 44px;
+      min-height: 40px;
       display: flex;
       align-items: center;
+      gap: 8px;
+      padding: 0 var(--space-2);
+      border-bottom: 1px solid transparent;
+      user-select: none;
+    }
+
+    .advanced-block[open]>summary {
+      border-bottom-color: var(--color-border);
     }
 
     .advanced-block>summary::-webkit-details-marker {
       display: none;
     }
 
+    .adv-chevron {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      transition: transform 160ms ease;
+      opacity: 0.5;
+    }
+
+    .advanced-block[open] .adv-chevron {
+      transform: rotate(90deg);
+    }
+
     .advanced-content {
       display: grid;
-      gap: var(--space-2);
-      padding-top: var(--space-2);
+      gap: var(--space-3);
+      padding: var(--space-2);
+    }
+
+    /* Slider control rows */
+    .ctrl-row {
+      display: grid;
+      gap: 4px;
+    }
+
+    .ctrl-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .ctrl-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-accent);
+      font-family: var(--mono);
+      min-width: 3ch;
+      text-align: right;
+    }
+
+    input[type="range"].ctrl-range {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--color-border);
+      outline: none;
+      cursor: pointer;
+      padding: 0;
+      min-height: unset;
+      border: none;
+    }
+
+    input[type="range"].ctrl-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      cursor: pointer;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .2);
+    }
+
+    input[type="range"].ctrl-range::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      cursor: pointer;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .2);
     }
 
     .controls-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: var(--space-2);
     }
 
@@ -628,22 +728,34 @@
 
           <section class="panel inputs-panel" aria-label="Input controls">
             <form id="runForm" autocomplete="off">
-              <div>
-                <label class="field-label" for="prompt">Prompt</label>
-                <textarea name="prompt" id="prompt"
+              <div class="field-wrap">
+                <div class="field-header">
+                  <label class="field-label" for="prompt">Prompt</label>
+                  <span class="char-count" id="promptCount"></span>
+                </div>
+                <textarea name="prompt" id="prompt" maxlength="1000"
                   placeholder="e.g. how many planes are of name a380?">{{ prompt_prefill }}</textarea>
               </div>
 
-              <div>
-                <label class="field-label" for="context">Context</label>
-                <textarea name="context" id="context"
+              <div class="field-wrap">
+                <div class="field-header">
+                  <label class="field-label" for="context">Context</label>
+                  <span class="char-count" id="contextCount"></span>
+                </div>
+                <textarea name="context" id="context" maxlength="8000"
                   placeholder="Table schema, DDL, and relevant data context">{{ context_prefill }}</textarea>
               </div>
 
               <details class="advanced-block" id="advancedDetails">
-                <summary>Advanced</summary>
+                <summary>
+                  <svg class="adv-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="6 4 10 8 6 12" />
+                  </svg>
+                  Advanced
+                </summary>
                 <div class="advanced-content">
-                  <div>
+                  <div class="field-wrap">
                     <label class="field-label" for="csvInput">Upload CSV</label>
                     <input type="file" id="csvInput" accept=".csv" />
                     <div class="csv-preview" id="csvTableWrapper"></div>
@@ -651,27 +763,45 @@
                   </div>
 
                   <div class="controls-grid">
-                    <div>
-                      <label class="field-label" for="steps">Steps</label>
-                      <input name="steps" id="steps" type="number" value="10" min="1" max="500" />
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="steps">Steps</label>
+                        <span class="ctrl-val" id="stepsVal">10</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="steps" id="steps" min="1" max="24" step="1"
+                        value="11" />
                     </div>
-                    <div>
-                      <label class="field-label" for="max_len">Max Len</label>
-                      <input name="max_len" id="max_len" type="number" value="512" min="64" max="4096" />
+
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="sql_len">SQL length</label>
+                        <span class="ctrl-val" id="sqlLenVal">64</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="sql_len" id="sql_len" min="8" max="128" step="8"
+                        value="64" />
                     </div>
-                    <div>
-                      <label class="field-label" for="sql_len">SQL mask len</label>
-                      <input name="sql_len" id="sql_len" type="number" value="64" min="1" max="1024" />
+
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="top_k">Top-k <span style="font-weight:400;opacity:.6">(0 =
+                            off)</span></label>
+                        <span class="ctrl-val" id="topKVal">1</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="top_k" id="top_k" min="0" max="200" step="1"
+                        value="1" />
                     </div>
-                    <div>
-                      <label class="field-label" for="top_k">Top-k</label>
-                      <input name="top_k" id="top_k" type="number" value="1" min="0" max="2000" />
+
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="top_p">Top-p <span style="font-weight:400;opacity:.6">(1 =
+                            off)</span></label>
+                        <span class="ctrl-val" id="topPVal">1.00</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="top_p" id="top_p" min="0" max="1" step="0.05"
+                        value="1" />
                     </div>
-                    <div>
-                      <label class="field-label" for="top_p">Top-p</label>
-                      <input name="top_p" id="top_p" type="number" step="0.01" value="1" min="0" max="1" />
-                    </div>
-                    <div>
+
+                    <div class="ctrl-row">
                       <label class="field-label" for="model_dir">Model Dir</label>
                       <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}" />
                     </div>
