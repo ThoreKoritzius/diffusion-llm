@@ -1,0 +1,70 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: diffusion-llm-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: diffusion-llm:latest
+    container_name: diffusion-llm-inference
+    depends_on:
+      - redis
+    ports:
+      - "7860:7860"
+    command:
+      - --model-dir
+      - /models/model
+      - --public
+      - --max-concurrent-runs
+      - "1"
+      - --max-queued-runs
+      - "3"
+      - --request-timeout-seconds
+      - "90"
+      - --max-steps
+      - "24"
+      - --max-max-len
+      - "512"
+      - --max-sql-len
+      - "128"
+      - --run-ttl-seconds
+      - "900"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-4}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
+      - ./generated_gifs:/app/generated_gifs
+    restart: unless-stopped
+    mem_limit: ${WEB_MEM_LIMIT:-2g}
+    cpus: ${WEB_CPUS:-1.0}
+
+  worker:
+    image: diffusion-llm:latest
+    container_name: diffusion-llm-worker
+    depends_on:
+      - redis
+    entrypoint: ["python", "src/inference.py", "--worker", "--model-dir", "/models/model"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-4}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
+      - ./generated_gifs:/app/generated_gifs
+    restart: unless-stopped
+    mem_limit: ${WORKER_MEM_LIMIT:-4g}
+    cpus: ${WORKER_CPUS:-3.0}
+
+volumes:
+  redis_data:

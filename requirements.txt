@@ -1,8 +1,14 @@
+Flask
 Pillow
 numpy
 torch
 transformers
+sentencepiece
+tiktoken
+redis
 datasets
 wandb
 gradio
 accelerate
+gunicorn
+Flask-Limiter

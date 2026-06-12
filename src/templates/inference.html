@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>Diffusion LLM Playground</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root {
+      --color-bg: #f6f7fb;
+      --color-surface: #ffffff;
+      --color-surface-soft: #eff3fa;
+      --color-border: #d7deea;
+      --color-text: #0f172a;
+      --color-muted: #556071;
+      --color-accent: #1f6feb;
+      --color-warn: #a76f1d;
+      --color-danger: #b4233f;
+      --space-1: 8px;
+      --space-2: 12px;
+      --space-3: 16px;
+      --space-4: 20px;
+      --space-5: 24px;
+      --shadow-1: 0 5px 18px rgba(15, 23, 42, 0.06);
+      --mono: "DejaVu Sans Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      background: var(--color-bg);
+      color: var(--color-text);
+      font-family: var(--sans);
+      line-height: 1.4;
+    }
+
+    .page {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: var(--space-3);
+      display: grid;
+      gap: var(--space-3);
+    }
+
+    .top-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      box-shadow: var(--shadow-1);
+    }
+
+    .view-tab {
+      min-height: 46px;
+      border: 0;
+      border-right: 1px solid var(--color-border);
+      background: #fff;
+      color: var(--color-muted);
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+    }
+
+    .view-tab:last-child {
+      border-right: 0;
+    }
+
+    .view-tab.active {
+      background: #eaf1ff;
+      color: #1a4d9d;
+    }
+
+    .view-panel {
+      display: none;
+    }
+
+    .view-panel.active {
+      display: block;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: var(--space-3);
+    }
+
+    .panel {
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      box-shadow: var(--shadow-1);
+    }
+
+    .live-panel {
+      padding: var(--space-3);
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: var(--space-2);
+      min-height: 52vh;
+    }
+
+    .live-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
+    }
+
+    .title {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .step-pill {
+      border: 1px solid #cfe0ff;
+      background: #e9f0ff;
+      color: #164a9e;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 6px 10px;
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .queue-chip {
+      color: var(--color-muted);
+      font-size: 13px;
+      font-weight: 600;
+      min-height: 20px;
+    }
+
+    .queue-chip[data-state="queued"] {
+      color: var(--color-warn);
+    }
+
+    .queue-chip[data-state="running"] {
+      color: var(--color-accent);
+    }
+
+    .queue-chip[data-state="rate_limited"] {
+      color: var(--color-danger);
+    }
+
+    .live-box {
+      border: 1px solid var(--color-border);
+      background: var(--color-surface-soft);
+      min-height: 280px;
+      padding: var(--space-3);
+      overflow: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #liveTokenDisplay {
+      width: 100%;
+    }
+
+    #liveTokenPre {
+      margin: 0;
+      font-family: var(--mono);
+      font-weight: 700;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #101a2e;
+      line-height: 1.6;
+    }
+
+    .tok {
+      display: inline;
+      transition: opacity 180ms ease;
+    }
+
+    .tok.masked {
+      display: inline-block;
+      border-radius: 3px;
+      background: linear-gradient(90deg,
+          #b0bfd6 0%,
+          #d0dff0 45%,
+          #b0bfd6 100%);
+      background-size: 250% 100%;
+      animation: tok-shimmer 1.2s ease-in-out infinite;
+      color: transparent;
+      vertical-align: middle;
+      min-height: 1em;
+    }
+
+    .tok.resolving {
+      opacity: 0;
+    }
+
+    .tok.resolved {
+      opacity: 1;
+    }
+
+    @keyframes tok-shimmer {
+      0% {
+        background-position: 100% 0;
+      }
+
+      100% {
+        background-position: -100% 0;
+      }
+    }
+
+    .slider-row {
+      display: none;
+      gap: 6px;
+    }
+
+    .slider-row.visible {
+      display: grid;
+    }
+
+    .range {
+      width: 100%;
+      min-height: 44px;
+    }
+
+    .slider-label {
+      font-size: 12px;
+      color: var(--color-muted);
+      font-weight: 600;
+    }
+
+    .sidebar {
+      display: grid;
+      gap: var(--space-3);
+      align-self: start;
+    }
+
+    .action-row {
+      position: sticky;
+      bottom: 0;
+      z-index: 20;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      background: linear-gradient(180deg, rgba(246, 247, 251, 0) 0%, var(--color-bg) 20%);
+    }
+
+    .run-btn {
+      --pct: 0%;
+      --btn-base: var(--color-accent);
+      width: 100%;
+      min-height: 50px;
+      border: 0;
+      padding: 12px 16px;
+      background: var(--btn-base);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .run-btn:disabled {
+      cursor: default;
+    }
+
+    .run-btn[data-mode="queued"] {
+      --btn-base: var(--color-warn);
+    }
+
+    .run-btn[data-mode="running"],
+    .run-btn[data-mode="finalizing"] {
+      --btn-base: var(--color-accent);
+    }
+
+    .run-btn[data-mode="rate_limited"],
+    .run-btn[data-mode="error"] {
+      --btn-base: var(--color-danger);
+    }
+
+    /* Rate-limited: full-button fill draining left as countdown */
+    .run-btn[data-mode="rate_limited"] {
+      background: linear-gradient(to right,
+          color-mix(in srgb, #fff 22%, var(--btn-base)) var(--pct),
+          color-mix(in srgb, #000 25%, var(--btn-base)) var(--pct));
+    }
+
+    .run-btn-label {
+      position: relative;
+      z-index: 2;
+    }
+
+    /* Thin bottom stripe for running/queued/finalizing */
+    .btn-progress-track {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 5px;
+      background: rgba(255, 255, 255, 0.25);
+      z-index: 1;
+      opacity: 0;
+      transition: opacity 180ms ease;
+    }
+
+    .btn-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: rgba(255, 255, 255, 0.92);
+      transition: width 80ms linear;
+    }
+
+    .run-btn[data-progress="visible"] .btn-progress-track {
+      opacity: 1;
+    }
+
+    .run-btn[data-progress="indeterminate"] .btn-progress-track {
+      opacity: 1;
+    }
+
+    .run-btn[data-progress="indeterminate"] .btn-progress-bar {
+      width: 36%;
+      animation: indeterminate 1.2s ease-in-out infinite;
+    }
+
+    @keyframes indeterminate {
+      0% {
+        transform: translateX(-120%);
+      }
+
+      100% {
+        transform: translateX(320%);
+      }
+    }
+
+    .inputs-panel {
+      padding: var(--space-3);
+      display: grid;
+      gap: var(--space-3);
+    }
+
+    .field-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-muted);
+      margin-bottom: 6px;
+    }
+
+    textarea,
+    input[type="text"],
+    input[type="number"],
+    input[type="file"] {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid var(--color-border);
+      background: #fff;
+      color: var(--color-text);
+      font-size: 14px;
+      padding: 10px 12px;
+      font-family: var(--sans);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 84px;
+    }
+
+    .field-wrap {
+      display: grid;
+      gap: 4px;
+    }
+
+    .field-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .char-count {
+      font-size: 11px;
+      color: var(--color-muted);
+      font-family: var(--mono);
+    }
+
+    .char-count.near-limit {
+      color: var(--color-warn);
+    }
+
+    .char-count.at-limit {
+      color: var(--color-danger);
+    }
+
+    .advanced-block {
+      border: 1px solid var(--color-border);
+      background: #f9fbff;
+    }
+
+    .advanced-block>summary {
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-muted);
+      list-style: none;
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 var(--space-2);
+      border-bottom: 1px solid transparent;
+      user-select: none;
+    }
+
+    .advanced-block[open]>summary {
+      border-bottom-color: var(--color-border);
+    }
+
+    .advanced-block>summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .adv-chevron {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      transition: transform 160ms ease;
+      opacity: 0.5;
+    }
+
+    .advanced-block[open] .adv-chevron {
+      transform: rotate(90deg);
+    }
+
+    .advanced-content {
+      display: grid;
+      gap: var(--space-3);
+      padding: var(--space-2);
+    }
+
+    /* Slider control rows */
+    .ctrl-row {
+      display: grid;
+      gap: 4px;
+    }
+
+    .ctrl-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .ctrl-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-accent);
+      font-family: var(--mono);
+      min-width: 3ch;
+      text-align: right;
+    }
+
+    input[type="range"].ctrl-range {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--color-border);
+      outline: none;
+      cursor: pointer;
+      padding: 0;
+      min-height: unset;
+      border: none;
+    }
+
+    input[type="range"].ctrl-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      cursor: pointer;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .2);
+    }
+
+    input[type="range"].ctrl-range::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      cursor: pointer;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .2);
+    }
+
+    .controls-grid {
+      display: grid;
+      gap: var(--space-2);
+    }
+
+    .csv-preview {
+      border: 1px solid var(--color-border);
+      background: #fff;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    #csvTableWrapper table {
+      border-collapse: collapse;
+      width: 100%;
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+
+    #csvTableWrapper th,
+    #csvTableWrapper td {
+      border: 1px solid var(--color-border);
+      padding: 4px 8px;
+      text-align: left;
+      max-width: 180px;
+      overflow-wrap: break-word;
+      background: #fff;
+    }
+
+    #csvTableWrapper th {
+      position: sticky;
+      top: 0;
+      background: #edf3ff;
+      color: #1e3f84;
+    }
+
+    .hint {
+      color: var(--color-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .status {
+      border: 1px solid var(--color-border);
+      background: #fff;
+      color: #24324a;
+      font-size: 13px;
+      font-family: var(--mono);
+      line-height: 1.45;
+      min-height: 64px;
+      max-height: 120px;
+      overflow: auto;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+    }
+
+    .info-panel {
+      padding: var(--space-4);
+      display: grid;
+      gap: var(--space-3);
+    }
+
+    .info-title {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .info-card {
+      border: 1px solid var(--color-border);
+      background: #fff;
+      padding: var(--space-3);
+      display: grid;
+      gap: 8px;
+    }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(7, 12, 24, 0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: var(--space-3);
+    }
+
+    .modal-overlay.visible {
+      display: flex;
+    }
+
+    .modal {
+      width: min(760px, 100%);
+      border: 1px solid var(--color-border);
+      background: #fff;
+      box-shadow: 0 14px 34px rgba(9, 14, 30, 0.22);
+      padding: var(--space-4);
+      display: grid;
+      gap: var(--space-2);
+    }
+
+    .modal h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .modal p {
+      margin: 0;
+      color: #2c3a52;
+    }
+
+    .modal-actions {
+      margin-top: var(--space-2);
+      display: flex;
+      justify-content: flex-end;
+      gap: var(--space-2);
+    }
+
+    .btn-plain {
+      min-height: 42px;
+      border: 1px solid var(--color-border);
+      background: #fff;
+      color: var(--color-text);
+      font-weight: 700;
+      padding: 0 14px;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      min-height: 42px;
+      border: 1px solid #1a58bb;
+      background: #1f6feb;
+      color: #fff;
+      font-weight: 700;
+      padding: 0 14px;
+      cursor: pointer;
+    }
+
+    input:focus-visible,
+    textarea:focus-visible,
+    button:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid #9bbcff;
+      outline-offset: 2px;
+    }
+
+    @media (min-width: 981px) {
+      .layout {
+        grid-template-columns: minmax(0, 1fr) 400px;
+        align-items: start;
+      }
+
+      .action-row {
+        position: static;
+        padding-bottom: 0;
+        background: transparent;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 12px;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .page {
+        padding: var(--space-2);
+        gap: var(--space-2);
+      }
+
+      .live-panel {
+        min-height: 44vh;
+      }
+
+      .live-box {
+        min-height: 200px;
+        padding: var(--space-2);
+      }
+
+      .controls-grid {
+        grid-template-columns: 1fr;
+      }
+
+      #liveTokenPre {
+        text-align: left;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        animation: none !important;
+        transition-duration: 0ms !important;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="page">
+    <nav class="top-tabs" aria-label="Page sections">
+      <button class="view-tab active" data-view="inference">Inference</button>
+      <button class="view-tab" data-view="info">General Info</button>
+    </nav>
+
+    <section id="view-inference" class="view-panel active">
+      <div class="layout">
+        <section class="panel live-panel" aria-label="Live output panel">
+          <div class="live-header">
+            <div class="title">Text Diffusion Playground</div>
+            <div class="step-pill" id="stepBox">Step - / -</div>
+          </div>
+
+          <div class="queue-chip" id="queueChip" aria-live="polite"></div>
+
+          <div class="live-box" id="liveBox" aria-live="polite">
+            <div id="liveTokenDisplay">
+              <pre id="liveTokenPre">Ready for generation. Submit a prompt to start.</pre>
+            </div>
+          </div>
+
+          <div class="slider-row" id="sliderRow">
+            <input type="range" class="range" min="0" value="0" id="snapSlider" aria-label="Snapshot timeline" />
+            <div class="slider-label" id="snapSliderLabel"></div>
+          </div>
+        </section>
+
+        <div class="sidebar">
+          <div class="action-row" id="actionRow">
+            <button id="runBtn" class="run-btn" type="submit" form="runForm" data-mode="idle" data-progress="hidden">
+              <span id="runBtnLabel" class="run-btn-label">Run Generation</span>
+              <span class="btn-progress-track"><span class="btn-progress-bar" id="runBtnProgress"></span></span>
+            </button>
+          </div>
+
+          <section class="panel inputs-panel" aria-label="Input controls">
+            <form id="runForm" autocomplete="off">
+              <div class="field-wrap">
+                <div class="field-header">
+                  <label class="field-label" for="prompt">Prompt</label>
+                  <span class="char-count" id="promptCount"></span>
+                </div>
+                <textarea name="prompt" id="prompt" maxlength="1000"
+                  placeholder="e.g. how many planes are of name a380?">{{ prompt_prefill }}</textarea>
+              </div>
+
+              <div class="field-wrap">
+                <div class="field-header">
+                  <label class="field-label" for="context">Context</label>
+                  <span class="char-count" id="contextCount"></span>
+                </div>
+                <textarea name="context" id="context" maxlength="8000"
+                  placeholder="Table schema, DDL, and relevant data context">{{ context_prefill }}</textarea>
+              </div>
+
+              <details class="advanced-block" id="advancedDetails">
+                <summary>
+                  <svg class="adv-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="6 4 10 8 6 12" />
+                  </svg>
+                  Advanced
+                </summary>
+                <div class="advanced-content">
+                  <div class="field-wrap">
+                    <label class="field-label" for="csvInput">Upload CSV</label>
+                    <input type="file" id="csvInput" accept=".csv" />
+                    <div class="csv-preview" id="csvTableWrapper"></div>
+                    <div class="hint">CSV preview shows first 30 rows. Schema is written into Context.</div>
+                  </div>
+
+                  <div class="controls-grid">
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="steps">Steps</label>
+                        <span class="ctrl-val" id="stepsVal">10</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="steps" id="steps" min="1" max="24" step="1"
+                        value="11" />
+                    </div>
+
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="sql_len">SQL length</label>
+                        <span class="ctrl-val" id="sqlLenVal">64</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="sql_len" id="sql_len" min="8" max="128" step="8"
+                        value="64" />
+                    </div>
+
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="top_k">Top-k <span style="font-weight:400;opacity:.6">(0 =
+                            off)</span></label>
+                        <span class="ctrl-val" id="topKVal">1</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="top_k" id="top_k" min="0" max="200" step="1"
+                        value="1" />
+                    </div>
+
+                    <div class="ctrl-row">
+                      <div class="ctrl-header">
+                        <label class="field-label" for="top_p">Top-p <span style="font-weight:400;opacity:.6">(1 =
+                            off)</span></label>
+                        <span class="ctrl-val" id="topPVal">1.00</span>
+                      </div>
+                      <input class="ctrl-range" type="range" name="top_p" id="top_p" min="0" max="1" step="0.05"
+                        value="1" />
+                    </div>
+
+                    <div class="ctrl-row">
+                      <label class="field-label" for="model_dir">Model Dir</label>
+                      <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}" />
+                    </div>
+                    <input type="hidden" name="max_len" id="max_len" value="{{ max_model_len }}" />
+                  </div>
+                </div>
+              </details>
+            </form>
+
+            <div id="status" class="status" aria-live="polite">Ready.</div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-info" class="view-panel">
+      <article class="panel info-panel">
+        <div class="info-title">General Info</div>
+        <div class="info-card">
+          <strong>What is text diffusion here?</strong>
+          <div>Generation starts from masked SQL tokens and denoises over multiple steps, showing intermediate states
+            before final SQL.</div>
+        </div>
+        <div class="info-card">
+          <strong>Runtime profile</strong>
+          <p>This is an early Research Preview deployed on a <strong>CPU</strong> (yes i cant afford GPUs).</p>
+          <div>Model parameters: <strong>{{ model_param_count_display }}</strong></div>
+          <div>Requested dtype: <strong>{{ inference_dtype_requested }}</strong></div>
+          <div>Effective dtype: <strong>{{ inference_dtype_effective }}</strong></div>
+        </div>
+        <div class="info-card">
+          <strong>How to use</strong>
+          <div>Provide prompt + context, adjust steps if needed, then run. Higher steps increase quality but take
+            longer.</div>
+        </div>
+        <div class="info-card">
+          <strong>Contact</strong>
+          <div>Email: <a href="mailto:thorekoritzius@gmail.com">thorekoritzius@gmail.com</a></div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <div class="modal-overlay" id="introModal" role="dialog" aria-modal="true" aria-labelledby="introTitle">
+    <div class="modal">
+      <h2 id="introTitle">Welcome to Text Diffusion Inference</h2>
+      <p>This playground generates SQL via iterative denoising. You can observe each step from masked tokens to final
+        output.</p>
+      <p>This is an early research preview deployed on a <strong>CPU</strong>.</p>
+      <p>Model size: <strong>{{ model_param_count_display }}</strong> parameters.</p>
+      <div class="modal-actions">
+        <button class="btn-plain" id="introDismiss">Close</button>
+        <button class="btn-primary" id="introStart">Open Inference</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='inference.js') }}?v={{ static_version }}"></script>
+</body>
+
+</html>
