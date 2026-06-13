@@ -2,7 +2,7 @@
 SQL Masked-Diffusion Training (LLaDA-style)
 
 Key design (vs. the previous version):
-- ModernBERT-base backbone instead of roberta-base.
+- ModernBERT-base backbone
 - Token-level input construction (no decode/re-tokenize round trip).
 - Continuous mask ratio t ~ U(eps, 1] with Bernoulli per-token masking,
   matching the absorbing-state discrete diffusion forward process.
@@ -10,11 +10,14 @@ Key design (vs. the previous version):
   fully-masked regime that generation starts from is properly trained.
 - SQL span padded to a fixed window with [PAD]; pads are maskable and
   predictable, which is how the model learns output length.
-- Generation-based eval (exact match via confidence-based denoising), not
-  just masked-LM loss.
+- On-the-fly augmentation (spaced/mixed-case identifiers, colloquial
+  prompts) so the model is robust to messy real-world schemas.
+- Generation-based eval (exact match via confidence-based denoising) on
+  both clean and augmented inputs, not just masked-LM loss.
 """
 
 import os
+import random
 import re
 
 import torch
@@ -29,26 +32,27 @@ from transformers import (
 )
 import wandb
 
+from augment import augment_example
 from denoising import denoise_steps
 
 # 1. Hyperparameters and Config
 MODEL_NAME = "answerdotai/ModernBERT-base"
-NUM_EPOCHS = 2
+NUM_EPOCHS = 10
 BATCH_SIZE = 32
 MAX_LEN = 512
 SQL_WINDOW = 128
-TRAIN_SIZE = 50_000
+TRAIN_SIZE = 100_000
 VAL_SIZE = 500
 T_EPS = 1e-3          # lower bound for mask ratio t
-FILTER_JOINS = False  # previous run excluded JOINs; keep full SQL by default
+FILTER_JOINS = False
 
 GEN_EVAL_SIZE = 32    # examples for generation-based exact-match eval
-GEN_EVAL_STEPS = 10   # denoising steps during eval
+GEN_EVAL_STEPS = 24   # denoising steps during eval
 
 OUTPUT_DIR = "diffusion-sql-modernbert"
 
 os.environ["WANDB_PROJECT"] = "sql-diffusion"
-wandb.init(project="sql-diffusion", name="modernbert-llada-style", config={
+wandb.init(project="sql-diffusion", name="modernbert-llada-aug", config={
     "model": MODEL_NAME,
     "epochs": NUM_EPOCHS,
     "batch_size": BATCH_SIZE,
@@ -58,6 +62,7 @@ wandb.init(project="sql-diffusion", name="modernbert-llada-style", config={
     "val_size": VAL_SIZE,
     "t_eps": T_EPS,
     "filter_joins": FILTER_JOINS,
+    "augmentation": True,
 })
 
 
@@ -84,15 +89,15 @@ MASK_ID = tokenizer.mask_token_id
 
 
 # 4. Token-level Input Construction
-def encode_example(example):
+def encode_text(prompt: str, context: str, sql: str):
     """Builds:
         [CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> sql+pads </SQL> [SEP] [PAD]...
     The SQL span is padded to SQL_WINDOW with PAD tokens that are part of the
     diffusion target (the model learns to predict PAD => output length).
     """
-    prompt_ids = tokenizer(example["sql_prompt"], add_special_tokens=False)["input_ids"]
-    context_ids = tokenizer(example.get("sql_context", ""), add_special_tokens=False)["input_ids"]
-    sql_ids = tokenizer(example.get("sql", ""), add_special_tokens=False)["input_ids"][:SQL_WINDOW]
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    context_ids = tokenizer(context, add_special_tokens=False)["input_ids"]
+    sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][:SQL_WINDOW]
     sql_ids = sql_ids + [PAD_ID] * (SQL_WINDOW - len(sql_ids))
 
     # 9 fixed tokens: CLS, 6 tags, SEP — leave the rest for prompt+context
@@ -120,44 +125,51 @@ def encode_example(example):
     }
 
 
-# 5. Prepare Dataset
-tokenized = dataset.map(encode_example, remove_columns=[
-    c for c in dataset["train"].column_names if c not in ("sql_prompt", "sql_context", "sql")
-])
-
-
-# 6. Model Setup
+# 5. Model Setup
 model = AutoModelForMaskedLM.from_pretrained(MODEL_NAME)
 model.resize_token_embeddings(len(tokenizer))
 
 
-# 7. Collator: Continuous-t Bernoulli Masking on the SQL Span
-def diffusion_collator(features):
-    input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
-    attention = torch.tensor([f["attention_mask"] for f in features], dtype=torch.long)
-    labels = torch.full_like(input_ids, -100)
-    B = input_ids.shape[0]
+# 6. Collator: Augment + Encode + Continuous-t Bernoulli Masking
+def make_collator(augment: bool):
+    def collate(features):
+        rows = []
+        for f in features:
+            p, c, s = f["sql_prompt"], f.get("sql_context", ""), f.get("sql", "")
+            if augment:
+                p, c, s = augment_example(p, c, s)
+            rows.append(encode_text(p, c, s))
 
-    t = torch.rand(B) * (1.0 - T_EPS) + T_EPS  # t ~ U(eps, 1]
-    for i, f in enumerate(features):
-        s, e = int(f["sql_start"]), int(f["sql_end"])
-        span = e - s
-        masked = torch.rand(span) < t[i]
-        if not masked.any():
-            masked[torch.randint(span, (1,))] = True
-        idx = torch.nonzero(masked, as_tuple=True)[0] + s
-        labels[i, idx] = input_ids[i, idx]
-        input_ids[i, idx] = MASK_ID
+        input_ids = torch.tensor([r["input_ids"] for r in rows], dtype=torch.long)
+        attention = torch.tensor([r["attention_mask"] for r in rows], dtype=torch.long)
+        labels = torch.full_like(input_ids, -100)
+        B = input_ids.shape[0]
 
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention,
-        "labels": labels,
-        "loss_weights": 1.0 / t,
-    }
+        t = torch.rand(B) * (1.0 - T_EPS) + T_EPS  # t ~ U(eps, 1]
+        for i, r in enumerate(rows):
+            s_, e_ = r["sql_start"], r["sql_end"]
+            span = e_ - s_
+            masked = torch.rand(span) < t[i]
+            if not masked.any():
+                masked[torch.randint(span, (1,))] = True
+            idx = torch.nonzero(masked, as_tuple=True)[0] + s_
+            labels[i, idx] = input_ids[i, idx]
+            input_ids[i, idx] = MASK_ID
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention,
+            "labels": labels,
+            "loss_weights": 1.0 / t,
+        }
+    return collate
 
 
-# 8. Trainer with 1/t-weighted ELBO Loss
+train_collator = make_collator(augment=True)
+eval_collator = make_collator(augment=False)
+
+
+# 7. Trainer with 1/t-weighted ELBO Loss
 class DiffusionTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         weights = inputs.pop("loss_weights")
@@ -174,31 +186,43 @@ class DiffusionTrainer(Trainer):
         loss = per_example.mean()
         return (loss, outputs) if return_outputs else loss
 
+    def get_eval_dataloader(self, eval_dataset=None):
+        original = self.data_collator
+        self.data_collator = eval_collator
+        try:
+            return super().get_eval_dataloader(eval_dataset)
+        finally:
+            self.data_collator = original
 
-# 9. Generation-based Eval (exact match)
+
+# 8. Generation-based Eval (exact match, clean + augmented)
 def normalize_sql(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().rstrip(";")).lower()
 
 
 @torch.no_grad()
-def generation_exact_match(model, raw_examples, n_steps=GEN_EVAL_STEPS) -> float:
+def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL_STEPS) -> float:
     model.eval()
     device = next(model.parameters()).device
+    rng = random.Random(0)
     hits = 0
     for ex in raw_examples:
-        enc = encode_example(ex)
+        p, c, s = ex["sql_prompt"], ex.get("sql_context", ""), ex.get("sql", "")
+        if transform is not None:
+            p, c, s = transform(p, c, s, rng=rng)
+        enc = encode_text(p, c, s)
         ids = torch.tensor([enc["input_ids"]], dtype=torch.long, device=device)
         attn = torch.tensor([enc["attention_mask"]], dtype=torch.long, device=device)
-        s, e = enc["sql_start"], enc["sql_end"]
-        ids[0, s:e] = MASK_ID
+        lo, hi = enc["sql_start"], enc["sql_end"]
+        ids[0, lo:hi] = MASK_ID
         for _ in denoise_steps(
-            model, ids, attn, list(range(s, e)), MASK_ID,
+            model, ids, attn, list(range(lo, hi)), MASK_ID,
             n_steps=n_steps, forbid_token_ids=list(TAG_IDS.values()),
         ):
             pass
-        out_ids = [tid for tid in ids[0, s:e].tolist() if tid not in (PAD_ID, MASK_ID)]
+        out_ids = [tid for tid in ids[0, lo:hi].tolist() if tid not in (PAD_ID, MASK_ID)]
         pred_sql = tokenizer.decode(out_ids, skip_special_tokens=True)
-        if normalize_sql(pred_sql) == normalize_sql(ex["sql"]):
+        if normalize_sql(pred_sql) == normalize_sql(s):
             hits += 1
     return hits / max(1, len(raw_examples))
 
@@ -208,13 +232,17 @@ class GenerationEvalCallback(TrainerCallback):
         self.raw_examples = raw_examples
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
-        em = generation_exact_match(model, self.raw_examples)
-        print(f"[gen-eval] exact_match={em:.3f} (n={len(self.raw_examples)})")
-        wandb.log({"eval/generation_exact_match": em}, step=state.global_step)
+        em_clean = generation_exact_match(model, self.raw_examples)
+        em_aug = generation_exact_match(model, self.raw_examples, transform=augment_example)
+        print(f"[gen-eval] exact_match={em_clean:.3f} exact_match_aug={em_aug:.3f} (n={len(self.raw_examples)})")
+        wandb.log({
+            "eval/generation_exact_match": em_clean,
+            "eval/generation_exact_match_aug": em_aug,
+        }, step=state.global_step)
         model.train()
 
 
-# 10. Training Arguments
+# 9. Training Arguments
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
@@ -235,18 +263,18 @@ training_args = TrainingArguments(
 )
 
 
-# 11. Dataset Slices
-train_ds = tokenized["train"].select(range(min(TRAIN_SIZE, len(tokenized["train"]))))
-val_ds = tokenized["test"].select(range(min(VAL_SIZE, len(tokenized["test"]))))
+# 10. Dataset Slices (collator encodes on the fly, so these stay raw)
+train_ds = dataset["train"].select(range(min(TRAIN_SIZE, len(dataset["train"]))))
+val_ds = dataset["test"].select(range(min(VAL_SIZE, len(dataset["test"]))))
 gen_eval_examples = [dataset["test"][i] for i in range(min(GEN_EVAL_SIZE, len(dataset["test"])))]
 
-# 12. Train
+# 11. Train
 trainer = DiffusionTrainer(
     model=model,
     args=training_args,
     train_dataset=train_ds,
     eval_dataset=val_ds,
-    data_collator=diffusion_collator,
+    data_collator=train_collator,
     processing_class=tokenizer,
     callbacks=[GenerationEvalCallback(gen_eval_examples)],
 )
