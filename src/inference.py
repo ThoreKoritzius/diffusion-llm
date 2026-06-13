@@ -39,7 +39,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 import torch
 import redis
-from transformers import AutoTokenizer, RobertaTokenizer, RobertaForMaskedLM
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+
+from denoising import denoise_steps
 
 # -------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=int, default=90)
     parser.add_argument("--max-prompt-chars", type=int, default=1000)
     parser.add_argument("--max-context-chars", type=int, default=8000)
-    parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument("--max-steps", type=int, default=48)
     parser.add_argument("--max-max-len", type=int, default=512)
     parser.add_argument("--max-sql-len", type=int, default=128)
     parser.add_argument("--enable-gif", action="store_true", help="Enable GIF generation for runs")
@@ -145,10 +147,21 @@ def snaps_key(run_id: str) -> str:
     return f"diffusion:run:{run_id}:snaps"
 
 
+STANDALONE_MODE = False
+
+
 def get_redis() -> redis.Redis:
-    global REDIS_CLIENT
+    global REDIS_CLIENT, STANDALONE_MODE
     if REDIS_CLIENT is None:
-        REDIS_CLIENT = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        client = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+        try:
+            client.ping()
+            REDIS_CLIENT = client
+        except (redis.exceptions.RedisError, OSError):
+            import fakeredis
+            print(f"[WARN] Redis unavailable at {REDIS_URL}; using in-memory store (standalone mode, single process)")
+            REDIS_CLIENT = fakeredis.FakeRedis(decode_responses=True)
+            STANDALONE_MODE = True
     return REDIS_CLIENT
 
 
@@ -432,7 +445,7 @@ def get_model_info(model_dir: str) -> Dict:
         if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["model"] is not None:
             model = MODEL_CACHE["model"]
         else:
-            model = RobertaForMaskedLM.from_pretrained(model_dir)
+            model = AutoModelForMaskedLM.from_pretrained(model_dir)
         param_count = int(sum(p.numel() for p in model.parameters()))
         info["param_count"] = param_count
         info["param_count_display"] = format_param_count(param_count)
@@ -455,17 +468,13 @@ def validate_model_dir(model_dir: str) -> tuple[bool, str]:
     if tokenizer is None:
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
-        except Exception as e:
-            tok_err_slow = e
-            try:
-                tokenizer = RobertaTokenizer.from_pretrained(model_dir)
-            except Exception as e_roberta:
-                ok, msg = False, (
-                    f"failed loading tokenizer from {model_dir}: {e_roberta}. "
-                    f"fast-tokenizer error was: {tok_err}; slow AutoTokenizer error was: {tok_err_slow}"
-                )
-                MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
-                return ok, msg
+        except Exception as e_slow:
+            ok, msg = False, (
+                f"failed loading tokenizer from {model_dir}: {e_slow}. "
+                f"fast-tokenizer error was: {tok_err}"
+            )
+            MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+            return ok, msg
 
     required = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     vocab = tokenizer.get_vocab()
@@ -769,21 +778,17 @@ def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), inter
 def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
     if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["tokenizer"] is not None and MODEL_CACHE["model"] is not None:
         return MODEL_CACHE["tokenizer"], MODEL_CACHE["model"]
-    tokenizer = None
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
     except Exception:
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
-        except Exception:
-            tokenizer = RobertaTokenizer.from_pretrained(model_dir)
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
     tokenizer.model_max_length = max_len
     device = get_inference_device()
     dtype, _dtype_label = resolve_model_dtype(device)
     try:
-        model = RobertaForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
+        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
     except Exception:
-        model = RobertaForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32)
+        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32)
         dtype = torch.float32
     model.to(device)
     model.eval()
@@ -801,7 +806,7 @@ def run_denoising_generation_callback(
     max_len: int = 512,
     top_k: int = 1,
     top_p: float = 1,
-    sql_len_request: int = 64,
+    sql_len_request: int = 128,
     animate: bool = True,
     on_snapshot = None,
     status_cb = None,
@@ -957,71 +962,53 @@ def run_denoising_generation_callback(
     if len(modifiable_positions) == 0:
         raise RuntimeError("No modifiable SQL tokens were found (empty SQL region).")
 
-    mask_probs = [i / n_steps for i in range(n_steps - 1, -1, -1)]
-    total_steps = len(mask_probs)
+    pad_token = tokenizer.pad_token or "<pad>"
+    total_steps = max(1, min(n_steps, len(modifiable_positions)))
+
+    def snapshot_text():
+        s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
+        return s.replace(mask_token, " ____").replace(pad_token, "")
+
     snapshots: List[Dict] = []
     if animate:
-        s0 = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-        s0_clean = s0.replace(mask_token, " ____").replace("<pad>", "")
+        s0_clean = snapshot_text()
         snapshots.append({"text": s0_clean, "sql_only": extract_sql_only_from_text(s0_clean), "step": 0, "total_steps": total_steps})
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
-    log("[INFO] Starting denoising")
+    log("[INFO] Starting denoising (confidence-based unmasking)")
     t0 = time.time()
-    for step_idx, p_mask in enumerate(mask_probs):
-        if should_stop and should_stop():
-            raise TimeoutError("Run cancelled or timed out")
-        with torch.no_grad():
-            outputs = model(input_ids=current_ids, attention_mask=current_attention)
-            logits = outputs.logits
+    # top_k <= 1 -> fully greedy commit order; otherwise add Gumbel noise for diversity
+    sample_temperature = 0.0 if int(top_k) <= 1 else 1.0
+    vocab = tokenizer.get_vocab()
+    forbid_ids = [vocab[t] for t in REQUIRED_TAGS if t in vocab]
 
-        pred_ids = current_ids.clone()
-        for pos in modifiable_positions:
-            if should_stop and should_stop():
-                raise TimeoutError("Run cancelled or timed out")
-            logit_vec = logits[0, pos, :]
-            filtered = top_k_top_p_filtering(logit_vec, top_k=top_k, top_p=top_p, filter_value=-float("Inf"))
-            probs = torch.softmax(filtered, dim=-1)
-            sampled = torch.multinomial(probs, num_samples=1).squeeze(-1)
-            pred_ids[0, pos] = sampled
-
+    for step_idx, total_steps, current_ids in denoise_steps(
+        model,
+        current_ids,
+        current_attention,
+        modifiable_positions,
+        mask_id,
+        n_steps=total_steps,
+        temperature=sample_temperature,
+        forbid_token_ids=forbid_ids,
+        should_stop=should_stop,
+    ):
         if status_cb:
             status_cb(f"step {step_idx+1}/{total_steps}")
-
-        if math.isclose(p_mask, 0.0):
-            new_ids = current_ids.clone()
-            new_ids[0, sql_open_idx + 1 : sql_close_idx] = pred_ids[0, sql_open_idx + 1 : sql_close_idx]
-            current_ids = new_ids
-            final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
-            final_sql_only = decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id)
-            final_sql_only = strip_final_masks(final_sql_only)
-            if animate:
-                s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-                s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
-                s_clean_final = replace_sql_section(s_clean, final_sql_only)
-                snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": total_steps, "total_steps": total_steps})
-                if on_snapshot:
-                    on_snapshot(snapshots[-1])
-            break
-
-        rand = torch.rand((max_len,), device=device)
-        remask = (rand < p_mask) & modifiable
-
-        next_ids = current_ids.clone()
-        for pos in modifiable_positions:
-            if remask[pos]:
-                next_ids[0, pos] = mask_id
-            else:
-                next_ids[0, pos] = pred_ids[0, pos]
-
-        current_ids = next_ids
-        if animate:
-            s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-            s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
+        if animate and step_idx + 1 < total_steps:
+            s_clean = snapshot_text()
             snapshots.append({"text": s_clean, "sql_only": extract_sql_only_from_text(s_clean), "step": step_idx+1, "total_steps": total_steps})
             if on_snapshot:
                 on_snapshot(snapshots[-1])
+
+    final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
+    final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))
+    if animate:
+        s_clean_final = replace_sql_section(snapshot_text(), final_sql_only)
+        snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": total_steps, "total_steps": total_steps})
+        if on_snapshot:
+            on_snapshot(snapshots[-1])
 
     t1 = time.time()
     log(f"[INFO] Denoising took {t1 - t0:.2f}s")
@@ -1039,27 +1026,6 @@ def run_denoising_generation_callback(
 
     return {"snapshots": snapshots, "sql_only": sql_only, "display": display}
 
-# -------------------------
-# top-k / top-p helper
-# -------------------------
-def top_k_top_p_filtering(logits: torch.Tensor, top_k: int = 0, top_p: float = 0.0, filter_value: float = -float("Inf")) -> torch.Tensor:
-    logits = logits.clone()
-    if top_k > 0:
-        top_k = min(top_k, logits.size(-1))
-        kth_value = torch.topk(logits, top_k)[0][..., -1]
-        indices_to_remove = logits < kth_value
-        logits[indices_to_remove] = filter_value
-    if top_p > 0.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = False
-        indices_to_remove = sorted_indices[sorted_indices_to_remove]
-        logits[indices_to_remove] = filter_value
-    return logits
-
-# -------------------------
 # -------------------------
 # Flask endpoints
 # -------------------------
@@ -1132,9 +1098,9 @@ def start_run():
     model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
     gif_size_text = form.get("gif_size", "").strip()
     try:
-        steps = int(form.get("steps", "11"))
+        steps = int(form.get("steps", "24"))
         max_len = int(form.get("max_len", "512"))
-        sql_len = int(form.get("sql_len", "64"))
+        sql_len = int(form.get("sql_len", "128"))
         top_k = int(form.get("top_k", "1"))
         top_p = float(form.get("top_p", "1"))
     except ValueError:
@@ -1379,6 +1345,10 @@ if __name__ == "__main__":
         print("Starting worker loop with Redis:", REDIS_URL)
         worker_loop()
         raise SystemExit(0)
+    get_redis()
+    if STANDALONE_MODE:
+        print("Starting in-process worker (no external Redis/worker needed)")
+        threading.Thread(target=worker_loop, daemon=True).start()
     url = f"http://{HOST}:{PORT}/"
     if not args.no_open:
         def _open():
