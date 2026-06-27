@@ -2,10 +2,11 @@ Flask
 Pillow
 numpy
 torch
-transformers
+transformers>=4.48.0
 sentencepiece
 tiktoken
 redis
+fakeredis
 datasets
 wandb
 gradio

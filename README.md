@@ -1,13 +1,42 @@
 # Diffusion-LLM
 
-A masked language model implementing diffusion-style text denoising for SQL generation. This repo includes training and a web playground for iterative denoising inference.
+A masked diffusion language model (LLaDA-style) for text-to-SQL generation, built on ModernBERT. This repo includes training and a web playground for iterative denoising inference.
 
 ![Diffusion Example](examples/diffusion_example.gif)
 
+## How It Works
+
+### Training (`src/train.py`)
+
+- Backbone: `answerdotai/ModernBERT-base` with an MLM head.
+- Inputs are built at the token level:
+  `[CLS] <PROMPT> ... </PROMPT> <CONTEXT> ... </CONTEXT> <SQL> sql + [PAD]s </SQL> [SEP]`
+  The SQL span is a fixed 128-token window; `[PAD]` tokens inside it are real
+  prediction targets, so the model learns output length.
+- Forward (noising) process: per example a continuous mask ratio `t ~ U(0, 1]`
+  is drawn and each SQL-span token is masked independently with probability `t`.
+- Loss: cross-entropy on masked positions weighted by `1/t` (the discrete
+  diffusion ELBO). This properly trains the fully-masked regime that
+  generation starts from.
+- Eval: besides MLM loss, generation-based exact match is computed by actually
+  denoising validation examples (`eval/generation_exact_match` in wandb).
+
+### Inference (`src/denoising.py`)
+
+Confidence-based iterative unmasking (MaskGIT/LLaDA decoding):
+
+1. The SQL window starts fully masked.
+2. Each step predicts only the currently masked positions.
+3. The most confident predictions are committed permanently (cosine schedule:
+   few commits early, more as context fills in).
+4. Committed tokens are never resampled, so generation converges instead of
+   flickering. `top_k > 1` adds Gumbel noise to the commit order for diversity.
+
 ## Features
 
-- Diffusion-style masking and denoising for SQL spans.
-- Training pipeline (`src/train.py`) on text-to-SQL data.
+- LLaDA-style masked diffusion training with `1/t`-weighted ELBO loss.
+- Confidence-based parallel decoding shared by training eval and both UIs.
+- Generation-based exact-match eval logged to wandb during training.
 - Public-ready Flask playground (`src/inference.py`) with SSE + polling fallback.
 - Redis-backed queue + worker for stable queue position/ETA and run TTL.
 - CPU safety controls for public deployment:
@@ -31,11 +60,16 @@ pip install -r requirements.txt
 python src/train.py
 ```
 
+Checkpoints and the final model are written to `diffusion-sql-modernbert/`.
+Track `eval/generation_exact_match` in wandb for actual generation quality.
+
 ### 3. Run inference UI locally
 
 ```bash
 python src/inference.py --model-dir /absolute/path/to/model
 ```
+
+Both old (roberta) and new (ModernBERT) checkpoints load via the Auto classes.
 
 ## Docker Deployment (CPU-safe public playground)
 
@@ -79,7 +113,7 @@ Web service listens on `:7860` and is designed to be put behind Caddy/Nginx.
 - Timeout per run: `90s`.
 - Max prompt chars: `1000`.
 - Max context chars: `8000`.
-- Max steps: `24`.
+- Max steps: `48`.
 - Max max_len: `512`.
 - Max sql_len: `128`.
 - Run TTL cleanup: `900s`.

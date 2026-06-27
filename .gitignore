@@ -1,2 +1,40 @@
+# Secrets / environment
 *.env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+
+# Model weights, checkpoints & training output dirs
 model/
+diffusion-sql/
+diffusion-sql-modernbert/
+checkpoint-*/
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+
+# Experiment tracking & logs
+wandb/
+training_logs/
+*.log
+
+# HuggingFace / datasets cache
+.hf_cache/
+.cache/
+hf_cache/
+
+# Runtime output
+generated_gifs/

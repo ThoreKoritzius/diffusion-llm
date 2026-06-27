@@ -39,7 +39,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 import torch
 import redis
-from transformers import AutoTokenizer, RobertaTokenizer, RobertaForMaskedLM
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+
+from denoising import denoise_steps
 
 # -------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=int, default=90)
     parser.add_argument("--max-prompt-chars", type=int, default=1000)
     parser.add_argument("--max-context-chars", type=int, default=8000)
-    parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument("--max-steps", type=int, default=48)
     parser.add_argument("--max-max-len", type=int, default=512)
     parser.add_argument("--max-sql-len", type=int, default=128)
     parser.add_argument("--enable-gif", action="store_true", help="Enable GIF generation for runs")
@@ -145,10 +147,21 @@ def snaps_key(run_id: str) -> str:
     return f"diffusion:run:{run_id}:snaps"
 
 
+STANDALONE_MODE = False
+
+
 def get_redis() -> redis.Redis:
-    global REDIS_CLIENT
+    global REDIS_CLIENT, STANDALONE_MODE
     if REDIS_CLIENT is None:
-        REDIS_CLIENT = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        client = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+        try:
+            client.ping()
+            REDIS_CLIENT = client
+        except (redis.exceptions.RedisError, OSError):
+            import fakeredis
+            print(f"[WARN] Redis unavailable at {REDIS_URL}; using in-memory store (standalone mode, single process)")
+            REDIS_CLIENT = fakeredis.FakeRedis(decode_responses=True)
+            STANDALONE_MODE = True
     return REDIS_CLIENT
 
 
@@ -432,7 +445,7 @@ def get_model_info(model_dir: str) -> Dict:
         if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["model"] is not None:
             model = MODEL_CACHE["model"]
         else:
-            model = RobertaForMaskedLM.from_pretrained(model_dir)
+            model = AutoModelForMaskedLM.from_pretrained(model_dir)
         param_count = int(sum(p.numel() for p in model.parameters()))
         info["param_count"] = param_count
         info["param_count_display"] = format_param_count(param_count)
@@ -455,17 +468,13 @@ def validate_model_dir(model_dir: str) -> tuple[bool, str]:
     if tokenizer is None:
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
-        except Exception as e:
-            tok_err_slow = e
-            try:
-                tokenizer = RobertaTokenizer.from_pretrained(model_dir)
-            except Exception as e_roberta:
-                ok, msg = False, (
-                    f"failed loading tokenizer from {model_dir}: {e_roberta}. "
-                    f"fast-tokenizer error was: {tok_err}; slow AutoTokenizer error was: {tok_err_slow}"
-                )
-                MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
-                return ok, msg
+        except Exception as e_slow:
+            ok, msg = False, (
+                f"failed loading tokenizer from {model_dir}: {e_slow}. "
+                f"fast-tokenizer error was: {tok_err}"
+            )
+            MODEL_VALIDATION_CACHE[model_dir] = {"ok": ok, "msg": msg}
+            return ok, msg
 
     required = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     vocab = tokenizer.get_vocab()
@@ -769,21 +778,17 @@ def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), inter
 def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
     if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["tokenizer"] is not None and MODEL_CACHE["model"] is not None:
         return MODEL_CACHE["tokenizer"], MODEL_CACHE["model"]
-    tokenizer = None
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
     except Exception:
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
-        except Exception:
-            tokenizer = RobertaTokenizer.from_pretrained(model_dir)
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
     tokenizer.model_max_length = max_len
     device = get_inference_device()
     dtype, _dtype_label = resolve_model_dtype(device)
     try:
-        model = RobertaForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
+        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
     except Exception:
-        model = RobertaForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32)
+        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32)
         dtype = torch.float32
     model.to(device)
     model.eval()
@@ -801,7 +806,7 @@ def run_denoising_generation_callback(
     max_len: int = 512,
     top_k: int = 1,
     top_p: float = 1,
-    sql_len_request: int = 64,
+    sql_len_request: int = 128,
     animate: bool = True,
     on_snapshot = None,
     status_cb = None,
@@ -839,111 +844,37 @@ def run_denoising_generation_callback(
     mask_id = tokenizer.mask_token_id
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-    full_text = f"<PROMPT>{prompt_text}</PROMPT> <CONTEXT>{context_text}</CONTEXT> <SQL></SQL>"
-    enc = tokenizer(full_text, max_length=max_len, truncation=True, padding="max_length", return_tensors="pt", return_offsets_mapping=True)
-    input_ids_full = enc["input_ids"].squeeze(0)
-    offsets = enc["offset_mapping"].squeeze(0).tolist()
-    attn_full = enc["attention_mask"].squeeze(0)
+    # Build the input EXACTLY like training's encode_text (train.py): manual token
+    # assembly with [CLS], single-token tags (no inter-tag spaces) and a fixed
+    # mask-filled SQL window padded to max_len. The earlier string-based
+    # construction did not match the training distribution and produced corrupt SQL.
+    cls_id = tokenizer.cls_token_id if tokenizer.cls_token_id is not None else tokenizer.bos_token_id
+    sep_id = tokenizer.sep_token_id if tokenizer.sep_token_id is not None else tokenizer.eos_token_id
+    tag_id = {t: tokenizer.convert_tokens_to_ids(t) for t in REQUIRED_TAGS}
 
-    sql_open_id = tokenizer.convert_tokens_to_ids("<SQL>")
-    sql_close_id = tokenizer.convert_tokens_to_ids("</SQL>")
-    sql_open_seq = tokenizer.encode("<SQL>", add_special_tokens=False)
-    sql_close_seq = tokenizer.encode("</SQL>", add_special_tokens=False)
+    sql_len = max(1, min(int(sql_len_request), max_len - 9))
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+    context_ids = tokenizer(context_text, add_special_tokens=False)["input_ids"]
+    budget = max_len - sql_len - 9  # CLS + 6 tags + SEP (+1 slack); mirrors training
+    if len(prompt_ids) + len(context_ids) > budget:
+        context_ids = context_ids[: max(0, budget - len(prompt_ids))]
+        prompt_ids = prompt_ids[:budget]
 
-    def find_first_index(tensor, val):
-        matches = (tensor == val).nonzero(as_tuple=True)[0]
-        return matches[0].item() if len(matches) > 0 else None
+    head = (
+        [cls_id, tag_id["<PROMPT>"]] + prompt_ids
+        + [tag_id["</PROMPT>"], tag_id["<CONTEXT>"]] + context_ids
+        + [tag_id["</CONTEXT>"], tag_id["<SQL>"]]
+    )
+    sql_open_idx = len(head) - 1         # index of the <SQL> tag
+    sql_start = len(head)                # first maskable SQL position
+    ids = head + [mask_id] * sql_len + [tag_id["</SQL>"], sep_id]
+    sql_close_idx = sql_start + sql_len  # index of the </SQL> tag
+    attn = [1] * len(ids) + [0] * (max_len - len(ids))
+    ids = ids + [pad_id] * (max_len - len(ids))
 
-    def find_subseq(haystack, needle, start=0):
-        if not needle:
-            return None
-        n = len(needle)
-        end = len(haystack) - n + 1
-        for i in range(max(0, start), max(0, end)):
-            if haystack[i:i + n] == needle:
-                return i
-        return None
-
-    orig_sql_open_idx = find_first_index(input_ids_full, sql_open_id)
-    orig_sql_close_idx = find_first_index(input_ids_full, sql_close_id)
-
-    # Robust marker detection for tokenizers where the SQL tags may be multi-token.
-    ids_list = input_ids_full.tolist()
-    seq_open_start = find_subseq(ids_list, sql_open_seq) if sql_open_seq else None
-    seq_open_end = (seq_open_start + len(sql_open_seq) - 1) if seq_open_start is not None else None
-    seq_close_start = find_subseq(ids_list, sql_close_seq, start=(seq_open_end + 1 if seq_open_end is not None else 0)) if sql_close_seq else None
-    if seq_open_end is not None:
-        orig_sql_open_idx = seq_open_end
-    if seq_close_start is not None:
-        orig_sql_close_idx = seq_close_start
-
-    if orig_sql_open_idx is None or orig_sql_close_idx is None:
-        txt = full_text
-        open_char = txt.find("<SQL>")
-        close_char = txt.find("</SQL>")
-        if open_char == -1 or close_char == -1:
-            raise RuntimeError("Could not find <SQL> or </SQL> in constructed text.")
-        content_start_char = open_char + len("<SQL>")
-        content_end_char = close_char
-        token_start = next((i for i, (s, e) in enumerate(offsets) if e > content_start_char), None)
-        tokens_covering = [i for i, (s, e) in enumerate(offsets) if s < content_end_char and e > content_start_char]
-        token_end = tokens_covering[-1] + 1 if tokens_covering else None
-        if token_start is not None and token_end is not None:
-            orig_sql_open_idx = max(0, token_start - 1)
-            orig_sql_close_idx = token_end
-
-    if orig_sql_open_idx is None or orig_sql_close_idx is None:
-        # Last-resort fallback: synthesize an empty SQL span near the sequence tail.
-        # This avoids hard-failing on unusual offset mappings / truncation artifacts.
-        tail = int(attn_full.sum().item()) - 1
-        tail = max(0, min(max_len - 2, tail))
-        if orig_sql_open_idx is None:
-            orig_sql_open_idx = tail
-        if orig_sql_close_idx is None:
-            orig_sql_close_idx = min(max_len - 1, int(orig_sql_open_idx) + 1)
-        if 0 <= int(orig_sql_open_idx) < max_len:
-            input_ids_full[int(orig_sql_open_idx)] = sql_open_id
-        if 0 <= int(orig_sql_close_idx) < max_len:
-            input_ids_full[int(orig_sql_close_idx)] = sql_close_id
-        log("[WARN] Could not locate SQL tag span reliably; using synthesized fallback span.")
-
-    sql_open_idx = int(orig_sql_open_idx)
-    sql_close_idx = int(orig_sql_close_idx)
-    if not (0 <= sql_open_idx < sql_close_idx <= max_len):
-        if not (0 <= sql_open_idx < max_len):
-            raise RuntimeError(f"Invalid SQL token indices: open={sql_open_idx}, close={sql_close_idx}")
-
-    if sql_close_idx <= sql_open_idx + 1:
-        max_possible = max_len - (sql_open_idx + 2)
-        if max_possible <= 0:
-            # Sequence is full/truncated and SQL markers ended up at the tail.
-            # Reclaim room by shifting the SQL span left and overwriting suffix tokens.
-            reserve_sql_len = max(1, min(sql_len_request, max(1, max_len - 2)))
-            sql_open_idx = max(0, max_len - reserve_sql_len - 2)
-            max_possible = max_len - (sql_open_idx + 2)
-            log(
-                f"[WARN] SQL span had no room at tail; shifted span left "
-                f"to index {sql_open_idx} and reserved {max_possible} token(s)."
-            )
-        sql_len = min(sql_len_request, max_possible)
-        new_close_idx = sql_open_idx + 1 + sql_len
-        log(f"[INFO] empty SQL region — inserting {sql_len} mask tokens")
-        current_ids = torch.full((1, max_len), fill_value=mask_id, dtype=torch.long)
-        current_ids[0, : sql_open_idx + 1] = input_ids_full[: sql_open_idx + 1]
-        current_ids[0, sql_open_idx + 1 : new_close_idx] = mask_id
-        if new_close_idx < max_len:
-            current_ids[0, new_close_idx] = sql_close_id
-        if orig_sql_close_idx is not None and orig_sql_close_idx != new_close_idx and orig_sql_close_idx < max_len:
-            input_ids_full[orig_sql_close_idx] = pad_id
-        current_attention = attn_full.unsqueeze(0).clone()
-        current_attention[0, sql_open_idx + 1 : new_close_idx + 1] = 1
-        sql_close_idx = new_close_idx
-    else:
-        current_ids = torch.full((1, max_len), fill_value=mask_id, dtype=torch.long)
-        current_ids[0, : sql_open_idx + 1] = input_ids_full[: sql_open_idx + 1]
-        if sql_close_idx < max_len:
-            current_ids[0, sql_close_idx] = input_ids_full[sql_close_idx]
-        current_attention = attn_full.unsqueeze(0).clone()
+    current_ids = torch.tensor([ids], dtype=torch.long)
+    current_attention = torch.tensor([attn], dtype=torch.long)
+    log(f"[INFO] SQL window: {sql_len} mask tokens at positions {sql_start}..{sql_close_idx}")
 
     device = next(model.parameters()).device
     current_ids = current_ids.to(device)
@@ -957,71 +888,81 @@ def run_denoising_generation_callback(
     if len(modifiable_positions) == 0:
         raise RuntimeError("No modifiable SQL tokens were found (empty SQL region).")
 
-    mask_probs = [i / n_steps for i in range(n_steps - 1, -1, -1)]
-    total_steps = len(mask_probs)
+    pad_token = tokenizer.pad_token or "<pad>"
+    total_steps = max(1, min(n_steps, len(modifiable_positions)))
+
+    def snapshot_text():
+        s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
+        return s.replace(mask_token, " ____").replace(pad_token, "")
+
+    def render_sql_window():
+        """Animation-friendly view of the SQL span in *content space*.
+
+        Real SQL tokens form a prefix; the SQL window is PAD-filled out to 128
+        slots. Rendering all 128 means most denoising steps only commit PAD ->
+        empty, producing dead frames. So we trim everything past the last
+        committed real token (the "query ended here" region) and show the
+        still-masked content positions as ``____`` glyphs that pop in by
+        confidence — the query materialises within its real length.
+        """
+        window = current_ids[0, sql_open_idx + 1 : sql_close_idx].tolist()
+        content_end = 0
+        for i, tid in enumerate(window):
+            if tid != mask_id and tid != pad_id:
+                content_end = i + 1
+        if content_end == 0:
+            # Length not decided yet: short pending field instead of 128 slots.
+            pending = min(sum(1 for tid in window if tid == mask_id), 6)
+            return " ".join(["____"] * pending)
+        body = [tid for tid in window[:content_end] if tid != pad_id]
+        s = tokenizer.decode(body, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+        return s.replace(mask_token, " ____").strip()
+
     snapshots: List[Dict] = []
+    last_render = None
     if animate:
-        s0 = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-        s0_clean = s0.replace(mask_token, " ____").replace("<pad>", "")
-        snapshots.append({"text": s0_clean, "sql_only": extract_sql_only_from_text(s0_clean), "step": 0, "total_steps": total_steps})
+        last_render = render_sql_window()
+        snapshots.append({"text": snapshot_text(), "sql_only": last_render, "step": 0, "total_steps": total_steps})
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
-    log("[INFO] Starting denoising")
+    log("[INFO] Starting denoising (confidence-based unmasking)")
     t0 = time.time()
-    for step_idx, p_mask in enumerate(mask_probs):
-        if should_stop and should_stop():
-            raise TimeoutError("Run cancelled or timed out")
-        with torch.no_grad():
-            outputs = model(input_ids=current_ids, attention_mask=current_attention)
-            logits = outputs.logits
+    # top_k <= 1 -> fully greedy commit order; otherwise add Gumbel noise for diversity
+    sample_temperature = 0.0 if int(top_k) <= 1 else 1.0
+    vocab = tokenizer.get_vocab()
+    forbid_ids = [vocab[t] for t in REQUIRED_TAGS if t in vocab]
 
-        pred_ids = current_ids.clone()
-        for pos in modifiable_positions:
-            if should_stop and should_stop():
-                raise TimeoutError("Run cancelled or timed out")
-            logit_vec = logits[0, pos, :]
-            filtered = top_k_top_p_filtering(logit_vec, top_k=top_k, top_p=top_p, filter_value=-float("Inf"))
-            probs = torch.softmax(filtered, dim=-1)
-            sampled = torch.multinomial(probs, num_samples=1).squeeze(-1)
-            pred_ids[0, pos] = sampled
-
+    for step_idx, total_steps, current_ids in denoise_steps(
+        model,
+        current_ids,
+        current_attention,
+        modifiable_positions,
+        mask_id,
+        n_steps=total_steps,
+        temperature=sample_temperature,
+        forbid_token_ids=forbid_ids,
+        should_stop=should_stop,
+    ):
         if status_cb:
             status_cb(f"step {step_idx+1}/{total_steps}")
-
-        if math.isclose(p_mask, 0.0):
-            new_ids = current_ids.clone()
-            new_ids[0, sql_open_idx + 1 : sql_close_idx] = pred_ids[0, sql_open_idx + 1 : sql_close_idx]
-            current_ids = new_ids
-            final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
-            final_sql_only = decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id)
-            final_sql_only = strip_final_masks(final_sql_only)
-            if animate:
-                s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-                s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
-                s_clean_final = replace_sql_section(s_clean, final_sql_only)
-                snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": total_steps, "total_steps": total_steps})
+        if animate and step_idx + 1 < total_steps:
+            r = render_sql_window()
+            # Dedupe: skip frames where the visible query didn't change (these are
+            # the PAD-only commit steps that previously rendered as no-ops).
+            if r != last_render:
+                last_render = r
+                snapshots.append({"text": snapshot_text(), "sql_only": r, "step": step_idx+1, "total_steps": total_steps})
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
-            break
 
-        rand = torch.rand((max_len,), device=device)
-        remask = (rand < p_mask) & modifiable
-
-        next_ids = current_ids.clone()
-        for pos in modifiable_positions:
-            if remask[pos]:
-                next_ids[0, pos] = mask_id
-            else:
-                next_ids[0, pos] = pred_ids[0, pos]
-
-        current_ids = next_ids
-        if animate:
-            s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
-            s_clean = s.replace(mask_token, " ____").replace("<pad>", "")
-            snapshots.append({"text": s_clean, "sql_only": extract_sql_only_from_text(s_clean), "step": step_idx+1, "total_steps": total_steps})
-            if on_snapshot:
-                on_snapshot(snapshots[-1])
+    final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
+    final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))
+    if animate:
+        s_clean_final = replace_sql_section(snapshot_text(), final_sql_only)
+        snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": total_steps, "total_steps": total_steps})
+        if on_snapshot:
+            on_snapshot(snapshots[-1])
 
     t1 = time.time()
     log(f"[INFO] Denoising took {t1 - t0:.2f}s")
@@ -1039,27 +980,6 @@ def run_denoising_generation_callback(
 
     return {"snapshots": snapshots, "sql_only": sql_only, "display": display}
 
-# -------------------------
-# top-k / top-p helper
-# -------------------------
-def top_k_top_p_filtering(logits: torch.Tensor, top_k: int = 0, top_p: float = 0.0, filter_value: float = -float("Inf")) -> torch.Tensor:
-    logits = logits.clone()
-    if top_k > 0:
-        top_k = min(top_k, logits.size(-1))
-        kth_value = torch.topk(logits, top_k)[0][..., -1]
-        indices_to_remove = logits < kth_value
-        logits[indices_to_remove] = filter_value
-    if top_p > 0.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = False
-        indices_to_remove = sorted_indices[sorted_indices_to_remove]
-        logits[indices_to_remove] = filter_value
-    return logits
-
-# -------------------------
 # -------------------------
 # Flask endpoints
 # -------------------------
@@ -1132,9 +1052,9 @@ def start_run():
     model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
     gif_size_text = form.get("gif_size", "").strip()
     try:
-        steps = int(form.get("steps", "11"))
+        steps = int(form.get("steps", "24"))
         max_len = int(form.get("max_len", "512"))
-        sql_len = int(form.get("sql_len", "64"))
+        sql_len = int(form.get("sql_len", "128"))
         top_k = int(form.get("top_k", "1"))
         top_p = float(form.get("top_p", "1"))
     except ValueError:
@@ -1379,6 +1299,10 @@ if __name__ == "__main__":
         print("Starting worker loop with Redis:", REDIS_URL)
         worker_loop()
         raise SystemExit(0)
+    get_redis()
+    if STANDALONE_MODE:
+        print("Starting in-process worker (no external Redis/worker needed)")
+        threading.Thread(target=worker_loop, daemon=True).start()
     url = f"http://{HOST}:{PORT}/"
     if not args.no_open:
         def _open():
