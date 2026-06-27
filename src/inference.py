@@ -1485,9 +1485,12 @@ def serve_gif(filename):
     if not os.path.isfile(p):
         return jsonify({"error": "not_found", "message": "file not found"}), 404
     try:
-        return send_file(p, mimetype="image/gif", as_attachment=True, download_name=safe_name)
+        resp = send_file(p, mimetype="image/gif", as_attachment=True, download_name=safe_name, max_age=0)
     except TypeError:
-        return send_file(p, mimetype="image/gif", as_attachment=True, attachment_filename=safe_name)
+        resp = send_file(p, mimetype="image/gif", as_attachment=True, attachment_filename=safe_name)
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
 
 
 @app.route("/export_gif/<run_id>")
@@ -1511,9 +1514,13 @@ def export_gif(run_id):
         return jsonify({"error": "render_failed", "message": f"GIF render failed: {exc}"}), 500
     name = f"text2sql-diffusion-{run_id[:8]}.gif"
     try:
-        return send_file(io.BytesIO(gif_bytes), mimetype="image/gif", as_attachment=True, download_name=name)
+        resp = send_file(io.BytesIO(gif_bytes), mimetype="image/gif", as_attachment=True, download_name=name, max_age=0)
     except TypeError:
-        return send_file(io.BytesIO(gif_bytes), mimetype="image/gif", as_attachment=True, attachment_filename=name)
+        resp = send_file(io.BytesIO(gif_bytes), mimetype="image/gif", as_attachment=True, attachment_filename=name)
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Content-Length"] = str(len(gif_bytes))
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
 
 
 @app.route("/stop/<run_id>", methods=["POST"])

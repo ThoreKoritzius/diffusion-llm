@@ -1136,24 +1136,24 @@ if (exportGifBtn) {
     if (!id || exportGifBtn.disabled) return;
     const label = exportGifBtn.innerHTML;
     exportGifBtn.disabled = true;
-    exportGifBtn.textContent = 'Building GIF…';
+    exportGifBtn.textContent = 'Preparing GIF…';
+    const resetLabel = () => {
+      exportGifBtn.innerHTML = label;
+      exportGifBtn.disabled = false;
+    };
     try {
-      const res = await fetch(`/export_gif/${id}`);
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      const url = `/export_gif/${encodeURIComponent(id)}`;
       const a = document.createElement('a');
       a.href = url;
       a.download = 'text2sql-diffusion.gif';
+      a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
-      exportGifBtn.innerHTML = label;
+      setTimeout(resetLabel, 1800);
     } catch (err) {
       exportGifBtn.textContent = 'Export failed';
       setTimeout(() => { exportGifBtn.innerHTML = label; }, 1600);
-    } finally {
       exportGifBtn.disabled = false;
     }
   });
