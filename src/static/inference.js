@@ -326,6 +326,43 @@ function isMaskToken(tok) {
   return /^_{2,}$/.test(tok);
 }
 
+const SQL_KEYWORDS = new Set(['SELECT', 'FROM', 'WHERE', 'GROUP', 'BY', 'ORDER', 'HAVING',
+  'LIMIT', 'OFFSET', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'OUTER', 'FULL', 'ON', 'AND', 'OR',
+  'NOT', 'IN', 'AS', 'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE', 'CREATE', 'TABLE',
+  'DISTINCT', 'UNION', 'ALL', 'ASC', 'DESC', 'BETWEEN', 'LIKE', 'IS', 'NULL', 'EXISTS',
+  'CASE', 'WHEN', 'THEN', 'ELSE', 'END']);
+const SQL_FUNCS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'ROUND', 'ABS', 'COALESCE',
+  'UPPER', 'LOWER', 'LENGTH', 'NOW', 'DATE', 'CAST']);
+
+// Pretty-print the query across lines so it reads like an editor instead of one
+// long shrinking line. Only rewrites existing whitespace (keeps token count
+// stable so the per-token reveal animation isn't disturbed).
+function formatSqlForDisplay(sql) {
+  if (!sql) return sql;
+  const base = String(sql).replace(/\s+/g, ' ').trim();
+  // Split out single-quoted string literals (incl. '' escapes and an unterminated
+  // quote mid-animation) so we never insert line breaks inside a value.
+  const parts = base.split(/('(?:[^']|'')*'?)/);
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) continue; // odd indices are quoted literals — leave intact
+    parts[i] = parts[i]
+      .replace(/\s+\b(FROM|WHERE|GROUP BY|ORDER BY|HAVING|LIMIT|UNION(?: ALL)?|INNER JOIN|LEFT JOIN|RIGHT JOIN|FULL JOIN|OUTER JOIN|JOIN|VALUES|SET)\b/gi, '\n$1')
+      .replace(/\s+\b(AND|OR)\b/gi, '\n  $1');
+  }
+  return parts.join('');
+}
+
+function classifyToken(tok) {
+  const t = (tok || '').trim();
+  if (!t) return '';
+  const up = t.toUpperCase();
+  if (SQL_KEYWORDS.has(up)) return ' keyword';
+  if (SQL_FUNCS.has(up)) return ' fn';
+  if (/^'.*'$/.test(t) || /^".*"$/.test(t)) return ' str';
+  if (/^[(),*=<>!;.+/-]+$/.test(t)) return ' punct';
+  return '';
+}
+
 function getOrCreateSlot(index) {
   if (tokenSlots[index]) return tokenSlots[index];
   const span = document.createElement('span');
@@ -336,7 +373,7 @@ function getOrCreateSlot(index) {
 }
 
 function updateTokenDisplay(sql) {
-  const tokens = tokenizeSql(sql);
+  const tokens = tokenizeSql(formatSqlForDisplay(sql));
 
   // If the pre has stale non-span content (e.g. text node from renderImmediate), nuke it
   if (tokenSlots.length === 0 && liveTokenPre.firstChild) {
@@ -356,6 +393,7 @@ function updateTokenDisplay(sql) {
     if (slot.text === tok) return;
     slot.text = tok;
 
+    const typeClass = mask ? '' : classifyToken(tok);
     if (mask) {
       if (!slot.isMask) {
         slot.element.style.minWidth = `max(${tok.length}ch, 2ch)`;
@@ -364,16 +402,16 @@ function updateTokenDisplay(sql) {
       slot.element.textContent = tok;
     } else if (slot.isMask) {
       // Mask → resolved: fade in
-      slot.element.className = 'tok resolving';
+      slot.element.className = 'tok resolving' + typeClass;
       slot.element.textContent = tok;
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          slot.element.className = 'tok resolved';
+          slot.element.className = 'tok resolved' + typeClass;
           setTimeout(() => { slot.element.style.minWidth = ''; }, 200);
         });
       });
     } else {
-      slot.element.className = 'tok resolved';
+      slot.element.className = 'tok resolved' + typeClass;
       slot.element.textContent = tok;
     }
 
@@ -384,15 +422,25 @@ function updateTokenDisplay(sql) {
 }
 
 function fitLiveFont() {
-  const wrapper = liveTokenPre.parentElement;
-  const width = Math.max(220, wrapper.clientWidth - 28);
+  const box = liveTokenPre.closest('.live-box') || liveTokenPre.parentElement;
+  const cs = getComputedStyle(box);
+  const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  const availW = Math.max(200, box.clientWidth - padX);
+  const availH = Math.max(160, box.clientHeight - padY);
   const text = liveTokenPre.textContent || '';
   const lines = text.split('\n');
-  const longest = lines.reduce((m, line) => Math.max(m, line.length), 0) || 20;
-  const minFont = window.innerWidth <= 980 ? 14 : 22;
-  const maxFont = window.innerWidth <= 980 ? 28 : 72;
-  const calc = Math.floor(width / Math.max(8, longest) * 1.9);
-  liveTokenPre.style.fontSize = `${Math.max(minFont, Math.min(maxFont, calc))}px`;
+  const longest = lines.reduce((m, line) => Math.max(m, line.length), 0) || 12;
+  const nLines = Math.max(lines.length, 1);
+  const isMobile = window.innerWidth <= 980;
+  const minFont = isMobile ? 15 : 18;
+  const maxFont = isMobile ? 26 : 34;
+  // Fit to both width (~0.62em per mono glyph) and height (line-height 1.7),
+  // then clamp to a comfortable, stable range so the font doesn't jump per frame.
+  const byWidth = availW / (longest * 0.62);
+  const byHeight = availH / (nLines * 1.7);
+  const size = Math.floor(Math.min(byWidth, byHeight));
+  liveTokenPre.style.fontSize = `${Math.max(minFont, Math.min(maxFont, size))}px`;
 }
 
 window.addEventListener('resize', fitLiveFont);

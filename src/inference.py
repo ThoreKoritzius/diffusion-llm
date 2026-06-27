@@ -895,10 +895,34 @@ def run_denoising_generation_callback(
         s = tokenizer.decode(current_ids[0], skip_special_tokens=False, clean_up_tokenization_spaces=True)
         return s.replace(mask_token, " ____").replace(pad_token, "")
 
+    def render_sql_window():
+        """Animation-friendly view of the SQL span in *content space*.
+
+        Real SQL tokens form a prefix; the SQL window is PAD-filled out to 128
+        slots. Rendering all 128 means most denoising steps only commit PAD ->
+        empty, producing dead frames. So we trim everything past the last
+        committed real token (the "query ended here" region) and show the
+        still-masked content positions as ``____`` glyphs that pop in by
+        confidence — the query materialises within its real length.
+        """
+        window = current_ids[0, sql_open_idx + 1 : sql_close_idx].tolist()
+        content_end = 0
+        for i, tid in enumerate(window):
+            if tid != mask_id and tid != pad_id:
+                content_end = i + 1
+        if content_end == 0:
+            # Length not decided yet: short pending field instead of 128 slots.
+            pending = min(sum(1 for tid in window if tid == mask_id), 6)
+            return " ".join(["____"] * pending)
+        body = [tid for tid in window[:content_end] if tid != pad_id]
+        s = tokenizer.decode(body, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+        return s.replace(mask_token, " ____").strip()
+
     snapshots: List[Dict] = []
+    last_render = None
     if animate:
-        s0_clean = snapshot_text()
-        snapshots.append({"text": s0_clean, "sql_only": extract_sql_only_from_text(s0_clean), "step": 0, "total_steps": total_steps})
+        last_render = render_sql_window()
+        snapshots.append({"text": snapshot_text(), "sql_only": last_render, "step": 0, "total_steps": total_steps})
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -923,10 +947,14 @@ def run_denoising_generation_callback(
         if status_cb:
             status_cb(f"step {step_idx+1}/{total_steps}")
         if animate and step_idx + 1 < total_steps:
-            s_clean = snapshot_text()
-            snapshots.append({"text": s_clean, "sql_only": extract_sql_only_from_text(s_clean), "step": step_idx+1, "total_steps": total_steps})
-            if on_snapshot:
-                on_snapshot(snapshots[-1])
+            r = render_sql_window()
+            # Dedupe: skip frames where the visible query didn't change (these are
+            # the PAD-only commit steps that previously rendered as no-ops).
+            if r != last_render:
+                last_render = r
+                snapshots.append({"text": snapshot_text(), "sql_only": r, "step": step_idx+1, "total_steps": total_steps})
+                if on_snapshot:
+                    on_snapshot(snapshots[-1])
 
     final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
     final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))

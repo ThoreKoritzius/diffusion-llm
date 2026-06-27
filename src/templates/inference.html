@@ -150,13 +150,14 @@
 
     .live-box {
       border: 1px solid var(--color-border);
+      border-radius: 12px;
       background: var(--color-surface-soft);
-      min-height: 280px;
-      padding: var(--space-3);
+      min-height: 300px;
+      padding: var(--space-4) var(--space-5);
       overflow: auto;
       display: flex;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
     }
 
     #liveTokenDisplay {
@@ -165,31 +166,42 @@
 
     #liveTokenPre {
       margin: 0;
+      width: 100%;
+      text-align: left;
       font-family: var(--mono);
-      font-weight: 700;
+      font-weight: 500;
+      font-variant-ligatures: none;
       white-space: pre-wrap;
-      word-break: break-word;
-      color: #101a2e;
-      line-height: 1.6;
+      overflow-wrap: anywhere;
+      tab-size: 2;
+      letter-spacing: 0.1px;
+      color: #1e293b;
+      line-height: 1.7;
     }
 
     .tok {
       display: inline;
-      transition: opacity 180ms ease;
+      transition: opacity 200ms ease, color 200ms ease;
     }
+
+    /* lightweight syntax emphasis for a code-editor feel */
+    .tok.keyword { color: var(--color-accent); font-weight: 600; }
+    .tok.fn      { color: #7c3aed; font-weight: 600; }
+    .tok.str     { color: #1a7f4b; }
+    .tok.punct   { color: #6b7a90; }
 
     .tok.masked {
       display: inline-block;
-      border-radius: 3px;
-      background: linear-gradient(90deg,
-          #b0bfd6 0%,
-          #d0dff0 45%,
-          #b0bfd6 100%);
+      border-radius: 5px;
+      padding: 0 0.12em;
+      background: linear-gradient(90deg, #c4d0e2 0%, #e0e9f6 45%, #c4d0e2 100%);
       background-size: 250% 100%;
-      animation: tok-shimmer 1.2s ease-in-out infinite;
+      animation: tok-shimmer 1.25s ease-in-out infinite;
       color: transparent;
-      vertical-align: middle;
+      vertical-align: baseline;
+      line-height: 1.2;
       min-height: 1em;
+      opacity: 0.8;
     }
 
     .tok.resolving {
