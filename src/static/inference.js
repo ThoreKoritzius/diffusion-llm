@@ -945,6 +945,12 @@ runForm.addEventListener('submit', async (ev) => {
 
     const payload = await resp.json();
     runId = payload.run_id;
+    if (payload.cache_hit) {
+      setStatus('Replaying cached result...');
+      setUiState(UI_MODES.RUNNING, { stepLabel: 'cached replay' });
+      await pollRunState(runId);
+      return;
+    }
     setQueuedUi(payload.queue_position, payload.eta_seconds, payload.eta_confidence, payload.demand);
     openStream(runId, runSessionId);
   } catch (err) {

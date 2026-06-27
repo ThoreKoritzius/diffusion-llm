@@ -25,6 +25,7 @@ import random
 import shlex
 import traceback
 import re
+import hashlib
 from typing import List, Dict
 from werkzeug.utils import secure_filename
 
@@ -139,6 +140,9 @@ NORMAL_STARTS_PER_MINUTE = max(1, env_int("NORMAL_STARTS_PER_MINUTE", 6))
 BUSY_STARTS_PER_MINUTE = max(1, env_int("BUSY_STARTS_PER_MINUTE", 2))
 ETA_FALLBACK_SECONDS = max(5.0, env_float("ETA_FALLBACK_SECONDS", min(30, max(10, REQUEST_TIMEOUT_SECONDS * 0.5))))
 FIRST_FRAME_FALLBACK_SECONDS = max(1.0, env_float("FIRST_FRAME_FALLBACK_SECONDS", 8.0))
+RESULT_CACHE_ENABLED = env_bool("RESULT_CACHE_ENABLED", True)
+RESULT_CACHE_TTL_SECONDS = max(60, env_int("RESULT_CACHE_TTL_SECONDS", 86400))
+RESULT_CACHE_VERSION = os.environ.get("RESULT_CACHE_VERSION", "v1")
 CHARS_PER_TOKEN_EST = 3.0
 STRUCTURE_TOKEN_RESERVE = 32
 PROMPT_BUDGET_RATIO = 0.35
@@ -301,6 +305,7 @@ def from_redis_run(raw: Dict[str, str]) -> Dict:
     out["done"] = out.get("done", "0") == "1"
     out["timed_out"] = out.get("timed_out", "0") == "1"
     out["cancel_requested"] = out.get("cancel_requested", "0") == "1"
+    out["cache_hit"] = out.get("cache_hit", "0") == "1"
     for k in ("created_at", "updated_at", "started_at", "finished_at"):
         if out.get(k):
             try:
@@ -371,6 +376,83 @@ def redis_get_snapshot_delta(run_id: str, after_idx: int) -> tuple[int, List[Dic
         except json.JSONDecodeError:
             continue
     return total, out
+
+
+def cache_signature_payload(payload: Dict) -> Dict:
+    return {
+        "version": RESULT_CACHE_VERSION,
+        "prompt": payload.get("prompt", ""),
+        "context": payload.get("context", ""),
+        "model_dir": payload.get("model_dir", ""),
+        "steps": int(payload.get("steps", 0)),
+        "max_len": int(payload.get("max_len", 0)),
+        "sql_len": int(payload.get("sql_len", 0)),
+        "top_k": int(payload.get("top_k", 0)),
+        "top_p": float(payload.get("top_p", 0)),
+        "seed": int(DEFAULT_SEED),
+        "dtype": INFERENCE_DTYPE,
+    }
+
+
+def result_cache_key(payload: Dict) -> str:
+    raw = json.dumps(cache_signature_payload(payload), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"diffusion:cache:{digest}"
+
+
+def read_result_cache(payload: Dict) -> Dict | None:
+    if not RESULT_CACHE_ENABLED:
+        return None
+    raw = get_redis().get(result_cache_key(payload))
+    if not raw:
+        return None
+    try:
+        cached = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not cached.get("snapshots"):
+        return None
+    return cached
+
+
+def write_result_cache(payload: Dict, sql_only: str, display: str, snapshots: List[Dict]) -> None:
+    if not RESULT_CACHE_ENABLED or not snapshots:
+        return
+    cached = {
+        "payload": cache_signature_payload(payload),
+        "sql_only": sql_only or "",
+        "display": display or "",
+        "snapshots": snapshots,
+        "created_at": now_ts(),
+    }
+    get_redis().setex(result_cache_key(payload), RESULT_CACHE_TTL_SECONDS, json.dumps(cached))
+
+
+def create_cached_run(payload: Dict, cached: Dict) -> str:
+    run_id = uuid.uuid4().hex
+    now = now_ts()
+    snapshots = cached.get("snapshots") or []
+    redis_set_run(run_id, {
+        "state": "done",
+        "status": "cached result",
+        "done": True,
+        "timed_out": False,
+        "cancel_requested": False,
+        "sql_only": cached.get("sql_only", ""),
+        "display": cached.get("display", ""),
+        "gif_url": "",
+        "created_at": now,
+        "updated_at": now,
+        "started_at": now,
+        "finished_at": now,
+        "snapshot_count": 0,
+        "payload": payload,
+        "cache_hit": True,
+    })
+    for snap in snapshots:
+        redis_append_snapshot(run_id, snap)
+    redis_update_run(run_id, snapshot_count=len(snapshots), status="cached result")
+    return run_id
 
 
 def queue_position(run_id: str) -> int | None:
@@ -765,6 +847,8 @@ def process_run(run_id: str) -> None:
             set_run_terminal(run_id, state="done", status="done")
             elapsed = max(0.01, now_ts() - start_time)
             update_metric_average("avg_duration", "count", elapsed)
+            _snap_count, cached_snaps = redis_get_snapshot_delta(run_id, 0)
+            write_result_cache(payload, final_sql, res.get("display", ""), cached_snaps)
     except TimeoutError:
         set_run_terminal(run_id, state="timed_out", status="timed out")
     except Exception as e:
@@ -1409,6 +1493,9 @@ def healthz():
         "standalone_mode": STANDALONE_MODE,
         "rate_limit_storage": RATELIMIT_STORAGE_URI,
         "adaptive_rate_limits": ADAPTIVE_RATE_LIMITS,
+        "result_cache_enabled": RESULT_CACHE_ENABLED,
+        "result_cache_ttl_seconds": RESULT_CACHE_TTL_SECONDS,
+        "result_cache_version": RESULT_CACHE_VERSION,
         "demand": demand.get("demand"),
         "start_limit_per_minute": demand.get("limit"),
         "active_limit": MAX_CONCURRENT_RUNS,
@@ -1516,6 +1603,37 @@ def start_run():
             ),
         }), 400
 
+    payload = {
+        "prompt": prompt,
+        "context": context,
+        "steps": steps,
+        "max_len": max_len,
+        "sql_len": sql_len,
+        "top_k": top_k,
+        "top_p": top_p,
+        "model_dir": model_dir,
+        "gif_size_text": gif_size_text,
+    }
+    cached = read_result_cache(payload)
+    if cached:
+        run_id = create_cached_run(payload, cached)
+        snap_count, _snaps = redis_get_snapshot_delta(run_id, 0)
+        return jsonify({
+            "run_id": run_id,
+            "state": "done",
+            "done": True,
+            "cache_hit": True,
+            "snapshot_count": snap_count,
+            "queue_position": None,
+            "eta_seconds": 0,
+            "eta_confidence": "high",
+            "queue_token": run_id,
+        })
+
+    model_ok, model_msg = validate_model_dir(model_dir)
+    if not model_ok:
+        return jsonify({"error": "invalid_model", "message": model_msg}), 400
+
     admission_preview = adaptive_start_profile()
     queue_limit = int(admission_preview.get("queue_limit", MAX_QUEUED_RUNS))
     r = get_redis()
@@ -1541,22 +1659,7 @@ def start_run():
         resp.headers["Retry-After"] = str(retry_after)
         return resp, 429
 
-    model_ok, model_msg = validate_model_dir(model_dir)
-    if not model_ok:
-        return jsonify({"error": "invalid_model", "message": model_msg}), 400
-
     run_id = uuid.uuid4().hex
-    payload = {
-        "prompt": prompt,
-        "context": context,
-        "steps": steps,
-        "max_len": max_len,
-        "sql_len": sql_len,
-        "top_k": top_k,
-        "top_p": top_p,
-        "model_dir": model_dir,
-        "gif_size_text": gif_size_text,
-    }
     redis_set_run(run_id, {
         "state": "queued",
         "status": "queued",
@@ -1663,6 +1766,7 @@ def run_state(run_id):
         "done": bool(run.get("done")),
         "sql_only": run.get("sql_only"),
         "gif_url": run.get("gif_url"),
+        "cache_hit": bool(run.get("cache_hit")),
         "snapshot_count": snap_count,
         "snapshots": delta,
         "demand": demand.get("demand"),
