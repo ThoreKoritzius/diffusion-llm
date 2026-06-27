@@ -844,111 +844,37 @@ def run_denoising_generation_callback(
     mask_id = tokenizer.mask_token_id
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-    full_text = f"<PROMPT>{prompt_text}</PROMPT> <CONTEXT>{context_text}</CONTEXT> <SQL></SQL>"
-    enc = tokenizer(full_text, max_length=max_len, truncation=True, padding="max_length", return_tensors="pt", return_offsets_mapping=True)
-    input_ids_full = enc["input_ids"].squeeze(0)
-    offsets = enc["offset_mapping"].squeeze(0).tolist()
-    attn_full = enc["attention_mask"].squeeze(0)
+    # Build the input EXACTLY like training's encode_text (train.py): manual token
+    # assembly with [CLS], single-token tags (no inter-tag spaces) and a fixed
+    # mask-filled SQL window padded to max_len. The earlier string-based
+    # construction did not match the training distribution and produced corrupt SQL.
+    cls_id = tokenizer.cls_token_id if tokenizer.cls_token_id is not None else tokenizer.bos_token_id
+    sep_id = tokenizer.sep_token_id if tokenizer.sep_token_id is not None else tokenizer.eos_token_id
+    tag_id = {t: tokenizer.convert_tokens_to_ids(t) for t in REQUIRED_TAGS}
 
-    sql_open_id = tokenizer.convert_tokens_to_ids("<SQL>")
-    sql_close_id = tokenizer.convert_tokens_to_ids("</SQL>")
-    sql_open_seq = tokenizer.encode("<SQL>", add_special_tokens=False)
-    sql_close_seq = tokenizer.encode("</SQL>", add_special_tokens=False)
+    sql_len = max(1, min(int(sql_len_request), max_len - 9))
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+    context_ids = tokenizer(context_text, add_special_tokens=False)["input_ids"]
+    budget = max_len - sql_len - 9  # CLS + 6 tags + SEP (+1 slack); mirrors training
+    if len(prompt_ids) + len(context_ids) > budget:
+        context_ids = context_ids[: max(0, budget - len(prompt_ids))]
+        prompt_ids = prompt_ids[:budget]
 
-    def find_first_index(tensor, val):
-        matches = (tensor == val).nonzero(as_tuple=True)[0]
-        return matches[0].item() if len(matches) > 0 else None
+    head = (
+        [cls_id, tag_id["<PROMPT>"]] + prompt_ids
+        + [tag_id["</PROMPT>"], tag_id["<CONTEXT>"]] + context_ids
+        + [tag_id["</CONTEXT>"], tag_id["<SQL>"]]
+    )
+    sql_open_idx = len(head) - 1         # index of the <SQL> tag
+    sql_start = len(head)                # first maskable SQL position
+    ids = head + [mask_id] * sql_len + [tag_id["</SQL>"], sep_id]
+    sql_close_idx = sql_start + sql_len  # index of the </SQL> tag
+    attn = [1] * len(ids) + [0] * (max_len - len(ids))
+    ids = ids + [pad_id] * (max_len - len(ids))
 
-    def find_subseq(haystack, needle, start=0):
-        if not needle:
-            return None
-        n = len(needle)
-        end = len(haystack) - n + 1
-        for i in range(max(0, start), max(0, end)):
-            if haystack[i:i + n] == needle:
-                return i
-        return None
-
-    orig_sql_open_idx = find_first_index(input_ids_full, sql_open_id)
-    orig_sql_close_idx = find_first_index(input_ids_full, sql_close_id)
-
-    # Robust marker detection for tokenizers where the SQL tags may be multi-token.
-    ids_list = input_ids_full.tolist()
-    seq_open_start = find_subseq(ids_list, sql_open_seq) if sql_open_seq else None
-    seq_open_end = (seq_open_start + len(sql_open_seq) - 1) if seq_open_start is not None else None
-    seq_close_start = find_subseq(ids_list, sql_close_seq, start=(seq_open_end + 1 if seq_open_end is not None else 0)) if sql_close_seq else None
-    if seq_open_end is not None:
-        orig_sql_open_idx = seq_open_end
-    if seq_close_start is not None:
-        orig_sql_close_idx = seq_close_start
-
-    if orig_sql_open_idx is None or orig_sql_close_idx is None:
-        txt = full_text
-        open_char = txt.find("<SQL>")
-        close_char = txt.find("</SQL>")
-        if open_char == -1 or close_char == -1:
-            raise RuntimeError("Could not find <SQL> or </SQL> in constructed text.")
-        content_start_char = open_char + len("<SQL>")
-        content_end_char = close_char
-        token_start = next((i for i, (s, e) in enumerate(offsets) if e > content_start_char), None)
-        tokens_covering = [i for i, (s, e) in enumerate(offsets) if s < content_end_char and e > content_start_char]
-        token_end = tokens_covering[-1] + 1 if tokens_covering else None
-        if token_start is not None and token_end is not None:
-            orig_sql_open_idx = max(0, token_start - 1)
-            orig_sql_close_idx = token_end
-
-    if orig_sql_open_idx is None or orig_sql_close_idx is None:
-        # Last-resort fallback: synthesize an empty SQL span near the sequence tail.
-        # This avoids hard-failing on unusual offset mappings / truncation artifacts.
-        tail = int(attn_full.sum().item()) - 1
-        tail = max(0, min(max_len - 2, tail))
-        if orig_sql_open_idx is None:
-            orig_sql_open_idx = tail
-        if orig_sql_close_idx is None:
-            orig_sql_close_idx = min(max_len - 1, int(orig_sql_open_idx) + 1)
-        if 0 <= int(orig_sql_open_idx) < max_len:
-            input_ids_full[int(orig_sql_open_idx)] = sql_open_id
-        if 0 <= int(orig_sql_close_idx) < max_len:
-            input_ids_full[int(orig_sql_close_idx)] = sql_close_id
-        log("[WARN] Could not locate SQL tag span reliably; using synthesized fallback span.")
-
-    sql_open_idx = int(orig_sql_open_idx)
-    sql_close_idx = int(orig_sql_close_idx)
-    if not (0 <= sql_open_idx < sql_close_idx <= max_len):
-        if not (0 <= sql_open_idx < max_len):
-            raise RuntimeError(f"Invalid SQL token indices: open={sql_open_idx}, close={sql_close_idx}")
-
-    if sql_close_idx <= sql_open_idx + 1:
-        max_possible = max_len - (sql_open_idx + 2)
-        if max_possible <= 0:
-            # Sequence is full/truncated and SQL markers ended up at the tail.
-            # Reclaim room by shifting the SQL span left and overwriting suffix tokens.
-            reserve_sql_len = max(1, min(sql_len_request, max(1, max_len - 2)))
-            sql_open_idx = max(0, max_len - reserve_sql_len - 2)
-            max_possible = max_len - (sql_open_idx + 2)
-            log(
-                f"[WARN] SQL span had no room at tail; shifted span left "
-                f"to index {sql_open_idx} and reserved {max_possible} token(s)."
-            )
-        sql_len = min(sql_len_request, max_possible)
-        new_close_idx = sql_open_idx + 1 + sql_len
-        log(f"[INFO] empty SQL region — inserting {sql_len} mask tokens")
-        current_ids = torch.full((1, max_len), fill_value=mask_id, dtype=torch.long)
-        current_ids[0, : sql_open_idx + 1] = input_ids_full[: sql_open_idx + 1]
-        current_ids[0, sql_open_idx + 1 : new_close_idx] = mask_id
-        if new_close_idx < max_len:
-            current_ids[0, new_close_idx] = sql_close_id
-        if orig_sql_close_idx is not None and orig_sql_close_idx != new_close_idx and orig_sql_close_idx < max_len:
-            input_ids_full[orig_sql_close_idx] = pad_id
-        current_attention = attn_full.unsqueeze(0).clone()
-        current_attention[0, sql_open_idx + 1 : new_close_idx + 1] = 1
-        sql_close_idx = new_close_idx
-    else:
-        current_ids = torch.full((1, max_len), fill_value=mask_id, dtype=torch.long)
-        current_ids[0, : sql_open_idx + 1] = input_ids_full[: sql_open_idx + 1]
-        if sql_close_idx < max_len:
-            current_ids[0, sql_close_idx] = input_ids_full[sql_close_idx]
-        current_attention = attn_full.unsqueeze(0).clone()
+    current_ids = torch.tensor([ids], dtype=torch.long)
+    current_attention = torch.tensor([attn], dtype=torch.long)
+    log(f"[INFO] SQL window: {sql_len} mask tokens at positions {sql_start}..{sql_close_idx}")
 
     device = next(model.parameters()).device
     current_ids = current_ids.to(device)
