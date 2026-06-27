@@ -49,6 +49,7 @@ services:
       - NORMAL_STARTS_PER_MINUTE=${NORMAL_STARTS_PER_MINUTE:-6}
       - BUSY_STARTS_PER_MINUTE=${BUSY_STARTS_PER_MINUTE:-2}
       - ETA_FALLBACK_SECONDS=${ETA_FALLBACK_SECONDS:-25}
+      - FIRST_FRAME_FALLBACK_SECONDS=${FIRST_FRAME_FALLBACK_SECONDS:-8}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
       - ./generated_gifs:/app/generated_gifs

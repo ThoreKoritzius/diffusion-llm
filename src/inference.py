@@ -138,6 +138,7 @@ IDLE_STARTS_PER_MINUTE = max(1, env_int("IDLE_STARTS_PER_MINUTE", 12))
 NORMAL_STARTS_PER_MINUTE = max(1, env_int("NORMAL_STARTS_PER_MINUTE", 6))
 BUSY_STARTS_PER_MINUTE = max(1, env_int("BUSY_STARTS_PER_MINUTE", 2))
 ETA_FALLBACK_SECONDS = max(5.0, env_float("ETA_FALLBACK_SECONDS", min(30, max(10, REQUEST_TIMEOUT_SECONDS * 0.5))))
+FIRST_FRAME_FALLBACK_SECONDS = max(1.0, env_float("FIRST_FRAME_FALLBACK_SECONDS", 8.0))
 CHARS_PER_TOKEN_EST = 3.0
 STRUCTURE_TOKEN_RESERVE = 32
 PROMPT_BUDGET_RATIO = 0.35
@@ -405,6 +406,32 @@ def average_run_duration_seconds() -> float:
     return max(1.0, min(float(REQUEST_TIMEOUT_SECONDS), avg))
 
 
+def average_first_frame_seconds() -> float:
+    raw = get_redis().hget(METRICS_KEY, "avg_first_frame")
+    if raw is None:
+        return min(FIRST_FRAME_FALLBACK_SECONDS, float(REQUEST_TIMEOUT_SECONDS))
+    try:
+        avg = float(raw)
+    except ValueError:
+        return min(FIRST_FRAME_FALLBACK_SECONDS, float(REQUEST_TIMEOUT_SECONDS))
+    return max(1.0, min(float(REQUEST_TIMEOUT_SECONDS), avg))
+
+
+def update_metric_average(avg_field: str, count_field: str, value: float) -> None:
+    r = get_redis()
+    prev_avg = r.hget(METRICS_KEY, avg_field)
+    prev_n = r.hget(METRICS_KEY, count_field)
+    try:
+        prev_avg_f = float(prev_avg) if prev_avg else 0.0
+        prev_n_i = int(prev_n) if prev_n else 0
+    except ValueError:
+        prev_avg_f = 0.0
+        prev_n_i = 0
+    new_n = prev_n_i + 1
+    new_avg = value if prev_n_i == 0 else ((prev_avg_f * prev_n_i) + value) / new_n
+    r.hset(METRICS_KEY, mapping={avg_field: new_avg, count_field: new_n})
+
+
 def estimate_active_remaining_seconds(avg_duration: float | None = None) -> int:
     avg = avg_duration if avg_duration is not None else average_run_duration_seconds()
     remaining = 0.0
@@ -428,8 +455,9 @@ def estimate_eta_seconds(position: int | None) -> int | None:
     if position is None:
         return None
     avg = average_run_duration_seconds()
+    first_frame_avg = average_first_frame_seconds()
     runs_ahead = max(0, int(position) - 1)
-    eta = estimate_active_remaining_seconds(avg) + (runs_ahead * avg)
+    eta = estimate_active_remaining_seconds(avg) + (runs_ahead * avg) + first_frame_avg
     return max(1, int(math.ceil(eta)))
 
 
@@ -455,12 +483,14 @@ def estimate_eta_confidence(position: int | None, eta_seconds: int | None) -> st
 def queue_timing_payload(position: int | None) -> Dict:
     eta = estimate_eta_seconds(position)
     avg = average_run_duration_seconds()
+    first_frame_avg = average_first_frame_seconds()
     return {
         "queue_position": position,
         "eta_seconds": eta,
         "eta_confidence": estimate_eta_confidence(position, eta),
         "active_remaining_seconds": estimate_active_remaining_seconds(avg),
         "avg_run_seconds": int(math.ceil(avg)),
+        "avg_first_frame_seconds": int(math.ceil(first_frame_avg)),
         "server_time": int(now_ts()),
     }
 
@@ -681,11 +711,18 @@ def process_run(run_id: str) -> None:
     try:
         payload = run["payload"]
         should_stop = build_should_stop_cb(run_id, start_time)
+        first_snapshot_seen = False
 
         def status_cb(msg):
             redis_update_run(run_id, status=str(msg))
 
         def on_snapshot_callback(snapshot_obj):
+            nonlocal first_snapshot_seen
+            if not first_snapshot_seen:
+                first_snapshot_seen = True
+                first_frame_elapsed = max(0.01, now_ts() - start_time)
+                redis_update_run(run_id, first_snapshot_at=now_ts())
+                update_metric_average("avg_first_frame", "first_frame_count", first_frame_elapsed)
             redis_append_snapshot(run_id, snapshot_obj)
 
         res = run_denoising_generation_callback(
@@ -727,17 +764,7 @@ def process_run(run_id: str) -> None:
         else:
             set_run_terminal(run_id, state="done", status="done")
             elapsed = max(0.01, now_ts() - start_time)
-            prev_avg = r.hget(METRICS_KEY, "avg_duration")
-            prev_n = r.hget(METRICS_KEY, "count")
-            try:
-                prev_avg_f = float(prev_avg) if prev_avg else 0.0
-                prev_n_i = int(prev_n) if prev_n else 0
-            except ValueError:
-                prev_avg_f = 0.0
-                prev_n_i = 0
-            new_n = prev_n_i + 1
-            new_avg = elapsed if prev_n_i == 0 else ((prev_avg_f * prev_n_i) + elapsed) / new_n
-            r.hset(METRICS_KEY, mapping={"avg_duration": new_avg, "count": new_n})
+            update_metric_average("avg_duration", "count", elapsed)
     except TimeoutError:
         set_run_terminal(run_id, state="timed_out", status="timed out")
     except Exception as e:
@@ -1388,6 +1415,8 @@ def healthz():
         "queue_limit": MAX_QUEUED_RUNS,
         "queue_length": get_redis().llen(QUEUE_KEY) if redis_ok else 0,
         "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+        "avg_run_seconds": int(math.ceil(average_run_duration_seconds())) if redis_ok else None,
+        "avg_first_frame_seconds": int(math.ceil(average_first_frame_seconds())) if redis_ok else None,
         "max_steps": MAX_STEPS,
         "max_max_len": MAX_MAX_LEN,
         "max_sql_len": MAX_SQL_LEN,

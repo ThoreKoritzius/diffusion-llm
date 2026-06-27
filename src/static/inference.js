@@ -73,6 +73,7 @@ function setStatus(msg) {
 }
 
 function setQueueChip(text, state = '') {
+  if (!queueChip) return;
   queueChip.textContent = text || '';
   queueChip.dataset.state = state;
 }
@@ -159,6 +160,14 @@ function renderQueuedCountdown() {
     runBtnLabel.textContent = `Queued ${posText} • ~estimating`;
     setQueueChip(`Queued ${posText}`, 'queued');
     setStatus(`Queued ${posText} • ~estimating`);
+    setProgressIndeterminate();
+    return;
+  }
+
+  if (remaining <= 0) {
+    runBtnLabel.textContent = 'Starting...';
+    setQueueChip('', '');
+    setStatus(`Queued ${posText} • starting`);
     setProgressIndeterminate();
     return;
   }
@@ -706,6 +715,14 @@ function parseStepProgress(statusMsg) {
   };
 }
 
+function runningStatusLabel(statusMsg) {
+  const msg = String(statusMsg || '').toLowerCase();
+  if (msg.includes('loading model') || msg.includes('loading model/tokenizer')) return 'Loading model';
+  if (msg.includes('sql window') || msg.includes('starting denoising')) return 'Preparing decode';
+  if (msg.includes('building gif')) return 'Building GIF';
+  return 'processing';
+}
+
 function setQueuedUi(queuePosition, etaSeconds, _etaConfidence, demand = '') {
   setUiState(UI_MODES.QUEUED, {
     queuePosition,
@@ -720,8 +737,9 @@ function updateRunningUi(statusMsg) {
     setUiState(UI_MODES.RUNNING, { stepLabel: step.label, progressPct: step.progressPct });
     setStatus(`Running • ${step.label}`);
   } else {
-    setUiState(UI_MODES.RUNNING, { stepLabel: 'processing' });
-    setStatus('Running...');
+    const label = runningStatusLabel(statusMsg);
+    setUiState(UI_MODES.RUNNING, { stepLabel: label });
+    setStatus(`Running • ${label}`);
   }
 }
 
@@ -865,9 +883,7 @@ function openStream(id, sessionId) {
     if (!info || !info.msg) return;
 
     lastStatusMsg = info.msg;
-    if (info.msg.toLowerCase().startsWith('step ')) {
-      updateRunningUi(info.msg);
-    }
+    updateRunningUi(info.msg);
   });
 
   es.addEventListener('done', (ev) => {
