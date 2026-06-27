@@ -44,26 +44,53 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 from denoising import denoise_steps
 
 # -------------------------
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
     parser.add_argument("--public", action="store_true", help="Bind on 0.0.0.0 and disable browser auto-open")
     parser.add_argument("--prompt", type=str, default="", help="Prefill prompt (optional)")
     parser.add_argument("--context", type=str, default="", help="Prefill context (optional)")
-    parser.add_argument("--model-dir", type=str, default="diffusion-sql", help="Default model dir (optional)")
-    parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--seed", type=int, default=42, help="Deterministic seed (default 42).")
-    parser.add_argument("--max-concurrent-runs", type=int, default=1)
-    parser.add_argument("--max-queued-runs", type=int, default=3)
-    parser.add_argument("--request-timeout-seconds", type=int, default=90)
-    parser.add_argument("--max-prompt-chars", type=int, default=1000)
-    parser.add_argument("--max-context-chars", type=int, default=8000)
-    parser.add_argument("--max-steps", type=int, default=48)
-    parser.add_argument("--max-max-len", type=int, default=512)
-    parser.add_argument("--max-sql-len", type=int, default=128)
+    parser.add_argument("--model-dir", type=str, default=os.environ.get("MODEL_DIR_IN_CONTAINER", "diffusion-sql"), help="Default model dir (optional)")
+    parser.add_argument("--host", type=str, default=os.environ.get("INFERENCE_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=env_int("INFERENCE_PORT", 7860))
+    parser.add_argument("--seed", type=int, default=env_int("INFERENCE_SEED", 42), help="Deterministic seed (default 42).")
+    parser.add_argument("--max-concurrent-runs", type=int, default=env_int("MAX_CONCURRENT_RUNS", 1))
+    parser.add_argument("--max-queued-runs", type=int, default=env_int("MAX_QUEUED_RUNS", 5))
+    parser.add_argument("--request-timeout-seconds", type=int, default=env_int("REQUEST_TIMEOUT_SECONDS", 60))
+    parser.add_argument("--max-prompt-chars", type=int, default=env_int("MAX_PROMPT_CHARS", 1000))
+    parser.add_argument("--max-context-chars", type=int, default=env_int("MAX_CONTEXT_CHARS", 8000))
+    parser.add_argument("--max-steps", type=int, default=env_int("MAX_STEPS", 20))
+    parser.add_argument("--max-max-len", type=int, default=env_int("MAX_MAX_LEN", 384))
+    parser.add_argument("--max-sql-len", type=int, default=env_int("MAX_SQL_LEN", 96))
     parser.add_argument("--enable-gif", action="store_true", help="Enable GIF generation for runs")
-    parser.add_argument("--run-ttl-seconds", type=int, default=900)
+    parser.add_argument("--run-ttl-seconds", type=int, default=env_int("RUN_TTL_SECONDS", 900))
     parser.add_argument("--worker", action="store_true", help="Run worker loop instead of web server")
     parser.add_argument("--redis-url", type=str, default=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
     parser.add_argument("--inference-dtype", type=str, default=os.environ.get("INFERENCE_DTYPE", "fp16"), choices=["fp16", "fp32", "bf16", "auto"], help="Preferred model dtype for inference")
@@ -102,6 +129,15 @@ RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
 IS_WORKER = bool(args.worker)
 REDIS_URL = args.redis_url
 INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
+ALLOW_FAKE_REDIS = env_bool("ALLOW_FAKE_REDIS", "REDIS_URL" not in os.environ)
+RATELIMIT_STORAGE_URI = os.environ.get("RATELIMIT_STORAGE_URI") or ("memory://" if ALLOW_FAKE_REDIS else REDIS_URL)
+START_RUN_RATE_LIMIT = os.environ.get("START_RUN_RATE_LIMIT", "30 per minute; 300 per hour")
+EXPORT_GIF_RATE_LIMIT = os.environ.get("EXPORT_GIF_RATE_LIMIT", "3 per minute; 20 per hour")
+ADAPTIVE_RATE_LIMITS = env_bool("ADAPTIVE_RATE_LIMITS", True)
+IDLE_STARTS_PER_MINUTE = max(1, env_int("IDLE_STARTS_PER_MINUTE", 12))
+NORMAL_STARTS_PER_MINUTE = max(1, env_int("NORMAL_STARTS_PER_MINUTE", 6))
+BUSY_STARTS_PER_MINUTE = max(1, env_int("BUSY_STARTS_PER_MINUTE", 2))
+ETA_FALLBACK_SECONDS = max(5.0, env_float("ETA_FALLBACK_SECONDS", min(30, max(10, REQUEST_TIMEOUT_SECONDS * 0.5))))
 CHARS_PER_TOKEN_EST = 3.0
 STRUCTURE_TOKEN_RESERVE = 32
 PROMPT_BUDGET_RATIO = 0.35
@@ -121,7 +157,7 @@ limiter = Limiter(
     get_remote_address,
     app=app,
     default_limits=[],
-    storage_uri="memory://",
+    storage_uri=RATELIMIT_STORAGE_URI,
 )
 
 
@@ -158,6 +194,8 @@ def get_redis() -> redis.Redis:
             client.ping()
             REDIS_CLIENT = client
         except (redis.exceptions.RedisError, OSError):
+            if not ALLOW_FAKE_REDIS:
+                raise
             import fakeredis
             print(f"[WARN] Redis unavailable at {REDIS_URL}; using in-memory store (standalone mode, single process)")
             REDIS_CLIENT = fakeredis.FakeRedis(decode_responses=True)
@@ -343,21 +381,56 @@ def queue_position(run_id: str) -> int | None:
         return None
 
 
+def prune_inactive_workers() -> None:
+    r = get_redis()
+    for run_id in r.smembers(ACTIVE_SET_KEY):
+        run = redis_get_run(run_id)
+        if not run or run.get("done") or run.get("state") not in {"running", "stopping"}:
+            r.srem(ACTIVE_SET_KEY, run_id)
+
+
 def active_worker_count() -> int:
+    prune_inactive_workers()
     return int(get_redis().scard(ACTIVE_SET_KEY))
+
+
+def average_run_duration_seconds() -> float:
+    raw = get_redis().hget(METRICS_KEY, "avg_duration")
+    if raw is None:
+        return ETA_FALLBACK_SECONDS
+    try:
+        avg = float(raw)
+    except ValueError:
+        return ETA_FALLBACK_SECONDS
+    return max(1.0, min(float(REQUEST_TIMEOUT_SECONDS), avg))
+
+
+def estimate_active_remaining_seconds(avg_duration: float | None = None) -> int:
+    avg = avg_duration if avg_duration is not None else average_run_duration_seconds()
+    remaining = 0.0
+    now = now_ts()
+    r = get_redis()
+    for run_id in r.smembers(ACTIVE_SET_KEY):
+        run = redis_get_run(run_id)
+        started_at = run.get("started_at") if run else None
+        if not started_at:
+            remaining += avg
+            continue
+        try:
+            elapsed = max(0.0, now - float(started_at))
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        remaining += max(3.0, avg - elapsed)
+    return max(0, int(math.ceil(remaining)))
 
 
 def estimate_eta_seconds(position: int | None) -> int | None:
     if position is None:
         return None
-    raw = get_redis().hget(METRICS_KEY, "avg_duration")
-    if raw is None:
-        return None
-    try:
-        avg = float(raw)
-    except ValueError:
-        return None
-    return max(1, int(round(avg * position)))
+    avg = average_run_duration_seconds()
+    runs_ahead = max(0, int(position) - 1)
+    eta = estimate_active_remaining_seconds(avg) + (runs_ahead * avg)
+    return max(1, int(math.ceil(eta)))
 
 
 def estimate_eta_confidence(position: int | None, eta_seconds: int | None) -> str:
@@ -377,6 +450,78 @@ def estimate_eta_confidence(position: int | None, eta_seconds: int | None) -> st
     if position <= 3:
         return "medium"
     return "low"
+
+
+def queue_timing_payload(position: int | None) -> Dict:
+    eta = estimate_eta_seconds(position)
+    avg = average_run_duration_seconds()
+    return {
+        "queue_position": position,
+        "eta_seconds": eta,
+        "eta_confidence": estimate_eta_confidence(position, eta),
+        "active_remaining_seconds": estimate_active_remaining_seconds(avg),
+        "avg_run_seconds": int(math.ceil(avg)),
+        "server_time": int(now_ts()),
+    }
+
+
+def client_rate_key(prefix: str = "start") -> str:
+    client = get_remote_address() or "unknown"
+    safe = re.sub(r"[^a-zA-Z0-9_.:-]", "_", client)
+    return f"diffusion:rate:{prefix}:{safe}"
+
+
+def adaptive_start_profile() -> Dict:
+    queue_len = int(get_redis().llen(QUEUE_KEY))
+    active_count = active_worker_count()
+    if active_count == 0 and queue_len == 0:
+        return {
+            "demand": "low",
+            "limit": IDLE_STARTS_PER_MINUTE,
+            "window_seconds": 60,
+            "queue_limit": MAX_QUEUED_RUNS,
+        }
+    if queue_len < max(1, MAX_QUEUED_RUNS // 2):
+        return {
+            "demand": "normal",
+            "limit": NORMAL_STARTS_PER_MINUTE,
+            "window_seconds": 60,
+            "queue_limit": MAX_QUEUED_RUNS,
+        }
+    return {
+        "demand": "busy",
+        "limit": BUSY_STARTS_PER_MINUTE,
+        "window_seconds": 60,
+        "queue_limit": MAX_QUEUED_RUNS,
+    }
+
+
+def adaptive_start_admission() -> tuple[bool, Dict]:
+    profile = adaptive_start_profile()
+    if not ADAPTIVE_RATE_LIMITS:
+        return True, profile
+
+    now = now_ts()
+    window = int(profile["window_seconds"])
+    key = client_rate_key("start")
+    r = get_redis()
+    r.zremrangebyscore(key, 0, now - window)
+    count = int(r.zcard(key))
+    limit = int(profile["limit"])
+    if count >= limit:
+        oldest = r.zrange(key, 0, 0, withscores=True)
+        if oldest:
+            retry_after = max(1, int(math.ceil((float(oldest[0][1]) + window) - now)))
+        else:
+            retry_after = max(1, min(15, window))
+        profile["retry_after"] = retry_after
+        profile["remaining"] = 0
+        return False, profile
+    r.zadd(key, {uuid.uuid4().hex: now})
+    r.expire(key, window + 120)
+    profile["retry_after"] = 0
+    profile["remaining"] = max(0, limit - count - 1)
+    return True, profile
 
 
 def parse_gif_size(gif_size_text: str) -> tuple[int, int]:
@@ -440,16 +585,20 @@ def get_model_info(model_dir: str) -> Dict:
     info = {
         "param_count": None,
         "param_count_display": "unknown",
+        "architecture": "unknown",
+        "hidden_size": None,
+        "num_hidden_layers": None,
     }
     try:
-        if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["model"] is not None:
-            model = MODEL_CACHE["model"]
-        else:
-            model = AutoModelForMaskedLM.from_pretrained(model_dir)
-        param_count = int(sum(p.numel() for p in model.parameters()))
-        info["param_count"] = param_count
-        info["param_count_display"] = format_param_count(param_count)
-    except Exception:
+        config_path = os.path.join(model_dir, "config.json")
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        architectures = config.get("architectures") or []
+        if architectures:
+            info["architecture"] = str(architectures[0])
+        info["hidden_size"] = config.get("hidden_size")
+        info["num_hidden_layers"] = config.get("num_hidden_layers")
+    except (OSError, json.JSONDecodeError):
         pass
     MODEL_INFO_CACHE[model_dir] = info
     return info
@@ -601,6 +750,9 @@ def process_run(run_id: str) -> None:
 def worker_loop():
     r = get_redis()
     while True:
+        if active_worker_count() >= MAX_CONCURRENT_RUNS:
+            time.sleep(0.5)
+            continue
         job = r.blpop(QUEUE_KEY, timeout=3)
         if not job:
             continue
@@ -1223,11 +1375,22 @@ def healthz():
         redis_ok = True
     except Exception:
         redis_ok = False
+    demand = adaptive_start_profile() if redis_ok else {}
     return jsonify({
         "ok": redis_ok,
         "redis_ok": redis_ok,
+        "standalone_mode": STANDALONE_MODE,
+        "rate_limit_storage": RATELIMIT_STORAGE_URI,
+        "adaptive_rate_limits": ADAPTIVE_RATE_LIMITS,
+        "demand": demand.get("demand"),
+        "start_limit_per_minute": demand.get("limit"),
         "active_limit": MAX_CONCURRENT_RUNS,
         "queue_limit": MAX_QUEUED_RUNS,
+        "queue_length": get_redis().llen(QUEUE_KEY) if redis_ok else 0,
+        "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+        "max_steps": MAX_STEPS,
+        "max_max_len": MAX_MAX_LEN,
+        "max_sql_len": MAX_SQL_LEN,
         "active_worker_count": active_worker_count() if redis_ok else 0,
     }), (200 if redis_ok else 503)
 
@@ -1249,6 +1412,12 @@ def index():
         context_prefill=args.context or default_context,
         model_dir=DEFAULT_MODEL_DIR or "",
         max_model_len=MAX_MAX_LEN,
+        max_steps=MAX_STEPS,
+        default_steps=min(20, MAX_STEPS),
+        max_sql_len=MAX_SQL_LEN,
+        default_sql_len=max(1, min(96, MAX_SQL_LEN)),
+        max_prompt_chars=MAX_PROMPT_CHARS,
+        max_context_chars=MAX_CONTEXT_CHARS,
         model_param_count=model_info.get("param_count"),
         model_param_count_display=model_info.get("param_count_display", "unknown"),
         inference_dtype_requested=INFERENCE_DTYPE,
@@ -1258,7 +1427,7 @@ def index():
 
 
 @app.route("/start", methods=["POST"])
-@limiter.limit("5 per minute; 30 per hour")
+@limiter.limit(START_RUN_RATE_LIMIT)
 def start_run():
     form = request.form
     prompt = form.get("prompt", "").strip()
@@ -1282,9 +1451,7 @@ def start_run():
         return jsonify({"error": "invalid_input", "message": f"Context too long (>{MAX_CONTEXT_CHARS} chars)"}), 400
     if not os.path.isdir(model_dir):
         return jsonify({"error": "invalid_input", "message": f"Model dir not found: {model_dir}"}), 400
-    model_ok, model_msg = validate_model_dir(model_dir)
-    if not model_ok:
-        return jsonify({"error": "invalid_model", "message": model_msg}), 400
+
     if steps < 1 or steps > MAX_STEPS:
         return jsonify({"error": "invalid_input", "message": f"steps must be 1..{MAX_STEPS}"}), 400
     if max_len < 8 or max_len > MAX_MAX_LEN:
@@ -1320,13 +1487,34 @@ def start_run():
             ),
         }), 400
 
+    admission_preview = adaptive_start_profile()
+    queue_limit = int(admission_preview.get("queue_limit", MAX_QUEUED_RUNS))
     r = get_redis()
-    if r.llen(QUEUE_KEY) >= MAX_QUEUED_RUNS:
+    if r.llen(QUEUE_KEY) >= queue_limit:
+        retry_after = max(3, estimate_active_remaining_seconds())
         return jsonify({
             "error": "queue_full",
             "message": "Server is busy. Try again shortly.",
-            "max_queued_runs": MAX_QUEUED_RUNS,
+            "max_queued_runs": queue_limit,
+            "demand": admission_preview.get("demand"),
+            "retry_after": retry_after,
         }), 503
+
+    admitted, admission = adaptive_start_admission()
+    if not admitted:
+        retry_after = int(admission.get("retry_after", 10))
+        resp = jsonify({
+            "error": "rate_limited",
+            "message": "Server is busy. Please retry shortly.",
+            "demand": admission.get("demand"),
+            "retry_after": retry_after,
+        })
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
+
+    model_ok, model_msg = validate_model_dir(model_dir)
+    if not model_ok:
+        return jsonify({"error": "invalid_model", "message": model_msg}), 400
 
     run_id = uuid.uuid4().hex
     payload = {
@@ -1360,15 +1548,14 @@ def start_run():
     pos = queue_position(run_id)
     if pos is None:
         pos = 1
-    eta = estimate_eta_seconds(pos)
-    eta_confidence = estimate_eta_confidence(pos, eta)
+    timing = queue_timing_payload(pos)
     return jsonify({
         "run_id": run_id,
         "state": "queued",
-        "queue_position": pos,
-        "eta_seconds": eta,
-        "eta_confidence": eta_confidence,
+        "demand": admission.get("demand"),
+        "start_limit_remaining": admission.get("remaining"),
         "queue_token": run_id,
+        **timing,
     })
 
 
@@ -1438,7 +1625,8 @@ def run_state(run_id):
     pos = queue_position(run_id) if run.get("state") == "queued" else None
     if run.get("state") == "queued" and pos is None:
         pos = 1
-    eta = estimate_eta_seconds(pos)
+    timing = queue_timing_payload(pos)
+    demand = adaptive_start_profile()
     return jsonify({
         "run_id": run_id,
         "state": run.get("state"),
@@ -1448,11 +1636,10 @@ def run_state(run_id):
         "gif_url": run.get("gif_url"),
         "snapshot_count": snap_count,
         "snapshots": delta,
-        "queue_position": pos,
-        "eta_seconds": eta,
-        "eta_confidence": estimate_eta_confidence(pos, eta),
+        "demand": demand.get("demand"),
         "started_at": run.get("started_at"),
         "finished_at": run.get("finished_at"),
+        **timing,
     })
 
 
@@ -1465,14 +1652,14 @@ def queue_state(run_id):
     pos = queue_position(run_id) if run.get("state") == "queued" else None
     if run.get("state") == "queued" and pos is None:
         pos = 1
-    eta = estimate_eta_seconds(pos)
+    timing = queue_timing_payload(pos)
+    demand = adaptive_start_profile()
     return jsonify({
         "run_id": run_id,
         "state": run.get("state"),
-        "queue_position": pos,
-        "eta_seconds": eta,
-        "eta_confidence": estimate_eta_confidence(pos, eta),
+        "demand": demand.get("demand"),
         "active_worker_count": active_worker_count(),
+        **timing,
     })
 
 
@@ -1494,7 +1681,7 @@ def serve_gif(filename):
 
 
 @app.route("/export_gif/<run_id>")
-@limiter.limit("12 per minute")
+@limiter.limit(EXPORT_GIF_RATE_LIMIT)
 def export_gif(run_id):
     """On-demand: render the run's denoising frames into a square share-GIF.
 

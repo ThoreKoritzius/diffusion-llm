@@ -3,6 +3,11 @@ services:
     image: redis:7-alpine
     container_name: diffusion-llm-redis
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - redis_data:/data
 
@@ -13,33 +18,37 @@ services:
     image: diffusion-llm:latest
     container_name: diffusion-llm-inference
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     ports:
       - "7860:7860"
     command:
       - --model-dir
       - /models/model
       - --public
-      - --max-concurrent-runs
-      - "1"
-      - --max-queued-runs
-      - "3"
-      - --request-timeout-seconds
-      - "90"
-      - --max-steps
-      - "24"
-      - --max-max-len
-      - "512"
-      - --max-sql-len
-      - "128"
-      - --run-ttl-seconds
-      - "900"
     environment:
       - PYTHONUNBUFFERED=1
-      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-4}
-      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-3}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-3}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-3}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - ALLOW_FAKE_REDIS=${ALLOW_FAKE_REDIS:-false}
+      - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-1}
+      - MAX_QUEUED_RUNS=${MAX_QUEUED_RUNS:-5}
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-60}
+      - MAX_PROMPT_CHARS=${MAX_PROMPT_CHARS:-1000}
+      - MAX_CONTEXT_CHARS=${MAX_CONTEXT_CHARS:-8000}
+      - MAX_STEPS=${MAX_STEPS:-20}
+      - MAX_MAX_LEN=${MAX_MAX_LEN:-384}
+      - MAX_SQL_LEN=${MAX_SQL_LEN:-96}
+      - RUN_TTL_SECONDS=${RUN_TTL_SECONDS:-900}
+      - START_RUN_RATE_LIMIT=${START_RUN_RATE_LIMIT:-30 per minute; 300 per hour}
+      - EXPORT_GIF_RATE_LIMIT=${EXPORT_GIF_RATE_LIMIT:-3 per minute; 20 per hour}
+      - ADAPTIVE_RATE_LIMITS=${ADAPTIVE_RATE_LIMITS:-true}
+      - IDLE_STARTS_PER_MINUTE=${IDLE_STARTS_PER_MINUTE:-12}
+      - NORMAL_STARTS_PER_MINUTE=${NORMAL_STARTS_PER_MINUTE:-6}
+      - BUSY_STARTS_PER_MINUTE=${BUSY_STARTS_PER_MINUTE:-2}
+      - ETA_FALLBACK_SECONDS=${ETA_FALLBACK_SECONDS:-25}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
       - ./generated_gifs:/app/generated_gifs
@@ -51,14 +60,19 @@ services:
     image: diffusion-llm:latest
     container_name: diffusion-llm-worker
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     entrypoint: ["python", "src/inference.py", "--worker", "--model-dir", "/models/model"]
     environment:
       - PYTHONUNBUFFERED=1
-      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-4}
-      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+      - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-3}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-3}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-3}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - ALLOW_FAKE_REDIS=${ALLOW_FAKE_REDIS:-false}
+      - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-1}
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-60}
+      - RUN_TTL_SECONDS=${RUN_TTL_SECONDS:-900}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
       - ./generated_gifs:/app/generated_gifs

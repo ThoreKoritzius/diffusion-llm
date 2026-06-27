@@ -27,6 +27,7 @@ let queueEtaBaseline = null;
 let queueEtaSeconds = null;
 let queueEtaSyncedAtMs = 0;
 let queuePositionCurrent = null;
+let queueDemandCurrent = '';
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -127,6 +128,14 @@ function formatCountdown(seconds) {
   return `${hours}h ${String(remMins).padStart(2, '0')}m`;
 }
 
+function parseRetryAfter(resp, bodyJson = null, fallbackSeconds = 5) {
+  const bodyRetry = bodyJson && Number(bodyJson.retry_after);
+  if (Number.isFinite(bodyRetry) && bodyRetry > 0) return Math.ceil(bodyRetry);
+  const headerRetry = parseInt(resp.headers.get('Retry-After') || '', 10);
+  if (Number.isFinite(headerRetry) && headerRetry > 0) return headerRetry;
+  return fallbackSeconds;
+}
+
 function getQueueRemainingSeconds() {
   if (!Number.isFinite(queueEtaSeconds) || queueEtaSeconds <= 0 || !queueEtaSyncedAtMs) {
     return null;
@@ -155,9 +164,10 @@ function renderQueuedCountdown() {
   }
 
   const countdownText = formatCountdown(remaining);
+  const demand = queueDemandCurrent && queueDemandCurrent !== 'low' ? ` • ${queueDemandCurrent}` : '';
   runBtnLabel.textContent = `Queued ${posText} • ${countdownText}`;
-  setQueueChip(`Queued ${posText} • ${countdownText}`, 'queued');
-  setStatus(`Queued ${posText} • ${countdownText}`);
+  setQueueChip(`Queued ${posText} • ${countdownText}${demand}`, 'queued');
+  setStatus(`Queued ${posText} • ${countdownText}${demand}`);
 
   if (!Number.isFinite(queueEtaBaseline) || queueEtaBaseline <= 0 || remaining > queueEtaBaseline) {
     queueEtaBaseline = remaining;
@@ -166,10 +176,14 @@ function renderQueuedCountdown() {
   setProgressValue(Math.max(0, Math.min(100, pct)));
 }
 
-function syncQueuedEstimate(queuePosition, etaSeconds) {
+function syncQueuedEstimate(queuePosition, etaSeconds, demand = '') {
   queuePositionCurrent = Number.isFinite(queuePosition) && queuePosition > 0 ? queuePosition : null;
+  queueDemandCurrent = demand || '';
 
   if (Number.isFinite(etaSeconds) && etaSeconds > 0) {
+    if (!Number.isFinite(queueEtaSeconds) || Math.abs(queueEtaSeconds - etaSeconds) > 2) {
+      queueEtaBaseline = etaSeconds;
+    }
     queueEtaSeconds = etaSeconds;
     queueEtaSyncedAtMs = Date.now();
     if (!Number.isFinite(queueEtaBaseline) || queueEtaBaseline <= 0 || etaSeconds > queueEtaBaseline) {
@@ -221,7 +235,7 @@ function setUiState(mode, data = {}) {
 
   if (mode === UI_MODES.QUEUED) {
     runBtn.disabled = true;
-    syncQueuedEstimate(data.queuePosition, data.etaSeconds);
+    syncQueuedEstimate(data.queuePosition, data.etaSeconds, data.demand || '');
     return;
   }
 
@@ -313,6 +327,7 @@ function resetRunState() {
   queueEtaSeconds = null;
   queueEtaSyncedAtMs = 0;
   queuePositionCurrent = null;
+  queueDemandCurrent = '';
 
   sliderRow.classList.remove('visible');
   setUiState(UI_MODES.IDLE);
@@ -691,10 +706,11 @@ function parseStepProgress(statusMsg) {
   };
 }
 
-function setQueuedUi(queuePosition, etaSeconds, _etaConfidence) {
+function setQueuedUi(queuePosition, etaSeconds, _etaConfidence, demand = '') {
   setUiState(UI_MODES.QUEUED, {
     queuePosition,
     etaSeconds,
+    demand,
   });
 }
 
@@ -714,7 +730,7 @@ async function startRateLimitCooldown(retryAfterSeconds, message) {
     clearInterval(rateLimitTimer);
     rateLimitTimer = null;
   }
-  const totalMs = (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? Math.ceil(retryAfterSeconds) : 10) * 1000;
+  const totalMs = (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? Math.ceil(retryAfterSeconds) : 5) * 1000;
   const startMs = Date.now();
   setStatus(message || 'Rate limited. Please retry shortly.');
   setUiState(UI_MODES.RATE_LIMITED, { remaining: Math.ceil(totalMs / 1000), progressPct: 100 });
@@ -732,7 +748,7 @@ async function startRateLimitCooldown(retryAfterSeconds, message) {
     const remaining = Math.ceil(remainingMs / 1000);
     const pct = Math.max(0, (remainingMs / totalMs) * 100);
     setUiState(UI_MODES.RATE_LIMITED, { remaining, progressPct: pct });
-  }, 80);
+  }, 250);
 }
 
 async function pollRunState(id) {
@@ -742,8 +758,12 @@ async function pollRunState(id) {
     const resp = await fetch(`/run/${id}?after=${encodeURIComponent(lastSnapshotCount)}`, { cache: 'no-store' });
     if (!resp.ok) {
       if (resp.status === 429) {
-        const retryAfter = parseInt(resp.headers.get('Retry-After') || '', 10);
-        await startRateLimitCooldown(retryAfter, 'Rate limited while polling.');
+        let bodyJson = null;
+        try {
+          bodyJson = await resp.json();
+        } catch (_ignored) {}
+        const retryAfter = parseRetryAfter(resp, bodyJson, 3);
+        await startRateLimitCooldown(retryAfter, bodyJson && bodyJson.message ? bodyJson.message : 'Rate limited while polling.');
       }
       return;
     }
@@ -769,7 +789,7 @@ async function pollRunState(id) {
     }
 
     if (data.state === 'queued') {
-      setQueuedUi(data.queue_position, data.eta_seconds, data.eta_confidence);
+      setQueuedUi(data.queue_position, data.eta_seconds, data.eta_confidence, data.demand);
       pollDelayMs = 500;
     } else if (data.state === 'running') {
       updateRunningUi(data.status || '');
@@ -891,9 +911,11 @@ runForm.addEventListener('submit', async (ev) => {
         bodyJson = JSON.parse(bodyText);
       } catch (_ignored) {}
 
-      if (resp.status === 429) {
-        const retryAfter = parseInt(resp.headers.get('Retry-After') || '', 10);
-        await startRateLimitCooldown(retryAfter, bodyJson && bodyJson.message ? bodyJson.message : 'Rate limited.');
+      if (resp.status === 429 || (resp.status === 503 && bodyJson && bodyJson.error === 'queue_full')) {
+        const retryAfter = parseRetryAfter(resp, bodyJson, resp.status === 503 ? 8 : 5);
+        const msg = bodyJson && bodyJson.message ? bodyJson.message : 'Please retry shortly.';
+        pendingRunSignature = '';
+        await startRateLimitCooldown(retryAfter, msg);
         return;
       }
 
@@ -907,7 +929,7 @@ runForm.addEventListener('submit', async (ev) => {
 
     const payload = await resp.json();
     runId = payload.run_id;
-    setQueuedUi(payload.queue_position, payload.eta_seconds, payload.eta_confidence);
+    setQueuedUi(payload.queue_position, payload.eta_seconds, payload.eta_confidence, payload.demand);
     openStream(runId, runSessionId);
   } catch (err) {
     pendingRunSignature = '';
