@@ -773,6 +773,220 @@ def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), inter
 
 
 # -------------------------
+# Beautiful square share-GIF (on-demand export)
+# -------------------------
+_FONT_CACHE: Dict[tuple, object] = {}
+_MONO_FONT_PATHS = [
+    ("/System/Library/Fonts/Menlo.ttc", 0),
+    ("/System/Library/Fonts/SFNSMono.ttf", 0),
+    ("/System/Library/Fonts/Monaco.ttf", 0),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),
+    ("/usr/share/fonts/dejavu/DejaVuSansMono.ttf", 0),
+    ("DejaVuSansMono.ttf", 0),
+]
+_SANS_FONT_PATHS = [
+    ("/System/Library/Fonts/SFNS.ttf", 0),
+    ("/System/Library/Fonts/Helvetica.ttc", 0),
+    ("/System/Library/Fonts/Supplemental/Arial.ttf", 0),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+    ("DejaVuSans.ttf", 0),
+]
+
+
+def _load_font(size: int, mono: bool = True):
+    size = max(8, int(size))
+    key = (mono, size)
+    cached = _FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    for path, idx in (_MONO_FONT_PATHS if mono else _SANS_FONT_PATHS):
+        try:
+            font = ImageFont.truetype(path, size=size, index=idx)
+            _FONT_CACHE[key] = font
+            return font
+        except Exception:
+            continue
+    font = ImageFont.load_default()
+    _FONT_CACHE[key] = font
+    return font
+
+
+_GIF_THEME = {
+    "bg": (11, 15, 25), "panel": (17, 23, 37), "border": (33, 42, 62),
+    "text": (226, 232, 240), "muted": (120, 134, 156),
+    "keyword": (96, 165, 250), "fn": (192, 132, 252), "str": (74, 222, 128),
+    "punct": (148, 163, 184), "mask": (52, 66, 92), "accent": (56, 189, 248),
+    "track": (30, 41, 59),
+}
+_GIF_KW = {"SELECT", "FROM", "WHERE", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET",
+    "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "FULL", "ON", "AND", "OR", "NOT", "IN", "AS",
+    "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE", "DISTINCT",
+    "UNION", "ALL", "ASC", "DESC", "BETWEEN", "LIKE", "IS", "NULL", "EXISTS", "CASE", "WHEN",
+    "THEN", "ELSE", "END"}
+_GIF_FN = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ROUND", "ABS", "COALESCE", "UPPER", "LOWER",
+    "LENGTH", "NOW", "DATE", "CAST"}
+_GIF_TOKEN_SPLIT = re.compile(r"(\s+|_{2,}|[(),*=<>!;.])")
+_GIF_CLAUSE_RE = re.compile(r"\s+\b(FROM|WHERE|GROUP BY|ORDER BY|HAVING|LIMIT|UNION(?: ALL)?|INNER JOIN|LEFT JOIN|RIGHT JOIN|FULL JOIN|OUTER JOIN|JOIN|VALUES|SET)\b", re.IGNORECASE)
+_GIF_BOOL_RE = re.compile(r"\s+\b(AND|OR)\b", re.IGNORECASE)
+
+
+def format_sql_lines(sql: str) -> List[str]:
+    """Clause-per-line layout mirroring the live UI formatter (quote-aware)."""
+    if not sql or not sql.strip():
+        return ["…"]
+    base = re.sub(r"\s+", " ", sql).strip()
+    parts = re.split(r"('(?:[^']|'')*'?)", base)
+    for i in range(0, len(parts), 2):
+        seg = _GIF_CLAUSE_RE.sub(lambda m: "\n" + m.group(1), parts[i])
+        seg = _GIF_BOOL_RE.sub(lambda m: "\n  " + m.group(1), seg)
+        parts[i] = seg
+    return "".join(parts).split("\n")
+
+
+def _gif_classify(tok: str) -> str:
+    t = tok.strip()
+    if not t:
+        return "ws"
+    if re.fullmatch(r"_{2,}", t):
+        return "mask"
+    up = t.upper()
+    if up in _GIF_KW:
+        return "keyword"
+    if up in _GIF_FN:
+        return "fn"
+    if t[0] in "'\"":
+        return "str"
+    if re.fullmatch(r"[(),*=<>!;.+/-]+", t):
+        return "punct"
+    return "text"
+
+
+def _wrap_text(text: str, font, max_w: float, max_lines: int = 2) -> List[str]:
+    lines, cur = [], ""
+    for w in (text or "").split():
+        trial = (cur + " " + w).strip()
+        if font.getlength(trial) <= max_w or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        while lines[-1] and font.getlength(lines[-1] + "…") > max_w:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] = lines[-1].rstrip() + "…"
+    return lines or [""]
+
+
+def _fit_mono_size(lines: List[str], max_w: float, max_h: float, lo: int = 16, hi: int = 56, leading: float = 1.5) -> int:
+    longest = max((len(l) for l in lines), default=1) or 1
+    n = max(len(lines), 1)
+    best = lo
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        f = _load_font(mid, mono=True)
+        cw = f.getlength("M") or mid * 0.6
+        asc, desc = f.getmetrics()
+        if cw * longest <= max_w and (asc + desc) * leading * n <= max_h:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def render_share_frame(prompt: str, sql: str, step: int, total: int, size: int = 800):
+    T = _GIF_THEME
+    img = Image.new("RGB", (size, size), T["bg"])
+    d = ImageDraw.Draw(img)
+    pad = int(size * 0.085)
+    d.rounded_rectangle([pad * 0.5, pad * 0.5, size - pad * 0.5, size - pad * 0.5],
+                        radius=int(size * 0.035), fill=T["panel"], outline=T["border"], width=2)
+    x0 = pad
+    inner_w = size - 2 * pad
+
+    # header — brand + prompt
+    brand_f = _load_font(int(size * 0.026), mono=False)
+    y = pad * 0.95
+    d.text((x0, y), "text-diffusion", font=brand_f, fill=T["accent"])
+    d.text((x0 + brand_f.getlength("text-diffusion") + 10, y + 2),
+           "natural language → SQL", font=_load_font(int(size * 0.021), mono=False), fill=T["muted"])
+    y += brand_f.size * 1.9
+    pf = _load_font(int(size * 0.030), mono=False)
+    for ln in _wrap_text(prompt or "(no prompt)", pf, inner_w, max_lines=2):
+        d.text((x0, y), ln, font=pf, fill=T["text"])
+        y += pf.size * 1.32
+    header_bottom = y + size * 0.015
+    d.line([(x0, header_bottom), (size - pad, header_bottom)], fill=T["border"], width=2)
+
+    # footer — progress bar + step label
+    foot_h = size * 0.085
+    foot_top = size - pad - foot_h
+    sf = _load_font(int(size * 0.023), mono=False)
+    frac = max(0.0, min(1.0, (step / total) if total else 1.0))
+    bar_h = max(8, int(size * 0.012))
+    bar_y = size - pad - foot_h * 0.30
+    d.rounded_rectangle([x0, bar_y, x0 + inner_w, bar_y + bar_h], radius=bar_h // 2, fill=T["track"])
+    if frac > 0:
+        d.rounded_rectangle([x0, bar_y, x0 + max(bar_h, inner_w * frac), bar_y + bar_h], radius=bar_h // 2, fill=T["accent"])
+    d.text((x0, bar_y - sf.size * 1.7),
+           "done" if frac >= 1 else f"denoising · step {step}/{total}", font=sf, fill=T["muted"])
+
+    # body — formatted SQL with syntax colours + mask blocks
+    body_top = header_bottom + size * 0.04
+    body_h = foot_top - body_top - size * 0.02
+    lines = format_sql_lines(sql)
+    fsize = _fit_mono_size(lines, inner_w, body_h)
+    f = _load_font(fsize, mono=True)
+    cw = f.getlength("M") or fsize * 0.6
+    asc, desc = f.getmetrics()
+    lh = (asc + desc) * 1.5
+    y = body_top
+    for line in lines:
+        x = x0
+        for tok in _GIF_TOKEN_SPLIT.split(line):
+            if tok == "":
+                continue
+            cls = _gif_classify(tok)
+            w = cw * len(tok)
+            if cls == "mask":
+                d.rounded_rectangle([x + 2, y + asc * 0.16, x + w - 3, y + asc * 1.04],
+                                    radius=max(3, int(fsize * 0.16)), fill=T["mask"])
+            elif cls != "ws":
+                d.text((x, y), tok, font=f, fill=T.get(cls, T["text"]))
+            x += w
+        y += lh
+    return img
+
+
+def build_share_gif(snapshots: List[Dict], prompt: str, size: int = 800) -> bytes:
+    """Square, syntax-highlighted, shareable GIF of the denoising reveal."""
+    seq, last = [], None
+    for snap in snapshots:
+        sql = (snap.get("sql_only") or "").strip()
+        if sql == last:
+            continue
+        last = sql
+        seq.append((sql, int(snap.get("step", 0) or 0), int(snap.get("total_steps", 1) or 1)))
+    if not seq:
+        seq = [("", 0, 1)]
+    rgb_frames = [render_share_frame(prompt, sql, st, tot, size=size) for (sql, st, tot) in seq]
+    # shared palette derived from the final (most colourful) frame -> clean, small GIF
+    pal = rgb_frames[-1].convert("P", palette=Image.ADAPTIVE, colors=128)
+    frames = [im.quantize(palette=pal, dither=Image.Dither.NONE) for im in rgb_frames]
+    durations = [260] * len(frames)
+    durations[0] = 700        # brief intro hold
+    durations[-1] = 2600      # hold final result so it's readable
+    bio = io.BytesIO()
+    frames[0].save(bio, format="GIF", save_all=True, append_images=frames[1:],
+                   loop=0, duration=durations, disposal=2, optimize=True)
+    bio.seek(0)
+    return bio.read()
+
+
+# -------------------------
 # Model load helper (cached)
 # -------------------------
 def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
@@ -1274,6 +1488,32 @@ def serve_gif(filename):
         return send_file(p, mimetype="image/gif", as_attachment=True, download_name=safe_name)
     except TypeError:
         return send_file(p, mimetype="image/gif", as_attachment=True, attachment_filename=safe_name)
+
+
+@app.route("/export_gif/<run_id>")
+@limiter.limit("12 per minute")
+def export_gif(run_id):
+    """On-demand: render the run's denoising frames into a square share-GIF.
+
+    Independent of --enable-gif (which gates the inline worker GIF); this builds
+    only when the user clicks Export, from the snapshots already stored.
+    """
+    run = redis_get_run(run_id)
+    if not run:
+        return jsonify({"error": "not_found", "message": "run_id not found"}), 404
+    _, snaps = redis_get_snapshot_delta(run_id, 0)
+    if not snaps:
+        return jsonify({"error": "no_frames", "message": "No animation frames available for this run."}), 400
+    prompt = (run.get("payload") or {}).get("prompt", "")
+    try:
+        gif_bytes = build_share_gif(snaps, prompt, size=800)
+    except Exception as exc:
+        return jsonify({"error": "render_failed", "message": f"GIF render failed: {exc}"}), 500
+    name = f"text2sql-diffusion-{run_id[:8]}.gif"
+    try:
+        return send_file(io.BytesIO(gif_bytes), mimetype="image/gif", as_attachment=True, download_name=name)
+    except TypeError:
+        return send_file(io.BytesIO(gif_bytes), mimetype="image/gif", as_attachment=True, attachment_filename=name)
 
 
 @app.route("/stop/<run_id>", methods=["POST"])

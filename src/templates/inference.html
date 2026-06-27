@@ -100,9 +100,9 @@
     .live-panel {
       padding: var(--space-3);
       display: grid;
-      grid-template-rows: auto auto 1fr auto;
+      grid-template-rows: auto auto auto auto;
       gap: var(--space-2);
-      min-height: 52vh;
+      align-content: start;
     }
 
     .live-header {
@@ -110,6 +110,7 @@
       align-items: center;
       justify-content: space-between;
       gap: var(--space-2);
+      min-height: 50px;
     }
 
     .title {
@@ -128,6 +129,28 @@
       display: inline-flex;
       align-items: center;
     }
+
+    .gif-btn {
+      border: 1px solid var(--color-accent);
+      background: transparent;
+      color: var(--color-accent);
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 5px 12px;
+      min-height: 30px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+      transition: background 150ms ease, color 150ms ease, opacity 150ms ease;
+    }
+
+    .gif-btn:hover { background: var(--color-accent); color: #fff; }
+    .gif-btn:disabled { opacity: 0.55; cursor: default; }
+    .gif-btn .gif-ico { font-weight: 900; font-size: 13px; }
 
     .queue-chip {
       color: var(--color-muted);
@@ -150,10 +173,11 @@
 
     .live-box {
       border: 1px solid var(--color-border);
-      border-radius: 12px;
       background: var(--color-surface-soft);
-      min-height: 300px;
-      padding: var(--space-4) var(--space-5);
+      /* fixed, viewport-aware height so the panel never resizes as the slider
+         scrubs through snapshots of different lengths */
+      height: clamp(300px, 42vh, 520px);
+      padding: var(--space-3);
       overflow: auto;
       display: flex;
       align-items: center;
@@ -192,7 +216,7 @@
 
     .tok.masked {
       display: inline-block;
-      border-radius: 5px;
+      border-radius: 3px;
       padding: 0 0.12em;
       background: linear-gradient(90deg, #c4d0e2 0%, #e0e9f6 45%, #c4d0e2 100%);
       background-size: 250% 100%;
@@ -224,7 +248,7 @@
 
     .slider-row {
       display: none;
-      gap: 6px;
+      gap: var(--space-1);
     }
 
     .slider-row.visible {
@@ -234,6 +258,14 @@
     .range {
       width: 100%;
       min-height: 44px;
+    }
+
+    .slider-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
+      min-height: 30px;
     }
 
     .slider-label {
@@ -674,13 +706,9 @@
         gap: var(--space-2);
       }
 
-      .live-panel {
-        min-height: 44vh;
-      }
-
       .live-box {
-        min-height: 200px;
-        padding: var(--space-2);
+        height: clamp(240px, 38vh, 420px);
+        padding: var(--space-3);
       }
 
       .controls-grid {
@@ -726,7 +754,12 @@
 
           <div class="slider-row" id="sliderRow">
             <input type="range" class="range" min="0" value="0" id="snapSlider" aria-label="Snapshot timeline" />
-            <div class="slider-label" id="snapSliderLabel"></div>
+            <div class="slider-foot">
+              <div class="slider-label" id="snapSliderLabel"></div>
+              <button type="button" id="exportGifBtn" class="gif-btn" hidden aria-label="Export animation as GIF">
+                <span class="gif-ico" aria-hidden="true">↓</span> GIF
+              </button>
+            </div>
           </div>
         </section>
 
@@ -834,8 +867,17 @@
         <div class="info-title">General Info</div>
         <div class="info-card">
           <strong>What is text diffusion here?</strong>
-          <div>Generation starts from masked SQL tokens and denoises over multiple steps, showing intermediate states
-            before final SQL.</div>
+          <div>A masked-diffusion language model (LLaDA / MaskGIT style). The SQL answer begins as a fixed window of
+            masked tokens; each step predicts every masked position and permanently commits the most confident ones,
+            so the query emerges in parallel instead of left-to-right. The animation shows those intermediate states.</div>
+        </div>
+        <div class="info-card">
+          <strong>Model</strong>
+          <div>Backbone: <strong>ModernBERT-base</strong> with a masked-LM head, fine-tuned LLaDA-style (continuous
+            mask ratio, 1/t-weighted ELBO) on the <strong>gretelai/synthetic_text_to_sql</strong> dataset with
+            on-the-fly augmentation (spaced / mixed-case identifiers, colloquial prompts) for robustness.</div>
+          <div>Input is your question (<strong>Prompt</strong>) plus the schema DDL (<strong>Context</strong>); output
+            is the SQL.</div>
         </div>
         <div class="info-card">
           <strong>Runtime profile</strong>
@@ -846,8 +888,8 @@
         </div>
         <div class="info-card">
           <strong>How to use</strong>
-          <div>Provide prompt + context, adjust steps if needed, then run. Higher steps increase quality but take
-            longer.</div>
+          <div>Put your question in <strong>Prompt</strong> and the table schema (e.g. a <code>CREATE TABLE …</code>)
+            in <strong>Context</strong>, then run. More denoising steps can improve quality but take longer.</div>
         </div>
         <div class="info-card">
           <strong>Contact</strong>
@@ -859,10 +901,12 @@
 
   <div class="modal-overlay" id="introModal" role="dialog" aria-modal="true" aria-labelledby="introTitle">
     <div class="modal">
-      <h2 id="introTitle">Welcome to Text Diffusion Inference</h2>
-      <p>This playground generates SQL via iterative denoising. You can observe each step from masked tokens to final
-        output.</p>
-      <p>This is an early research preview deployed on a <strong>CPU</strong>.</p>
+      <h2 id="introTitle">Text → SQL via Masked Diffusion</h2>
+      <p>This playground turns a natural-language question plus a table schema into SQL. Instead of writing left to
+        right, it starts from a fully-masked SQL window and <strong>denoises in parallel</strong> over a few steps —
+        you can watch the query resolve token by token.</p>
+      <p>Backbone: <strong>ModernBERT-base</strong>, trained LLaDA-style on synthetic text-to-SQL. Early research
+        preview running on <strong>CPU</strong>.</p>
       <p>Model size: <strong>{{ model_param_count_display }}</strong> parameters.</p>
       <div class="modal-actions">
         <button class="btn-plain" id="introDismiss">Close</button>
