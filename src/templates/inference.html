@@ -291,16 +291,19 @@
       --pct: 0%;
       --btn-base: var(--color-accent);
       width: 100%;
-      min-height: 50px;
+      height: 62px;
       border: 0;
-      padding: 12px 16px;
+      padding: 10px 16px 12px;
       background: var(--btn-base);
       color: #fff;
-      font-size: 15px;
-      font-weight: 700;
       cursor: pointer;
       position: relative;
       overflow: hidden;
+      display: grid;
+      align-content: center;
+      justify-items: center;
+      gap: 2px;
+      text-align: center;
     }
 
     .run-btn:disabled {
@@ -328,9 +331,51 @@
           color-mix(in srgb, #000 25%, var(--btn-base)) var(--pct));
     }
 
+    .run-btn[data-mode="queued"],
+    .run-btn[data-mode="running"],
+    .run-btn[data-mode="finalizing"] {
+      background:
+        linear-gradient(110deg,
+          transparent 0%,
+          transparent 32%,
+          rgba(255, 255, 255, 0.18) 42%,
+          transparent 52%,
+          transparent 100%),
+        var(--btn-base);
+      background-size: 240% 100%, auto;
+      animation: btn-shimmer 1.35s linear infinite;
+    }
+
+    .run-btn[data-mode="idle"] {
+      animation: none;
+    }
+
     .run-btn-label {
       position: relative;
       z-index: 2;
+      display: block;
+      max-width: 100%;
+      font-size: 15px;
+      line-height: 1.15;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .run-btn-sub {
+      position: relative;
+      z-index: 2;
+      display: block;
+      max-width: 100%;
+      min-height: 15px;
+      font-size: 11px;
+      line-height: 1.2;
+      font-weight: 700;
+      opacity: 0.82;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     /* Thin bottom stripe for running/queued/finalizing */
@@ -374,6 +419,11 @@
       100% {
         transform: translateX(320%);
       }
+    }
+
+    @keyframes btn-shimmer {
+      0% { background-position: 180% 0, 0 0; }
+      100% { background-position: -80% 0, 0 0; }
     }
 
     .inputs-panel {
@@ -717,6 +767,18 @@
       #liveTokenPre {
         text-align: left;
       }
+
+      .action-row {
+        min-height: calc(62px + env(safe-area-inset-bottom, 0px));
+      }
+
+      .run-btn {
+        height: 62px;
+      }
+
+      .run-btn-label {
+        font-size: 14px;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -764,6 +826,7 @@
           <div class="action-row" id="actionRow">
             <button id="runBtn" class="run-btn" type="submit" form="runForm" data-mode="idle" data-progress="hidden">
               <span id="runBtnLabel" class="run-btn-label">Run Generation</span>
+              <span id="runBtnSub" class="run-btn-sub"></span>
               <span class="btn-progress-track"><span class="btn-progress-bar" id="runBtnProgress"></span></span>
             </button>
           </div>

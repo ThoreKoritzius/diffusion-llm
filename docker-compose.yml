@@ -43,7 +43,6 @@ services:
       - MAX_SQL_LEN=${MAX_SQL_LEN:-128}
       - RUN_TTL_SECONDS=${RUN_TTL_SECONDS:-900}
       - START_RUN_RATE_LIMIT=${START_RUN_RATE_LIMIT:-30 per minute; 300 per hour}
-      - EXPORT_GIF_RATE_LIMIT=${EXPORT_GIF_RATE_LIMIT:-3 per minute; 20 per hour}
       - ADAPTIVE_RATE_LIMITS=${ADAPTIVE_RATE_LIMITS:-true}
       - IDLE_STARTS_PER_MINUTE=${IDLE_STARTS_PER_MINUTE:-12}
       - NORMAL_STARTS_PER_MINUTE=${NORMAL_STARTS_PER_MINUTE:-6}
@@ -55,7 +54,6 @@ services:
       - RESULT_CACHE_VERSION=${RESULT_CACHE_VERSION:-v1}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
-      - ./generated_gifs:/app/generated_gifs
     restart: unless-stopped
     mem_limit: ${WEB_MEM_LIMIT:-2g}
     cpus: ${WEB_CPUS:-1.0}
@@ -79,7 +77,6 @@ services:
       - RUN_TTL_SECONDS=${RUN_TTL_SECONDS:-900}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
-      - ./generated_gifs:/app/generated_gifs
     restart: unless-stopped
     mem_limit: ${WORKER_MEM_LIMIT:-4g}
     cpus: ${WORKER_CPUS:-3.0}

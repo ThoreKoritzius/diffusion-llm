@@ -28,6 +28,7 @@ let queueEtaSeconds = null;
 let queueEtaSyncedAtMs = 0;
 let queuePositionCurrent = null;
 let queueDemandCurrent = '';
+let queueZeroSinceMs = 0;
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -35,6 +36,7 @@ const stepBox = document.getElementById('stepBox');
 const statusBox = document.getElementById('status');
 const runBtn = document.getElementById('runBtn');
 const runBtnLabel = document.getElementById('runBtnLabel');
+const runBtnSub = document.getElementById('runBtnSub');
 const runBtnProgress = document.getElementById('runBtnProgress');
 const runForm = document.getElementById('runForm');
 const sliderRow = document.getElementById('sliderRow');
@@ -76,6 +78,11 @@ function setQueueChip(text, state = '') {
   if (!queueChip) return;
   queueChip.textContent = text || '';
   queueChip.dataset.state = state;
+}
+
+function setRunButtonText(primary, secondary = '') {
+  runBtnLabel.textContent = primary || '';
+  if (runBtnSub) runBtnSub.textContent = secondary || '';
 }
 
 function cloneSnapshots(snaps) {
@@ -129,6 +136,10 @@ function formatCountdown(seconds) {
   return `${hours}h ${String(remMins).padStart(2, '0')}m`;
 }
 
+function formatElapsed(ms) {
+  return formatCountdown(Math.max(0, Math.floor(ms / 1000)));
+}
+
 function parseRetryAfter(resp, bodyJson = null, fallbackSeconds = 5) {
   const bodyRetry = bodyJson && Number(bodyJson.retry_after);
   if (Number.isFinite(bodyRetry) && bodyRetry > 0) return Math.ceil(bodyRetry);
@@ -157,7 +168,8 @@ function renderQueuedCountdown() {
   const remaining = getQueueRemainingSeconds();
 
   if (!Number.isFinite(remaining)) {
-    runBtnLabel.textContent = `Queued ${posText} • ~estimating`;
+    queueZeroSinceMs = 0;
+    setRunButtonText(`Queued ${posText}`, 'Estimating wait');
     setQueueChip(`Queued ${posText}`, 'queued');
     setStatus(`Queued ${posText} • ~estimating`);
     setProgressIndeterminate();
@@ -165,16 +177,19 @@ function renderQueuedCountdown() {
   }
 
   if (remaining <= 0) {
-    runBtnLabel.textContent = 'Starting...';
+    if (!queueZeroSinceMs) queueZeroSinceMs = Date.now();
+    const elapsed = formatElapsed(Date.now() - queueZeroSinceMs);
+    setRunButtonText('Preparing worker', `Queued ${posText} • waiting ${elapsed}`);
     setQueueChip('', '');
-    setStatus(`Queued ${posText} • starting`);
+    setStatus(`Queued ${posText} • worker is preparing`);
     setProgressIndeterminate();
     return;
   }
 
+  queueZeroSinceMs = 0;
   const countdownText = formatCountdown(remaining);
   const demand = queueDemandCurrent && queueDemandCurrent !== 'low' ? ` • ${queueDemandCurrent}` : '';
-  runBtnLabel.textContent = `Queued ${posText} • ${countdownText}`;
+  setRunButtonText(`Queued ${posText}`, `First frame in ~${countdownText}${demand}`);
   setQueueChip(`Queued ${posText} • ${countdownText}${demand}`, 'queued');
   setStatus(`Queued ${posText} • ${countdownText}${demand}`);
 
@@ -236,7 +251,8 @@ function setUiState(mode, data = {}) {
   if (mode === UI_MODES.IDLE) {
     stopQueueCountdown();
     runBtn.disabled = false;
-    runBtnLabel.textContent = 'Run Generation';
+    queueZeroSinceMs = 0;
+    setRunButtonText('Run Generation', '');
     setProgressHidden();
     setQueueChip('', '');
     return;
@@ -252,11 +268,12 @@ function setUiState(mode, data = {}) {
     stopQueueCountdown();
     runBtn.disabled = true;
     const stepLabel = data.stepLabel || 'Running';
-    runBtnLabel.textContent = `Running • ${stepLabel}`;
+    const isStep = Number.isFinite(data.progressPct);
+    setRunButtonText(isStep ? stepLabel : 'Working', isStep ? 'Rendering diffusion steps' : stepLabel);
     setQueueChip('Running', 'running');
 
-    if (Number.isFinite(data.progressPct)) {
-      setProgressValue(Math.max(5, 100 - data.progressPct));
+    if (isStep) {
+      setProgressValue(Math.max(5, data.progressPct));
     } else {
       setProgressIndeterminate();
     }
@@ -266,7 +283,7 @@ function setUiState(mode, data = {}) {
   if (mode === UI_MODES.FINALIZING) {
     stopQueueCountdown();
     runBtn.disabled = true;
-    runBtnLabel.textContent = 'Finalizing...';
+    setRunButtonText('Finalizing', 'Preparing final output');
     setQueueChip('Finalizing', 'running');
     setProgressIndeterminate();
     return;
@@ -275,7 +292,7 @@ function setUiState(mode, data = {}) {
   if (mode === UI_MODES.RATE_LIMITED) {
     stopQueueCountdown();
     runBtn.disabled = true;
-    runBtnLabel.textContent = `Rate limited • retry in ${data.remaining || 0}s`;
+    setRunButtonText('Rate limited', `Retry in ${data.remaining || 0}s`);
     setQueueChip('Rate limited', 'rate_limited');
     setProgressValue(data.progressPct || 100);
     return;
@@ -284,7 +301,7 @@ function setUiState(mode, data = {}) {
   if (mode === UI_MODES.ERROR) {
     stopQueueCountdown();
     runBtn.disabled = true;
-    runBtnLabel.textContent = 'Run Failed';
+    setRunButtonText('Run Failed', 'Check status below');
     setQueueChip('Error', 'rate_limited');
     setProgressHidden();
   }
@@ -337,6 +354,7 @@ function resetRunState() {
   queueEtaSyncedAtMs = 0;
   queuePositionCurrent = null;
   queueDemandCurrent = '';
+  queueZeroSinceMs = 0;
 
   sliderRow.classList.remove('visible');
   setUiState(UI_MODES.IDLE);
@@ -534,6 +552,277 @@ function snapshotText(snap) {
   return normalizeSQLDisplay(snap.sql_only || extractSQL(snap.text || ''));
 }
 
+const GIF_SIZE = 640;
+const GIF_PALETTE = [
+  [255, 255, 255], [246, 247, 251], [239, 243, 250], [215, 222, 234],
+  [15, 23, 42], [85, 96, 113], [31, 111, 235], [26, 127, 75],
+  [124, 58, 237], [180, 35, 63], [167, 111, 29], [196, 208, 226],
+  [224, 233, 246], [207, 224, 255], [233, 240, 255], [232, 246, 237],
+];
+
+while (GIF_PALETTE.length < 256) GIF_PALETTE.push([0, 0, 0]);
+
+function gifNearestPaletteIndex(r, g, b, a) {
+  if (a < 128) return 0;
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < 16; i += 1) {
+    const p = GIF_PALETTE[i];
+    const dr = r - p[0];
+    const dg = g - p[1];
+    const db = b - p[2];
+    const dist = dr * dr + dg * dg + db * db;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function gifBytesFromCanvas(ctx, width, height) {
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const indexed = new Uint8Array(width * height);
+  for (let i = 0, j = 0; i < rgba.length; i += 4, j += 1) {
+    indexed[j] = gifNearestPaletteIndex(rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
+  }
+  return indexed;
+}
+
+function pushWordWrapped(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width <= maxWidth || !line) {
+      line = next;
+    } else {
+      lines.push(line);
+      line = word;
+      if (lines.length >= maxLines) break;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  lines.forEach((row, idx) => ctx.fillText(row, x, y + idx * lineHeight));
+  return y + lines.length * lineHeight;
+}
+
+function gifFormatSqlLines(sql, ctx, maxWidth, maxLines) {
+  const formatted = formatSqlForDisplay(String(sql || '').trim() || '____');
+  const rawLines = formatted.split('\n');
+  const lines = [];
+  for (const raw of rawLines) {
+    let line = '';
+    for (const part of raw.split(/(\s+)/)) {
+      const next = line + part;
+      if (ctx.measureText(next).width <= maxWidth || !line) {
+        line = next;
+      } else {
+        lines.push(line.trimEnd());
+        line = part.trimStart();
+        if (lines.length >= maxLines) return lines;
+      }
+    }
+    lines.push(line.trimEnd());
+    if (lines.length >= maxLines) return lines;
+  }
+  return lines;
+}
+
+function renderGifFrame(ctx, snap, prompt, size = GIF_SIZE) {
+  const pad = 44;
+  const innerW = size - pad * 2;
+  const sql = isTerminalSnapshot(snap) ? sanitizeFinalSql(snapshotText(snap)) : snapshotText(snap);
+  const step = Number(snap.step) || 0;
+  const total = Math.max(1, Number(snap.total_steps) || step || 1);
+  const frac = Math.max(0, Math.min(1, total > 0 ? step / total : 0));
+
+  ctx.fillStyle = '#f6f7fb';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(pad - 16, pad - 16, innerW + 32, size - pad * 2 + 32);
+  ctx.strokeStyle = '#d7deea';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(pad - 16, pad - 16, innerW + 32, size - pad * 2 + 32);
+
+  ctx.fillStyle = '#1f6feb';
+  ctx.font = '700 28px system-ui, -apple-system, Segoe UI, sans-serif';
+  ctx.fillText('Text to SQL Diffusion', pad, pad + 10);
+
+  ctx.fillStyle = '#556071';
+  ctx.font = '500 19px system-ui, -apple-system, Segoe UI, sans-serif';
+  pushWordWrapped(ctx, prompt || 'SQL generation', pad, pad + 54, innerW, 26, 3);
+
+  const barY = 180;
+  ctx.fillStyle = '#eff3fa';
+  ctx.fillRect(pad, barY, innerW, 14);
+  ctx.fillStyle = '#1f6feb';
+  ctx.fillRect(pad, barY, Math.max(14, innerW * frac), 14);
+  ctx.fillStyle = '#556071';
+  ctx.font = '700 18px system-ui, -apple-system, Segoe UI, sans-serif';
+  ctx.fillText(frac >= 1 ? 'done' : `denoising - step ${step}/${total}`, pad, barY + 42);
+
+  ctx.font = '700 26px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+  const lines = gifFormatSqlLines(sql, ctx, innerW, 13);
+  let y = 280;
+  const lineH = 38;
+  for (const line of lines) {
+    let x = pad;
+    for (const tok of tokenizeSql(line)) {
+      const txt = tok || '';
+      const w = ctx.measureText(txt).width;
+      if (isMaskToken(txt)) {
+        ctx.fillStyle = '#c4d0e2';
+        ctx.fillRect(x, y - 24, Math.max(16, w), 28);
+      } else {
+        const cls = classifyToken(txt);
+        if (cls.includes('keyword')) ctx.fillStyle = '#1f6feb';
+        else if (cls.includes('fn')) ctx.fillStyle = '#7c3aed';
+        else if (cls.includes('str')) ctx.fillStyle = '#1a7f4b';
+        else if (cls.includes('punct')) ctx.fillStyle = '#556071';
+        else ctx.fillStyle = '#0f172a';
+        ctx.fillText(txt, x, y);
+      }
+      x += w;
+    }
+    y += lineH;
+  }
+}
+
+function gifWriteShort(out, value) {
+  out.push(value & 255, (value >> 8) & 255);
+}
+
+function gifWriteSubBlocks(out, bytes) {
+  for (let i = 0; i < bytes.length; i += 255) {
+    const chunk = bytes.slice(i, i + 255);
+    out.push(chunk.length, ...chunk);
+  }
+  out.push(0);
+}
+
+function gifLzwEncode(indices, minCodeSize = 8) {
+  const clear = 1 << minCodeSize;
+  const end = clear + 1;
+  let codeSize = minCodeSize + 1;
+  let nextCode = end + 1;
+  let bitBuf = 0;
+  let bitLen = 0;
+  const bytes = [];
+
+  function writeCode(code) {
+    bitBuf |= code << bitLen;
+    bitLen += codeSize;
+    while (bitLen >= 8) {
+      bytes.push(bitBuf & 255);
+      bitBuf >>= 8;
+      bitLen -= 8;
+    }
+  }
+
+  const dict = new Map();
+  for (let i = 0; i < clear; i += 1) dict.set(String(i), i);
+  writeCode(clear);
+
+  let phrase = String(indices[0]);
+  for (let i = 1; i < indices.length; i += 1) {
+    const k = indices[i];
+    const combo = `${phrase},${k}`;
+    if (dict.has(combo)) {
+      phrase = combo;
+    } else {
+      writeCode(dict.get(phrase));
+      if (nextCode < 2048) {
+        dict.set(combo, nextCode);
+        nextCode += 1;
+        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize += 1;
+      } else {
+        writeCode(clear);
+        dict.clear();
+        for (let j = 0; j < clear; j += 1) dict.set(String(j), j);
+        codeSize = minCodeSize + 1;
+        nextCode = end + 1;
+      }
+      phrase = String(k);
+    }
+  }
+  writeCode(dict.get(phrase));
+  writeCode(end);
+  if (bitLen > 0) bytes.push(bitBuf & 255);
+  return bytes;
+}
+
+function buildGifBlob(frames, prompt) {
+  const canvas = document.createElement('canvas');
+  canvas.width = GIF_SIZE;
+  canvas.height = GIF_SIZE;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const out = [];
+  'GIF89a'.split('').forEach((ch) => out.push(ch.charCodeAt(0)));
+  gifWriteShort(out, GIF_SIZE);
+  gifWriteShort(out, GIF_SIZE);
+  out.push(0xf7, 0, 0);
+  GIF_PALETTE.forEach((rgb) => out.push(rgb[0], rgb[1], rgb[2]));
+  out.push(0x21, 0xff, 0x0b);
+  'NETSCAPE2.0'.split('').forEach((ch) => out.push(ch.charCodeAt(0)));
+  out.push(0x03, 0x01, 0x00, 0x00, 0x00);
+
+  frames.forEach((snap, idx) => {
+    renderGifFrame(ctx, snap, prompt, GIF_SIZE);
+    const delay = idx === 0 ? 70 : (idx === frames.length - 1 ? 220 : 26);
+    out.push(0x21, 0xf9, 0x04, 0x00);
+    gifWriteShort(out, delay);
+    out.push(0x00, 0x00);
+    out.push(0x2c);
+    gifWriteShort(out, 0);
+    gifWriteShort(out, 0);
+    gifWriteShort(out, GIF_SIZE);
+    gifWriteShort(out, GIF_SIZE);
+    out.push(0x00, 0x08);
+    gifWriteSubBlocks(out, gifLzwEncode(gifBytesFromCanvas(ctx, GIF_SIZE, GIF_SIZE), 8));
+  });
+  out.push(0x3b);
+  return new Blob([new Uint8Array(out)], { type: 'image/gif' });
+}
+
+function selectGifFrames(frames, maxFrames = 28) {
+  if (frames.length <= maxFrames) return frames;
+  const out = [];
+  const lastIdx = frames.length - 1;
+  for (let i = 0; i < maxFrames; i += 1) {
+    const idx = Math.round((i / (maxFrames - 1)) * lastIdx);
+    if (!out.length || out[out.length - 1] !== frames[idx]) out.push(frames[idx]);
+  }
+  return out;
+}
+
+function exportGifInBrowser() {
+  const frames = cloneSnapshots(historySnapshots);
+  if (terminalSqlText) {
+    const last = frames[frames.length - 1] || {};
+    if (!isTerminalSnapshot(last) || sanitizeFinalSql(snapshotText(last)) !== terminalSqlText) {
+      frames.push({
+        step: Number(last.step) || Number(last.total_steps) || frames.length,
+        total_steps: Number(last.total_steps) || Number(last.step) || frames.length,
+        sql_only: terminalSqlText,
+        text: `<SQL>${terminalSqlText}</SQL>`,
+      });
+    }
+  }
+  if (!frames.length) throw new Error('No animation frames available.');
+  const blob = buildGifBlob(selectGifFrames(frames), promptInput ? promptInput.value : '');
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'text2sql-diffusion.gif';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return blob.size;
+}
+
 function isTerminalSnapshot(snap) {
   if (!snap) return false;
   const step = Number(snap.step);
@@ -717,8 +1006,9 @@ function parseStepProgress(statusMsg) {
 
 function runningStatusLabel(statusMsg) {
   const msg = String(statusMsg || '').toLowerCase();
-  if (msg.includes('loading model') || msg.includes('loading model/tokenizer')) return 'Loading model';
-  if (msg.includes('sql window') || msg.includes('starting denoising')) return 'Preparing decode';
+  if (msg.includes('loading model') || msg.includes('loading model/tokenizer')) return 'Loading model and tokenizer';
+  if (msg.includes('sql window')) return 'Preparing SQL window';
+  if (msg.includes('starting denoising')) return 'Starting denoising';
   if (msg.includes('building gif')) return 'Building GIF';
   return 'processing';
 }
@@ -808,10 +1098,10 @@ async function pollRunState(id) {
 
     if (data.state === 'queued') {
       setQueuedUi(data.queue_position, data.eta_seconds, data.eta_confidence, data.demand);
-      pollDelayMs = 500;
+      pollDelayMs = 350;
     } else if (data.state === 'running') {
       updateRunningUi(data.status || '');
-      pollDelayMs = 250;
+      pollDelayMs = data.snapshot_count > 0 ? 250 : 350;
     } else if (data.state === 'stopping') {
       setUiState(UI_MODES.RUNNING, { stepLabel: 'stopping' });
       setStatus('Stopping...');
@@ -1176,27 +1466,21 @@ if (introModal && !sessionStorage.getItem('diffusion_intro_seen')) {
 
 if (exportGifBtn) {
   exportGifBtn.addEventListener('click', async () => {
-    const id = exportableRunId || runId;
-    if (!id || exportGifBtn.disabled) return;
+    if (exportGifBtn.disabled) return;
     const label = exportGifBtn.innerHTML;
     exportGifBtn.disabled = true;
-    exportGifBtn.textContent = 'Preparing GIF…';
+    exportGifBtn.textContent = 'Building GIF...';
     const resetLabel = () => {
       exportGifBtn.innerHTML = label;
       exportGifBtn.disabled = false;
     };
     try {
-      const url = `/export_gif/${encodeURIComponent(id)}`;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'text2sql-diffusion.gif';
-      a.rel = 'noopener';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(resetLabel, 1800);
+      const size = exportGifInBrowser();
+      setStatus(`GIF ready (${Math.max(1, Math.round(size / 1024))} KB).`);
+      setTimeout(resetLabel, 800);
     } catch (err) {
       exportGifBtn.textContent = 'Export failed';
+      setStatus(err && err.message ? err.message : 'GIF export failed.');
       setTimeout(() => { exportGifBtn.innerHTML = label; }, 1600);
       exportGifBtn.disabled = false;
     }
