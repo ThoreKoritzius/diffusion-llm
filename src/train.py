@@ -16,9 +16,13 @@ Key design (vs. the previous version):
   both clean and augmented inputs, not just masked-LM loss.
 """
 
+import contextlib
 import os
 import random
 import re
+
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
 
 import torch
 import torch.nn.functional as F
@@ -38,7 +42,8 @@ from denoising import denoise_steps
 # 1. Hyperparameters and Config
 MODEL_NAME = "answerdotai/ModernBERT-base"
 NUM_EPOCHS = 10
-BATCH_SIZE = 32
+BATCH_SIZE = 128             # safe on a 96 GB GH200 for ModernBERT-base @ seq 512
+LEARNING_RATE = 1e-4         # ~sqrt-scaled from 3e-5@bs32 for the 4x larger batch
 MAX_LEN = 512
 SQL_WINDOW = 128
 TRAIN_SIZE = 100_000
@@ -46,12 +51,34 @@ VAL_SIZE = 500
 T_EPS = 1e-3          # lower bound for mask ratio t
 FILTER_JOINS = False
 
+# Throughput knobs. The collator tokenizes + augments per-example in Python, so
+# without worker processes the GH200 sits idle waiting on the CPU.
+DATALOADER_WORKERS = int(os.environ.get("DATALOADER_WORKERS", "12"))
+# Off by default: inductor mis-handles ModernBERT's flash-attn unpadding under
+# bf16 (Float/BFloat16 dtype mismatch). flash-attn already gives the big speedup.
+USE_TORCH_COMPILE = os.environ.get("USE_TORCH_COMPILE", "0") == "1"
+# >0 caps training to N steps (overrides epochs) — used for the pre-run smoke test.
+MAX_TRAIN_STEPS = int(os.environ.get("MAX_TRAIN_STEPS", "0"))
+EVAL_STEPS = int(os.environ.get("EVAL_STEPS", "500"))
+
 GEN_EVAL_SIZE = 32    # examples for generation-based exact-match eval
 GEN_EVAL_STEPS = 24   # denoising steps during eval
 
 OUTPUT_DIR = "diffusion-sql-modernbert"
 
+# Hopper perf: TF32 matmuls + avoid the fast-tokenizer fork warning/deadlock
+# once dataloader workers are forking the module-level tokenizer.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 os.environ["WANDB_PROJECT"] = "sql-diffusion"
+# Don't let a missing API key block the run on a rented box: fall back to
+# offline logging (sync later with `wandb sync`) instead of hanging on a prompt.
+if not os.environ.get("WANDB_API_KEY") and not os.environ.get("WANDB_MODE"):
+    os.environ["WANDB_MODE"] = "offline"
+    print("[wandb] no WANDB_API_KEY found -> logging offline")
 wandb.init(project="sql-diffusion", name="modernbert-llada-aug", config={
     "model": MODEL_NAME,
     "epochs": NUM_EPOCHS,
@@ -63,6 +90,9 @@ wandb.init(project="sql-diffusion", name="modernbert-llada-aug", config={
     "t_eps": T_EPS,
     "filter_joins": FILTER_JOINS,
     "augmentation": True,
+    "learning_rate": LEARNING_RATE,
+    "dataloader_workers": DATALOADER_WORKERS,
+    "torch_compile": USE_TORCH_COMPILE,
 })
 
 
@@ -206,6 +236,12 @@ def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL
     device = next(model.parameters()).device
     rng = random.Random(0)
     hits = 0
+    # Match training precision: weights are fp32 but flash-attn needs fp16/bf16,
+    # so run the denoising forwards under bf16 autocast on CUDA.
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if device.type == "cuda" else contextlib.nullcontext()
+    )
     for ex in raw_examples:
         p, c, s = ex["sql_prompt"], ex.get("sql_context", ""), ex.get("sql", "")
         if transform is not None:
@@ -215,11 +251,12 @@ def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL
         attn = torch.tensor([enc["attention_mask"]], dtype=torch.long, device=device)
         lo, hi = enc["sql_start"], enc["sql_end"]
         ids[0, lo:hi] = MASK_ID
-        for _ in denoise_steps(
-            model, ids, attn, list(range(lo, hi)), MASK_ID,
-            n_steps=n_steps, forbid_token_ids=list(TAG_IDS.values()),
-        ):
-            pass
+        with autocast_ctx:
+            for _ in denoise_steps(
+                model, ids, attn, list(range(lo, hi)), MASK_ID,
+                n_steps=n_steps, forbid_token_ids=list(TAG_IDS.values()),
+            ):
+                pass
         out_ids = [tid for tid in ids[0, lo:hi].tolist() if tid not in (PAD_ID, MASK_ID)]
         pred_sql = tokenizer.decode(out_ids, skip_special_tokens=True)
         if normalize_sql(pred_sql) == normalize_sql(s):
@@ -247,19 +284,27 @@ training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
     num_train_epochs=NUM_EPOCHS,
+    max_steps=MAX_TRAIN_STEPS if MAX_TRAIN_STEPS > 0 else -1,
     per_device_train_batch_size=BATCH_SIZE,
-    learning_rate=3e-5,
+    per_device_eval_batch_size=BATCH_SIZE,
+    learning_rate=LEARNING_RATE,
     warmup_ratio=0.05,
     lr_scheduler_type="cosine",
     bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+    # Keep the GH200 fed: parallel collation + pinned, prefetched, fixed-shape batches.
+    dataloader_num_workers=DATALOADER_WORKERS,
+    dataloader_pin_memory=True,
+    dataloader_persistent_workers=DATALOADER_WORKERS > 0,
+    dataloader_drop_last=True,            # constant batch shape -> stable torch.compile
+    torch_compile=USE_TORCH_COMPILE,
     save_strategy="epoch",
-    save_total_limit=3,
+    save_total_limit=2,
     logging_steps=10,
     remove_unused_columns=False,
     logging_strategy="steps",
     report_to=["wandb"],
     eval_strategy="steps",
-    eval_steps=500,
+    eval_steps=EVAL_STEPS,
 )
 
 
