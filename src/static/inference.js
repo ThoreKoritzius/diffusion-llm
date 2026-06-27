@@ -15,6 +15,7 @@ let historySnapshots = [];
 let historyByStep = new Map();
 let pendingSnapshots = [];
 let donePayload = null;
+let exportableRunId = null;
 let lastSnapshotCount = 0;
 let lastStatusMsg = "";
 let lastCompletedSnapshots = [];
@@ -39,6 +40,7 @@ const sliderRow = document.getElementById('sliderRow');
 const snapSlider = document.getElementById('snapSlider');
 const snapSliderLabel = document.getElementById('snapSliderLabel');
 const queueChip = document.getElementById('queueChip');
+const exportGifBtn = document.getElementById('exportGifBtn');
 const liveTokenPre = document.getElementById('liveTokenPre');
 const promptInput = document.getElementById('prompt');
 const contextInput = document.getElementById('context');
@@ -290,6 +292,8 @@ function resetRunState() {
   stopQueueCountdown();
 
   runId = null;
+  exportableRunId = null;
+  if (exportGifBtn) exportGifBtn.hidden = true;
   runSessionId += 1;
   terminalStateReached = false;
   terminalSqlText = '';
@@ -664,6 +668,11 @@ function finishRun(payload) {
     }
   } else if (terminalSqlText) {
     updateTokenDisplay(terminalSqlText);
+  }
+
+  if (exportGifBtn && historySnapshots.length > 0 && runId) {
+    exportableRunId = runId;
+    exportGifBtn.hidden = false;
   }
 
   setUiState(UI_MODES.IDLE);
@@ -1119,6 +1128,35 @@ if (introStart) {
 
 if (introModal && !sessionStorage.getItem('diffusion_intro_seen')) {
   introModal.classList.add('visible');
+}
+
+if (exportGifBtn) {
+  exportGifBtn.addEventListener('click', async () => {
+    const id = exportableRunId || runId;
+    if (!id || exportGifBtn.disabled) return;
+    const label = exportGifBtn.innerHTML;
+    exportGifBtn.disabled = true;
+    exportGifBtn.textContent = 'Building GIF…';
+    try {
+      const res = await fetch(`/export_gif/${id}`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'text2sql-diffusion.gif';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      exportGifBtn.innerHTML = label;
+    } catch (err) {
+      exportGifBtn.textContent = 'Export failed';
+      setTimeout(() => { exportGifBtn.innerHTML = label; }, 1600);
+    } finally {
+      exportGifBtn.disabled = false;
+    }
+  });
 }
 
 fitLiveFont();
