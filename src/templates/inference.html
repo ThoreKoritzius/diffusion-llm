@@ -776,7 +776,7 @@
                   <span class="char-count" id="promptCount"></span>
                 </div>
                 <textarea name="prompt" id="prompt" maxlength="{{ max_prompt_chars }}"
-                  placeholder="e.g. how many planes are of name a380?">{{ prompt_prefill }}</textarea>
+                  placeholder="e.g. which pirate found the most treasure?">{{ prompt_prefill }}</textarea>
               </div>
 
               <div class="field-wrap">
@@ -819,7 +819,7 @@
                         <label class="field-label" for="sql_len">SQL length</label>
                         <span class="ctrl-val" id="sqlLenVal">{{ default_sql_len }}</span>
                       </div>
-                      <input class="ctrl-range" type="range" name="sql_len" id="sql_len" min="1" max="{{ max_sql_len }}" step="1"
+                      <input class="ctrl-range" type="range" name="sql_len" id="sql_len" min="8" max="{{ max_sql_len }}" step="8"
                         value="{{ default_sql_len }}" />
                     </div>
 

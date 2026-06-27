@@ -86,9 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=int, default=env_int("REQUEST_TIMEOUT_SECONDS", 60))
     parser.add_argument("--max-prompt-chars", type=int, default=env_int("MAX_PROMPT_CHARS", 1000))
     parser.add_argument("--max-context-chars", type=int, default=env_int("MAX_CONTEXT_CHARS", 8000))
-    parser.add_argument("--max-steps", type=int, default=env_int("MAX_STEPS", 20))
-    parser.add_argument("--max-max-len", type=int, default=env_int("MAX_MAX_LEN", 384))
-    parser.add_argument("--max-sql-len", type=int, default=env_int("MAX_SQL_LEN", 96))
+    parser.add_argument("--max-steps", type=int, default=env_int("MAX_STEPS", 48))
+    parser.add_argument("--max-max-len", type=int, default=env_int("MAX_MAX_LEN", 512))
+    parser.add_argument("--max-sql-len", type=int, default=env_int("MAX_SQL_LEN", 128))
     parser.add_argument("--enable-gif", action="store_true", help="Enable GIF generation for runs")
     parser.add_argument("--run-ttl-seconds", type=int, default=env_int("RUN_TTL_SECONDS", 900))
     parser.add_argument("--worker", action="store_true", help="Run worker loop instead of web server")
@@ -1426,8 +1426,8 @@ def healthz():
 
 @app.route("/")
 def index():
-    default_prompt = "how many planes are of name 747?"
-    default_context = "CREATE TABLE planes (id INT, name TEXT)"
+    default_prompt = "which pirate found the most treasure?"
+    default_context = "CREATE TABLE treasure_finds (pirate TEXT, coins INT, island TEXT)"
     model_info = get_model_info(DEFAULT_MODEL_DIR)
     effective_dtype = resolve_model_dtype(get_inference_device())[1]
     static_js_path = os.path.join(os.path.dirname(__file__), "static", "inference.js")
@@ -1442,9 +1442,9 @@ def index():
         model_dir=DEFAULT_MODEL_DIR or "",
         max_model_len=MAX_MAX_LEN,
         max_steps=MAX_STEPS,
-        default_steps=min(20, MAX_STEPS),
+        default_steps=min(24, MAX_STEPS),
         max_sql_len=MAX_SQL_LEN,
-        default_sql_len=max(1, min(96, MAX_SQL_LEN)),
+        default_sql_len=max(1, min(128, MAX_SQL_LEN)),
         max_prompt_chars=MAX_PROMPT_CHARS,
         max_context_chars=MAX_CONTEXT_CHARS,
         model_param_count=model_info.get("param_count"),
