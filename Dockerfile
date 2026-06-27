@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
     TORCH_NUM_THREADS=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
