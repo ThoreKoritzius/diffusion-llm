@@ -32,6 +32,12 @@ services:
       - TORCH_INTEROP_THREADS=${TORCH_INTEROP_THREADS:-1}
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-3}
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-3}
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-onnx}
+      - ONNX_CACHE_DIR=${ONNX_CACHE_DIR:-/app/onnx_cache}
+      - ONNX_OPSET=${ONNX_OPSET:-17}
+      - ONNX_GRAPH_OPT_LEVEL=${ONNX_GRAPH_OPT_LEVEL:-all}
+      - ONNX_INTRA_OP_THREADS=${ONNX_INTRA_OP_THREADS:-3}
+      - ONNX_INTER_OP_THREADS=${ONNX_INTER_OP_THREADS:-1}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - ALLOW_FAKE_REDIS=${ALLOW_FAKE_REDIS:-false}
       - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-1}
@@ -55,6 +61,7 @@ services:
       - RESULT_CACHE_VERSION=${RESULT_CACHE_VERSION:-v1}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
+      - onnx_cache:/app/onnx_cache
     restart: unless-stopped
     mem_limit: ${WEB_MEM_LIMIT:-2g}
     cpus: ${WEB_CPUS:-1.0}
@@ -72,17 +79,27 @@ services:
       - TORCH_INTEROP_THREADS=${TORCH_INTEROP_THREADS:-1}
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-3}
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-3}
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-onnx}
+      - ONNX_CACHE_DIR=${ONNX_CACHE_DIR:-/app/onnx_cache}
+      - ONNX_OPSET=${ONNX_OPSET:-17}
+      - ONNX_GRAPH_OPT_LEVEL=${ONNX_GRAPH_OPT_LEVEL:-all}
+      - ONNX_INTRA_OP_THREADS=${ONNX_INTRA_OP_THREADS:-3}
+      - ONNX_INTER_OP_THREADS=${ONNX_INTER_OP_THREADS:-1}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - ALLOW_FAKE_REDIS=${ALLOW_FAKE_REDIS:-false}
       - PRELOAD_MODEL=${PRELOAD_MODEL:-true}
+      - PRELOAD_WARMUP_FORWARD=${PRELOAD_WARMUP_FORWARD:-true}
+      - WARMUP_SEQUENCE_LENGTHS=${WARMUP_SEQUENCE_LENGTHS:-64,256}
       - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-1}
       - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-60}
       - RUN_TTL_SECONDS=${RUN_TTL_SECONDS:-900}
     volumes:
       - ${MODEL_DIR:-/opt/diffusion/model}:/models/model:ro
+      - onnx_cache:/app/onnx_cache
     restart: unless-stopped
     mem_limit: ${WORKER_MEM_LIMIT:-4g}
     cpus: ${WORKER_CPUS:-3.0}
 
 volumes:
   redis_data:
+  onnx_cache:

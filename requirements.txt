@@ -2,6 +2,8 @@ Flask
 Pillow
 numpy
 torch
+onnx
+onnxruntime
 transformers>=4.48.0
 sentencepiece
 tiktoken

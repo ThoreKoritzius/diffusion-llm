@@ -18,7 +18,7 @@ def cosine_masked_count(n_total: int, step: int, total_steps: int) -> int:
     return int(math.floor(n_total * math.cos(math.pi / 2 * (step + 1) / total_steps)))
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def denoise_steps(
     model,
     current_ids: torch.Tensor,
@@ -61,9 +61,9 @@ def denoise_steps(
         for tok_id in forbid:
             logits[:, tok_id] = -float("inf")
 
-        probs = torch.softmax(logits, dim=-1)
-        pred = probs.argmax(dim=-1)
-        conf = torch.log(probs.gather(-1, pred.unsqueeze(-1)).squeeze(-1).clamp_min(1e-12))
+        pred = logits.argmax(dim=-1)
+        chosen_logits = logits.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
+        conf = chosen_logits - torch.logsumexp(logits, dim=-1)
         if temperature > 0:
             u = torch.rand(conf.shape, device=device).clamp_min(1e-9)
             conf = conf + temperature * (-torch.log(-torch.log(u)))

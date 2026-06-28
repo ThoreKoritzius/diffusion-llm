@@ -38,3 +38,4 @@ hf_cache/
 
 # Runtime output
 generated_gifs/
+onnx_cache/

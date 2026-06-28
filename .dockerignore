@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 venv/
 generated_gifs/
+onnx_cache/
 wandb/
 examples/
 deprecated/

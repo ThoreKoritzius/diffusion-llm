@@ -26,6 +26,7 @@ import shlex
 import traceback
 import re
 import hashlib
+import gc
 from typing import List, Dict
 from werkzeug.utils import secure_filename
 
@@ -41,6 +42,10 @@ import numpy as np
 import torch
 import redis
 from transformers import AutoTokenizer, AutoModelForMaskedLM
+try:
+    import onnxruntime as ort
+except Exception:
+    ort = None
 
 from denoising import denoise_steps
 
@@ -95,6 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker", action="store_true", help="Run worker loop instead of web server")
     parser.add_argument("--redis-url", type=str, default=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
     parser.add_argument("--inference-dtype", type=str, default=os.environ.get("INFERENCE_DTYPE", "fp16"), choices=["fp16", "fp32", "bf16", "auto"], help="Preferred model dtype for inference")
+    parser.add_argument("--inference-backend", type=str, default=os.environ.get("INFERENCE_BACKEND", "torch"), choices=["torch", "onnx", "auto"], help="Inference backend for model forwards")
+    parser.add_argument("--onnx-cache-dir", type=str, default=os.environ.get("ONNX_CACHE_DIR", os.path.join(os.getcwd(), "onnx_cache")), help="Writable cache directory for exported ONNX models")
+    parser.add_argument("--onnx-opset", type=int, default=env_int("ONNX_OPSET", 17), help="ONNX opset used when exporting")
     return parser
 
 
@@ -129,8 +137,12 @@ ENABLE_GIF = bool(args.enable_gif)
 RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
 IS_WORKER = bool(args.worker)
 PRELOAD_MODEL = env_bool("PRELOAD_MODEL", IS_WORKER)
+PRELOAD_WARMUP_FORWARD = env_bool("PRELOAD_WARMUP_FORWARD", PRELOAD_MODEL)
 REDIS_URL = args.redis_url
 INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
+INFERENCE_BACKEND = (args.inference_backend or "torch").lower()
+ONNX_CACHE_DIR = os.path.abspath(args.onnx_cache_dir)
+ONNX_OPSET = max(13, int(args.onnx_opset))
 ALLOW_FAKE_REDIS = env_bool("ALLOW_FAKE_REDIS", "REDIS_URL" not in os.environ)
 RATELIMIT_STORAGE_URI = os.environ.get("RATELIMIT_STORAGE_URI") or ("memory://" if ALLOW_FAKE_REDIS else REDIS_URL)
 START_RUN_RATE_LIMIT = os.environ.get("START_RUN_RATE_LIMIT", "30 per minute; 300 per hour")
@@ -148,6 +160,12 @@ STRUCTURE_TOKEN_RESERVE = 32
 PROMPT_BUDGET_RATIO = 0.35
 EFFECTIVE_LEN_MULTIPLE = 64
 MIN_EFFECTIVE_MAX_LEN = 64
+DEFAULT_WARMUP_SEQUENCE_LENGTHS = "64,256"
+ONNX_EXPORT_VERSION = "v1"
+ONNX_GRAPH_OPT_LEVEL = os.environ.get("ONNX_GRAPH_OPT_LEVEL", "all").strip().lower()
+ONNX_INTRA_OP_THREADS = env_int("ONNX_INTRA_OP_THREADS", env_int("TORCH_NUM_THREADS", 0))
+ONNX_INTER_OP_THREADS = env_int("ONNX_INTER_OP_THREADS", 1)
+ONNX_EXECUTION_MODE = os.environ.get("ONNX_EXECUTION_MODE", "sequential").strip().lower()
 
 # -------------------------
 # Flask app & template
@@ -171,7 +189,7 @@ limiter = Limiter(
 # -------------------------
 # Run storage / state
 # -------------------------
-MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}
+MODEL_CACHE = {"dir": None, "backend_request": None, "backend": None, "tokenizer": None, "model": None}
 MODEL_VALIDATION_CACHE: Dict[str, Dict] = {}
 MODEL_INFO_CACHE: Dict[str, Dict] = {}
 OUT_DIR = os.path.join(os.path.abspath("."), "generated_gifs")
@@ -235,6 +253,20 @@ configure_torch_cpu_threads()
 
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
+
+
+def env_int_list(name: str, default: str) -> List[int]:
+    raw = os.environ.get(name, default)
+    values: List[int] = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.append(int(part))
+        except ValueError:
+            continue
+    return values
 
 
 def compute_char_heuristic_limits(max_len: int, sql_len: int) -> Dict[str, int]:
@@ -340,7 +372,7 @@ def from_redis_run(raw: Dict[str, str]) -> Dict:
     out["timed_out"] = out.get("timed_out", "0") == "1"
     out["cancel_requested"] = out.get("cancel_requested", "0") == "1"
     out["cache_hit"] = out.get("cache_hit", "0") == "1"
-    for k in ("created_at", "updated_at", "started_at", "finished_at"):
+    for k in ("created_at", "updated_at", "started_at", "finished_at", "first_snapshot_at"):
         if out.get(k):
             try:
                 out[k] = float(out[k])
@@ -425,6 +457,7 @@ def cache_signature_payload(payload: Dict) -> Dict:
         "top_p": float(payload.get("top_p", 0)),
         "seed": int(DEFAULT_SEED),
         "dtype": INFERENCE_DTYPE,
+        "backend": INFERENCE_BACKEND,
     }
 
 
@@ -608,6 +641,26 @@ def queue_timing_payload(position: int | None) -> Dict:
         "avg_run_seconds": int(math.ceil(avg)),
         "avg_first_frame_seconds": int(math.ceil(first_frame_avg)),
         "server_time": int(now_ts()),
+    }
+
+
+def running_timing_payload(run: Dict) -> Dict:
+    started_at = run.get("started_at")
+    first_snapshot_at = run.get("first_snapshot_at")
+    elapsed = None
+    first_frame_remaining = None
+    first_frame_avg = average_first_frame_seconds()
+
+    if started_at:
+        elapsed = max(0.0, now_ts() - float(started_at))
+        if not first_snapshot_at and not run.get("snapshot_count"):
+            first_frame_remaining = max(0, int(math.ceil(first_frame_avg - elapsed)))
+
+    return {
+        "running_elapsed_seconds": int(math.floor(elapsed)) if elapsed is not None else None,
+        "first_frame_remaining_seconds": first_frame_remaining,
+        "avg_first_frame_seconds": int(math.ceil(first_frame_avg)),
+        "first_snapshot_at": first_snapshot_at,
     }
 
 
@@ -823,7 +876,7 @@ def process_run(run_id: str) -> None:
     start_time = now_ts()
     r = get_redis()
     r.sadd(ACTIVE_SET_KEY, run_id)
-    redis_update_run(run_id, state="running", status="running (loading model)", started_at=start_time)
+    redis_update_run(run_id, state="running", status="worker claimed (loading model)", started_at=start_time)
     try:
         payload = run["payload"]
         should_stop = build_should_stop_cb(run_id, start_time)
@@ -1073,16 +1126,65 @@ def build_gif_bytes_from_snapshots(snapshots: List[Dict], size=(1400,900), inter
 # -------------------------
 # Model load helper (cached)
 # -------------------------
-def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
-    if MODEL_CACHE["dir"] == model_dir and MODEL_CACHE["tokenizer"] is not None and MODEL_CACHE["model"] is not None:
-        return MODEL_CACHE["tokenizer"], MODEL_CACHE["model"]
+class MaskedLMOutput:
+    def __init__(self, logits: torch.Tensor):
+        self.logits = logits
+
+
+class OnnxMaskedLMRunner:
+    backend_label = "onnxruntime"
+
+    def __init__(self, session, output_name: str):
+        self.session = session
+        self.output_name = output_name
+        self.device = torch.device("cpu")
+
+    def __call__(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> MaskedLMOutput:
+        ort_inputs = {
+            "input_ids": input_ids.detach().cpu().numpy().astype(np.int64, copy=False),
+            "attention_mask": attention_mask.detach().cpu().numpy().astype(np.int64, copy=False),
+        }
+        logits = self.session.run([self.output_name], ort_inputs)[0]
+        return MaskedLMOutput(torch.from_numpy(logits))
+
+
+class MaskedLMExportWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        return self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+
+
+def is_onnx_runner(model) -> bool:
+    return isinstance(model, OnnxMaskedLMRunner)
+
+
+def model_backend_label(model) -> str:
+    return getattr(model, "backend_label", "torch")
+
+
+def get_model_device(model) -> torch.device:
+    device = getattr(model, "device", None)
+    if device is not None:
+        return device
+    return next(model.parameters()).device
+
+
+def load_tokenizer(model_dir: str, max_len: int):
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
     except Exception:
         tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
     tokenizer.model_max_length = max_len
-    device = get_inference_device()
-    dtype, _dtype_label = resolve_model_dtype(device)
+    return tokenizer
+
+
+def load_torch_masked_lm(model_dir: str, device: torch.device | None = None, dtype: torch.dtype | None = None):
+    device = device or get_inference_device()
+    if dtype is None:
+        dtype, _dtype_label = resolve_model_dtype(device)
     try:
         model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
     except Exception:
@@ -1090,19 +1192,218 @@ def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
         dtype = torch.float32
     model.to(device)
     model.eval()
-    MODEL_CACHE.update({"dir": model_dir, "tokenizer": tokenizer, "model": model})
+    return model
+
+
+def onnx_graph_optimization_level():
+    if ort is None:
+        return None
+    if ONNX_GRAPH_OPT_LEVEL == "disable":
+        return ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    if ONNX_GRAPH_OPT_LEVEL == "basic":
+        return ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+    if ONNX_GRAPH_OPT_LEVEL == "extended":
+        return ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+    return ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+
+def model_cache_fingerprint(model_dir: str) -> str:
+    h = hashlib.sha256()
+    h.update(ONNX_EXPORT_VERSION.encode("utf-8"))
+    h.update(str(ONNX_OPSET).encode("utf-8"))
+    h.update(ONNX_GRAPH_OPT_LEVEL.encode("utf-8"))
+    h.update((getattr(ort, "__version__", "no-ort") if ort else "no-ort").encode("utf-8"))
+    h.update(os.path.abspath(model_dir).encode("utf-8"))
+    for name in (
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "model.safetensors",
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+    ):
+        path = os.path.join(model_dir, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        h.update(f"{name}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def onnx_cache_paths(model_dir: str) -> tuple[str, str]:
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", os.path.basename(os.path.abspath(model_dir)) or "model")
+    fingerprint = model_cache_fingerprint(model_dir)
+    base = f"{safe_name}-{fingerprint}-opset{ONNX_OPSET}"
+    return (
+        os.path.join(ONNX_CACHE_DIR, f"{base}.onnx"),
+        os.path.join(ONNX_CACHE_DIR, f"{base}.optimized.onnx"),
+    )
+
+
+def export_onnx_model(model_dir: str, tokenizer, raw_path: str, max_len: int) -> None:
+    if os.path.exists(raw_path):
+        return
+    os.makedirs(os.path.dirname(raw_path), exist_ok=True)
+    tmp_path = f"{raw_path}.{os.getpid()}.tmp"
+    print(f"[INFO] Exporting ONNX model to {raw_path}", flush=True)
+
+    model = load_torch_masked_lm(model_dir, device=torch.device("cpu"), dtype=torch.float32)
+    wrapper = MaskedLMExportWrapper(model).eval()
+
+    export_len = clamp_int(env_int("ONNX_EXPORT_SEQUENCE_LENGTH", min(max_len, 256)), 8, max_len)
+    mask_id = tokenizer.mask_token_id
+    cls_id = tokenizer.cls_token_id if tokenizer.cls_token_id is not None else tokenizer.bos_token_id
+    sep_id = tokenizer.sep_token_id if tokenizer.sep_token_id is not None else tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    if mask_id is None or cls_id is None or sep_id is None or pad_id is None:
+        raise RuntimeError("Tokenizer is missing mask/cls/sep/pad IDs required for ONNX export.")
+
+    ids = [cls_id, mask_id, sep_id] + [pad_id] * max(0, export_len - 3)
+    attn = [1, 1, 1] + [0] * max(0, export_len - 3)
+    input_ids = torch.tensor([ids], dtype=torch.long)
+    attention_mask = torch.tensor([attn], dtype=torch.long)
+
+    export_kwargs = {
+        "input_names": ["input_ids", "attention_mask"],
+        "output_names": ["logits"],
+        "dynamic_axes": {
+            "input_ids": {0: "batch", 1: "sequence"},
+            "attention_mask": {0: "batch", 1: "sequence"},
+            "logits": {0: "batch", 1: "sequence"},
+        },
+        "opset_version": ONNX_OPSET,
+        "do_constant_folding": True,
+    }
+    try:
+        with torch.inference_mode():
+            torch.onnx.export(wrapper, (input_ids, attention_mask), tmp_path, dynamo=False, **export_kwargs)
+    except TypeError:
+        with torch.inference_mode():
+            torch.onnx.export(wrapper, (input_ids, attention_mask), tmp_path, **export_kwargs)
+    os.replace(tmp_path, raw_path)
+    del wrapper
+    del model
+    gc.collect()
+    print("[INFO] ONNX export complete", flush=True)
+
+
+def load_onnx_masked_lm(model_dir: str, tokenizer, max_len: int) -> OnnxMaskedLMRunner:
+    if ort is None:
+        raise RuntimeError("onnxruntime is not installed.")
+    raw_path, optimized_path = onnx_cache_paths(model_dir)
+    export_onnx_model(model_dir, tokenizer, raw_path, max_len)
+
+    sess_options = ort.SessionOptions()
+    if ONNX_INTRA_OP_THREADS > 0:
+        sess_options.intra_op_num_threads = ONNX_INTRA_OP_THREADS
+    if ONNX_INTER_OP_THREADS > 0:
+        sess_options.inter_op_num_threads = ONNX_INTER_OP_THREADS
+    sess_options.execution_mode = (
+        ort.ExecutionMode.ORT_PARALLEL if ONNX_EXECUTION_MODE == "parallel" else ort.ExecutionMode.ORT_SEQUENTIAL
+    )
+    sess_options.enable_mem_pattern = True
+    sess_options.enable_cpu_mem_arena = True
+
+    model_path = raw_path
+    if os.path.exists(optimized_path):
+        model_path = optimized_path
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    else:
+        sess_options.graph_optimization_level = onnx_graph_optimization_level()
+        sess_options.optimized_model_filepath = optimized_path
+
+    providers = ["CPUExecutionProvider"] if "CPUExecutionProvider" in ort.get_available_providers() else None
+    session = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
+    output_name = session.get_outputs()[0].name
+    print(f"[INFO] ONNX Runtime session ready: {model_path}", flush=True)
+    return OnnxMaskedLMRunner(session, output_name)
+
+
+def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
+    if (
+        MODEL_CACHE["dir"] == model_dir
+        and MODEL_CACHE["backend_request"] == INFERENCE_BACKEND
+        and MODEL_CACHE["tokenizer"] is not None
+        and MODEL_CACHE["model"] is not None
+    ):
+        return MODEL_CACHE["tokenizer"], MODEL_CACHE["model"]
+
+    tokenizer = load_tokenizer(model_dir, max_len)
+    backend = INFERENCE_BACKEND
+    if backend in {"onnx", "auto"}:
+        try:
+            model = load_onnx_masked_lm(model_dir, tokenizer, max_len)
+            MODEL_CACHE.update({
+                "dir": model_dir,
+                "backend_request": INFERENCE_BACKEND,
+                "backend": "onnxruntime",
+                "tokenizer": tokenizer,
+                "model": model,
+            })
+            return tokenizer, model
+        except Exception as exc:
+            if backend == "onnx":
+                raise
+            print(f"[WARN] ONNX backend unavailable, falling back to PyTorch: {exc}", flush=True)
+
+    model = load_torch_masked_lm(model_dir)
+    MODEL_CACHE.update({
+        "dir": model_dir,
+        "backend_request": INFERENCE_BACKEND,
+        "backend": "torch",
+        "tokenizer": tokenizer,
+        "model": model,
+    })
     return tokenizer, model
+
+
+def warmup_model_forward(tokenizer, model) -> None:
+    if not PRELOAD_WARMUP_FORWARD:
+        return
+
+    lengths = [
+        clamp_int(length, 8, MAX_MAX_LEN)
+        for length in env_int_list("WARMUP_SEQUENCE_LENGTHS", DEFAULT_WARMUP_SEQUENCE_LENGTHS)
+    ]
+    lengths = sorted(set(lengths))
+    if not lengths:
+        return
+
+    mask_id = tokenizer.mask_token_id
+    if mask_id is None:
+        return
+    cls_id = tokenizer.cls_token_id if tokenizer.cls_token_id is not None else tokenizer.bos_token_id
+    sep_id = tokenizer.sep_token_id if tokenizer.sep_token_id is not None else tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    if cls_id is None or sep_id is None or pad_id is None:
+        return
+
+    device = get_model_device(model)
+    for length in lengths:
+        ids = [cls_id, mask_id, sep_id] + [pad_id] * max(0, length - 3)
+        attn = [1, 1, 1] + [0] * max(0, length - 3)
+        input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+        attention_mask = torch.tensor([attn], dtype=torch.long, device=device)
+        with torch.inference_mode():
+            _ = model(input_ids=input_ids, attention_mask=attention_mask).logits[:, 1, :].argmax(dim=-1)
 
 
 def preload_worker_model() -> None:
     if not PRELOAD_MODEL:
         return
     try:
-        print(f"[INFO] Preloading model/tokenizer from {DEFAULT_MODEL_DIR}", flush=True)
-        load_model_and_tokenizer(DEFAULT_MODEL_DIR, MAX_MAX_LEN)
-        print("[INFO] Model/tokenizer preload complete", flush=True)
+        print(f"[INFO] Preloading {INFERENCE_BACKEND} model/tokenizer from {DEFAULT_MODEL_DIR}", flush=True)
+        tokenizer, model = load_model_and_tokenizer(DEFAULT_MODEL_DIR, MAX_MAX_LEN)
+        warmup_model_forward(tokenizer, model)
+        print(f"[INFO] Model/tokenizer preload complete ({model_backend_label(model)})", flush=True)
     except Exception as exc:
         print(f"[WARN] Model/tokenizer preload failed: {exc}", flush=True)
+        if INFERENCE_BACKEND == "onnx":
+            raise
 
 
 # -------------------------
@@ -1145,10 +1446,13 @@ def run_denoising_generation_callback(
     REQUIRED_TAGS = ["<PROMPT>", "</PROMPT>", "<CONTEXT>", "</CONTEXT>", "<SQL>", "</SQL>"]
     missing = [t for t in REQUIRED_TAGS if t not in tokenizer.get_vocab()]
     if missing:
+        if is_onnx_runner(model):
+            raise RuntimeError(f"ONNX backend requires special tokens to exist before export; missing: {missing}")
         log(f"[INFO] Adding missing special tokens at inference-time: {missing}")
         tokenizer.add_special_tokens({"additional_special_tokens": missing})
         model.resize_token_embeddings(len(tokenizer))
         log("[INFO] Resized model embeddings for added tokens")
+    log(f"[INFO] Active inference backend: {model_backend_label(model)}")
 
     mask_token = tokenizer.mask_token
     mask_id = tokenizer.mask_token_id
@@ -1200,7 +1504,7 @@ def run_denoising_generation_callback(
     current_attention = torch.tensor([attn], dtype=torch.long)
     log(f"[INFO] SQL window: {sql_len} mask tokens at positions {sql_start}..{sql_close_idx}")
 
-    device = next(model.parameters()).device
+    device = get_model_device(model)
     current_ids = current_ids.to(device)
     current_attention = current_attention.to(device)
 
@@ -1343,6 +1647,13 @@ def healthz():
         "result_cache_enabled": RESULT_CACHE_ENABLED,
         "result_cache_ttl_seconds": RESULT_CACHE_TTL_SECONDS,
         "result_cache_version": RESULT_CACHE_VERSION,
+        "inference_backend_requested": INFERENCE_BACKEND,
+        "inference_backend_loaded": MODEL_CACHE.get("backend"),
+        "onnxruntime_available": ort is not None,
+        "onnxruntime_version": getattr(ort, "__version__", None) if ort else None,
+        "onnx_cache_dir": ONNX_CACHE_DIR,
+        "onnx_opset": ONNX_OPSET,
+        "onnx_graph_optimization_level": ONNX_GRAPH_OPT_LEVEL,
         "demand": demand.get("demand"),
         "start_limit_per_minute": demand.get("limit"),
         "active_limit": MAX_CONCURRENT_RUNS,
@@ -1385,6 +1696,8 @@ def index():
         model_param_count_display=model_info.get("param_count_display", "unknown"),
         inference_dtype_requested=INFERENCE_DTYPE,
         inference_dtype_effective=effective_dtype,
+        inference_backend_requested=INFERENCE_BACKEND,
+        inference_backend_loaded=MODEL_CACHE.get("backend") or "not loaded",
         static_version=static_version,
     )
 
@@ -1550,6 +1863,7 @@ def stream(run_id):
         last_status = ""
         done_sent = False
         last_heartbeat = time.time()
+        last_status_sent_at = 0.0
         while True:
             _, snaps = redis_get_snapshot_delta(run_id, cursor)
             for snap in snaps:
@@ -1560,9 +1874,33 @@ def stream(run_id):
             if not run_now:
                 break
             st = run_now.get("status", "")
-            if st != last_status:
+            state = run_now.get("state")
+            snap_count = int(run_now.get("snapshot_count") or 0)
+            now = time.time()
+            phase_tick_due = False
+            if state == "queued":
+                phase_tick_due = (now - last_status_sent_at) >= 2.0
+            elif state == "running" and snap_count == 0:
+                phase_tick_due = (now - last_status_sent_at) >= 1.0
+
+            if st != last_status or phase_tick_due:
                 last_status = st
-                yield f"event: status\\ndata: {json.dumps({'msg': st})}\\n\\n"
+                last_status_sent_at = now
+                status_payload = {
+                    "msg": st,
+                    "state": state,
+                    "snapshot_count": snap_count,
+                    "started_at": run_now.get("started_at"),
+                }
+                if state == "queued":
+                    pos = queue_position(run_id)
+                    if pos is None:
+                        pos = 1
+                    status_payload.update(queue_timing_payload(pos))
+                    status_payload["demand"] = adaptive_start_profile().get("demand")
+                elif state in {"running", "stopping"}:
+                    status_payload.update(running_timing_payload(run_now))
+                yield f"event: status\\ndata: {json.dumps(status_payload)}\\n\\n"
 
             is_done = run_now.get("done")
             payload = {
@@ -1605,6 +1943,8 @@ def run_state(run_id):
     if run.get("state") == "queued" and pos is None:
         pos = 1
     timing = queue_timing_payload(pos)
+    if run.get("state") in {"running", "stopping"}:
+        timing.update(running_timing_payload(run))
     demand = adaptive_start_profile()
     return jsonify({
         "run_id": run_id,

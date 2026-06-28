@@ -179,9 +179,9 @@ function renderQueuedCountdown() {
   if (remaining <= 0) {
     if (!queueZeroSinceMs) queueZeroSinceMs = Date.now();
     const elapsed = formatElapsed(Date.now() - queueZeroSinceMs);
-    setRunButtonText('Waiting for worker', `Queued ${posText} • no frames yet • ${elapsed}`);
-    setQueueChip('', '');
-    setStatus(`Queued ${posText} • waiting for worker or first frame`);
+    setRunButtonText('Next up', `Queued ${posText} • handoff ${elapsed}`);
+    setQueueChip(`Next up ${posText}`, 'queued');
+    setStatus(`Queued ${posText} • handing off to worker • ${elapsed}`);
     setProgressIndeterminate();
     return;
   }
@@ -269,7 +269,9 @@ function setUiState(mode, data = {}) {
     runBtn.disabled = true;
     const stepLabel = data.stepLabel || 'Running';
     const isStep = Number.isFinite(data.progressPct);
-    setRunButtonText(isStep ? stepLabel : 'Working', isStep ? 'Rendering diffusion steps' : stepLabel);
+    const primary = data.primaryLabel || (isStep ? stepLabel : stepLabel);
+    const secondary = data.secondaryLabel || (isStep ? 'Rendering diffusion steps' : 'Preparing first preview');
+    setRunButtonText(primary, secondary);
     setQueueChip('Running', 'running');
 
     if (isStep) {
@@ -988,11 +990,35 @@ function parseStepProgress(statusMsg) {
 
 function runningStatusLabel(statusMsg) {
   const msg = String(statusMsg || '').toLowerCase();
+  if (msg.includes('worker claimed')) return 'Worker claimed';
   if (msg.includes('loading model') || msg.includes('loading model/tokenizer')) return 'Loading model and tokenizer';
+  if (msg.includes('effective sequence length')) return 'Preparing input';
   if (msg.includes('sql window')) return 'Preparing SQL window';
   if (msg.includes('starting denoising')) return 'Starting denoising';
   if (msg.includes('building gif')) return 'Building GIF';
-  return 'processing';
+  return 'Preparing first preview';
+}
+
+function firstPreviewSecondary(data = {}) {
+  const snapCount = Number(data.snapshot_count);
+  if (Number.isFinite(snapCount) && snapCount > 0) return '';
+
+  const remaining = Number(data.first_frame_remaining_seconds);
+  if (Number.isFinite(remaining) && remaining > 0) {
+    return `First preview in ~${formatCountdown(remaining)}`;
+  }
+
+  const elapsed = Number(data.running_elapsed_seconds);
+  if (Number.isFinite(elapsed) && elapsed > 0) {
+    return `First preview pending • ${formatElapsed(elapsed * 1000)}`;
+  }
+
+  const avg = Number(data.avg_first_frame_seconds);
+  if (Number.isFinite(avg) && avg > 0) {
+    return `First preview usually ~${formatCountdown(avg)}`;
+  }
+
+  return 'Preparing first preview';
 }
 
 function setQueuedUi(queuePosition, etaSeconds, _etaConfidence, demand = '') {
@@ -1003,15 +1029,16 @@ function setQueuedUi(queuePosition, etaSeconds, _etaConfidence, demand = '') {
   });
 }
 
-function updateRunningUi(statusMsg) {
+function updateRunningUi(statusMsg, data = {}) {
   const step = parseStepProgress(statusMsg);
   if (step) {
     setUiState(UI_MODES.RUNNING, { stepLabel: step.label, progressPct: step.progressPct });
     setStatus(`Running • ${step.label}`);
   } else {
     const label = runningStatusLabel(statusMsg);
-    setUiState(UI_MODES.RUNNING, { stepLabel: label });
-    setStatus(`Running • ${label}`);
+    const secondary = firstPreviewSecondary(data);
+    setUiState(UI_MODES.RUNNING, { stepLabel: label, secondaryLabel: secondary });
+    setStatus(`Running • ${label}${secondary ? ` • ${secondary}` : ''}`);
   }
 }
 
@@ -1082,7 +1109,7 @@ async function pollRunState(id) {
       setQueuedUi(data.queue_position, data.eta_seconds, data.eta_confidence, data.demand);
       pollDelayMs = 350;
     } else if (data.state === 'running') {
-      updateRunningUi(data.status || '');
+      updateRunningUi(data.status || '', data);
       pollDelayMs = data.snapshot_count > 0 ? 250 : 350;
     } else if (data.state === 'stopping') {
       setUiState(UI_MODES.RUNNING, { stepLabel: 'stopping' });
@@ -1155,7 +1182,11 @@ function openStream(id, sessionId) {
     if (!info || !info.msg) return;
 
     lastStatusMsg = info.msg;
-    updateRunningUi(info.msg);
+    if (info.state === 'queued') {
+      setQueuedUi(info.queue_position, info.eta_seconds, info.eta_confidence, info.demand);
+      return;
+    }
+    updateRunningUi(info.msg, info);
   });
 
   es.addEventListener('done', (ev) => {
