@@ -1801,7 +1801,7 @@ def healthz():
 
 @app.route("/")
 def index():
-    default_prompt = "What is the highest car price for each make?"
+    default_prompt = "What is the highest car price for each model?"
     default_context = "CREATE TABLE cars (id INT, make VARCHAR(50), model VARCHAR(50), year INT, price DECIMAL(10,2));"
     model_info = get_model_info(DEFAULT_MODEL_DIR)
     effective_dtype = resolve_model_dtype(get_inference_device())[1]
@@ -1817,7 +1817,7 @@ def index():
         model_dir=DEFAULT_MODEL_DIR or "",
         max_model_len=MAX_MAX_LEN,
         max_steps=MAX_STEPS,
-        default_steps=min(20, MAX_STEPS),
+        default_steps=min(24, MAX_STEPS),
         max_sql_len=MAX_SQL_LEN,
         default_sql_len=max(1, min(128, MAX_SQL_LEN)),
         max_prompt_chars=MAX_PROMPT_CHARS,

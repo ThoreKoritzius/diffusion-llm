@@ -230,9 +230,20 @@
       transition: background 150ms ease, color 150ms ease, opacity 150ms ease;
     }
 
-    .gif-btn:hover { background: var(--color-accent); color: #fff; }
-    .gif-btn:disabled { opacity: 0.55; cursor: default; }
-    .gif-btn .gif-ico { font-weight: 900; font-size: 13px; }
+    .gif-btn:hover {
+      background: var(--color-accent);
+      color: #fff;
+    }
+
+    .gif-btn:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .gif-btn .gif-ico {
+      font-weight: 900;
+      font-size: 13px;
+    }
 
     .queue-chip {
       color: var(--color-muted);
@@ -291,10 +302,23 @@
     }
 
     /* lightweight syntax emphasis for a code-editor feel */
-    .tok.keyword { color: var(--color-accent); font-weight: 600; }
-    .tok.fn      { color: #7c3aed; font-weight: 600; }
-    .tok.str     { color: #1a7f4b; }
-    .tok.punct   { color: #6b7a90; }
+    .tok.keyword {
+      color: var(--color-accent);
+      font-weight: 600;
+    }
+
+    .tok.fn {
+      color: #7c3aed;
+      font-weight: 600;
+    }
+
+    .tok.str {
+      color: #1a7f4b;
+    }
+
+    .tok.punct {
+      color: #6b7a90;
+    }
 
     .tok.masked {
       display: inline-block;
@@ -534,8 +558,13 @@
     }
 
     @keyframes btn-shimmer {
-      0% { background-position: 180% 0, 0 0; }
-      100% { background-position: -80% 0, 0 0; }
+      0% {
+        background-position: 180% 0, 0 0;
+      }
+
+      100% {
+        background-position: -80% 0, 0 0;
+      }
     }
 
     #runForm {
@@ -1028,7 +1057,8 @@
             <div class="title">Text Diffusion Playground</div>
             <div class="head-meta">
               <div class="eff-pill" id="effPill" data-state="idle"
-                title="After a run, this shows how many fewer forward passes (steps) masked-diffusion decoding used versus autoregressive decoding.">⚡
+                title="After a run, this shows how many fewer forward passes (steps) masked-diffusion decoding used versus autoregressive decoding.">
+                ⚡
                 vs AR: —</div>
               <div class="step-pill" id="stepBox">Step - / -</div>
             </div>
@@ -1061,7 +1091,7 @@
                   <span class="char-count" id="promptCount"></span>
                 </div>
                 <textarea name="prompt" id="prompt" maxlength="{{ max_prompt_chars }}"
-                  placeholder="e.g. What is the highest car price for each make?">{{ prompt_prefill }}</textarea>
+                  placeholder="e.g. What is the highest car price for each model?">{{ prompt_prefill }}</textarea>
               </div>
 
               <div class="field-wrap">
@@ -1104,8 +1134,8 @@
                         <label class="field-label" for="steps">Steps</label>
                         <span class="ctrl-val" id="stepsVal">{{ default_steps }}</span>
                       </div>
-                      <input class="ctrl-range" type="range" name="steps" id="steps" min="1" max="{{ max_steps }}" step="1"
-                        value="{{ default_steps }}" />
+                      <input class="ctrl-range" type="range" name="steps" id="steps" min="1" max="{{ max_steps }}"
+                        step="1" value="{{ default_steps }}" />
                     </div>
 
                     <div class="ctrl-row">
@@ -1113,8 +1143,8 @@
                         <label class="field-label" for="sql_len">SQL length</label>
                         <span class="ctrl-val" id="sqlLenVal">{{ default_sql_len }}</span>
                       </div>
-                      <input class="ctrl-range" type="range" name="sql_len" id="sql_len" min="8" max="{{ max_sql_len }}" step="8"
-                        value="{{ default_sql_len }}" />
+                      <input class="ctrl-range" type="range" name="sql_len" id="sql_len" min="8" max="{{ max_sql_len }}"
+                        step="8" value="{{ default_sql_len }}" />
                     </div>
 
                     <div class="ctrl-row">
@@ -1147,8 +1177,6 @@
               </details>
             </form>
 
-            <div id="status" class="status" aria-live="polite">Ready.</div>
-
             <div class="conf-chart" id="confChart" data-state="idle">
               <div class="conf-chart-head">
                 <span class="conf-chart-title">Token confidence over steps</span>
@@ -1158,6 +1186,8 @@
                 <span class="conf-empty">Run a generation to see how confidence rises and when it early-stops.</span>
               </div>
             </div>
+
+            <div id="status" class="status" aria-live="polite">Ready.</div>
           </div>
 
           <div class="action-row" id="actionRow">
@@ -1178,7 +1208,14 @@
           <strong>What is text diffusion here?</strong>
           <div>A masked-diffusion language model (LLaDA / MaskGIT style). The SQL answer begins as a fixed window of
             masked tokens; each step predicts every masked position and permanently commits the most confident ones,
-            so the query emerges in parallel instead of left-to-right. The animation shows those intermediate states.</div>
+            so the query emerges in parallel instead of left-to-right. During training, the model sees examples at many
+            noise levels by hiding different fractions of the target SQL, then learns to reconstruct only the hidden
+            tokens from the prompt, schema, and visible SQL tokens. Unlike a causal decoder, the transformer can look
+            across the whole proposed SQL window at once, which helps it coordinate table names, joins, filters, and
+            syntax globally. At inference time this runs in reverse: early high-confidence tokens become anchors, and
+            later steps use that partially completed query to resolve the remaining blanks. Adaptive early stopping can
+            finish before the full step budget when every remaining blank is already predicted with high confidence.
+            The animation shows those intermediate states.</div>
         </div>
         <div class="info-card">
           <strong>Model</strong>

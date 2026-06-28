@@ -567,21 +567,59 @@ function snapshotText(snap) {
   return normalizeSQLDisplay(snap.sql_only || extractSQL(snap.text || ''));
 }
 
-const GIF_SIZE = 480;
-const GIF_PALETTE = [
-  [255, 255, 255], [246, 247, 251], [239, 243, 250], [215, 222, 234],
-  [15, 23, 42], [85, 96, 113], [31, 111, 235], [26, 127, 75],
-  [124, 58, 237], [180, 35, 63], [167, 111, 29], [196, 208, 226],
-  [224, 233, 246], [207, 224, 255], [233, 240, 255], [232, 246, 237],
-];
+const GIF_SIZE = 760;
+const GIF_SANS = '-apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+const GIF_MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 
-while (GIF_PALETTE.length < 256) GIF_PALETTE.push([0, 0, 0]);
+// Build a smooth 256-colour palette: a neutral gray ramp plus white→ink ramps
+// for every UI colour, so anti-aliased text edges map to near colours instead
+// of banding against a 16-colour table.
+function buildGifPalette() {
+  const inks = [
+    [15, 23, 42],    // text
+    [90, 102, 119],  // muted
+    [31, 111, 235],  // accent blue
+    [26, 127, 75],   // green (strings)
+    [124, 58, 237],  // purple (functions)
+    [180, 35, 63],   // danger
+    [167, 111, 29],  // warn
+    [196, 208, 226], // mask fill
+    [219, 226, 238], // border
+    [120, 135, 158], // slate
+  ];
+  const pal = [[255, 255, 255], [238, 241, 248], [241, 245, 252]]; // bg + surfaces
+  for (let i = 1; i <= 20; i += 1) {            // neutral gray ramp
+    const v = Math.round(255 - (i / 20) * 255);
+    pal.push([v, v, v]);
+  }
+  const steps = 18;
+  for (const ink of inks) {                      // white → ink ramps (AA)
+    for (let i = 1; i <= steps; i += 1) {
+      const t = i / steps;
+      pal.push([
+        Math.round(255 + (ink[0] - 255) * t),
+        Math.round(255 + (ink[1] - 255) * t),
+        Math.round(255 + (ink[2] - 255) * t),
+      ]);
+    }
+  }
+  const used = pal.length;
+  while (pal.length < 256) pal.push([0, 0, 0]);
+  pal.used = used;
+  return pal;
+}
 
-function gifNearestPaletteIndex(r, g, b, a) {
-  if (a < 128) return 0;
+const GIF_PALETTE = buildGifPalette();
+const GIF_PALETTE_LEN = GIF_PALETTE.used;
+const _gifColorCache = new Map();
+
+function gifNearestPaletteIndex(r, g, b) {
+  const key = (r << 16) | (g << 8) | b;
+  const cached = _gifColorCache.get(key);
+  if (cached !== undefined) return cached;
   let best = 0;
   let bestDist = Infinity;
-  for (let i = 0; i < 16; i += 1) {
+  for (let i = 0; i < GIF_PALETTE_LEN; i += 1) {
     const p = GIF_PALETTE[i];
     const dr = r - p[0];
     const dg = g - p[1];
@@ -590,8 +628,10 @@ function gifNearestPaletteIndex(r, g, b, a) {
     if (dist < bestDist) {
       bestDist = dist;
       best = i;
+      if (dist === 0) break;
     }
   }
+  _gifColorCache.set(key, best);
   return best;
 }
 
@@ -599,7 +639,7 @@ function gifBytesFromCanvas(ctx, width, height) {
   const rgba = ctx.getImageData(0, 0, width, height).data;
   const indexed = new Uint8Array(width * height);
   for (let i = 0, j = 0; i < rgba.length; i += 4, j += 1) {
-    indexed[j] = gifNearestPaletteIndex(rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
+    indexed[j] = gifNearestPaletteIndex(rgba[i], rgba[i + 1], rgba[i + 2]);
   }
   return indexed;
 }
@@ -646,56 +686,80 @@ function gifFormatSqlLines(sql, ctx, maxWidth, maxLines) {
 }
 
 function renderGifFrame(ctx, snap, prompt, size = GIF_SIZE) {
-  const pad = 44;
-  const innerW = size - pad * 2;
+  const W = size, H = size;
+  const M = Math.round(size * 0.046);            // outer margin
+  const cardX = M, cardY = M, cardW = W - 2 * M, cardH = H - 2 * M;
+  const padX = cardX + 34;
+  const contentW = cardW - 68;
   const sql = isTerminalSnapshot(snap) ? sanitizeFinalSql(snapshotText(snap)) : snapshotText(snap);
   const step = Number(snap.step) || 0;
   const total = Math.max(1, Number(snap.total_steps) || step || 1);
-  const frac = Math.max(0, Math.min(1, total > 0 ? step / total : 0));
+  const frac = Math.max(0, Math.min(1, step / total));
+  const done = frac >= 1;
 
-  ctx.fillStyle = '#f6f7fb';
-  ctx.fillRect(0, 0, size, size);
+  ctx.textBaseline = 'alphabetic';
+  // backdrop + card
+  ctx.fillStyle = '#eef1f8';
+  ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#ffffff';
-  ctx.fillRect(pad - 16, pad - 16, innerW + 32, size - pad * 2 + 32);
-  ctx.strokeStyle = '#d7deea';
+  ctx.fillRect(cardX, cardY, cardW, cardH);
+  ctx.strokeStyle = '#dbe2ee';
   ctx.lineWidth = 2;
-  ctx.strokeRect(pad - 16, pad - 16, innerW + 32, size - pad * 2 + 32);
+  ctx.strokeRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2);
 
+  // header: accent mark + title
+  let y = cardY + 56;
   ctx.fillStyle = '#1f6feb';
-  ctx.font = '700 28px system-ui, -apple-system, Segoe UI, sans-serif';
-  ctx.fillText('Text to SQL Diffusion', pad, pad + 10);
+  ctx.fillRect(padX, y - 19, 16, 16);
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `800 30px ${GIF_SANS}`;
+  ctx.fillText('Text → SQL Diffusion', padX + 28, y);
 
-  ctx.fillStyle = '#556071';
-  ctx.font = '500 19px system-ui, -apple-system, Segoe UI, sans-serif';
-  pushWordWrapped(ctx, prompt || 'SQL generation', pad, pad + 54, innerW, 26, 3);
+  // prompt (max 2 lines)
+  ctx.fillStyle = '#5a6677';
+  ctx.font = `500 20px ${GIF_SANS}`;
+  y = pushWordWrapped(ctx, prompt || 'SQL generation', padX, y + 34, contentW, 28, 2);
 
-  const barY = 180;
+  // divider
+  y += 12;
+  ctx.strokeStyle = '#e8edf6';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padX, y);
+  ctx.lineTo(padX + contentW, y);
+  ctx.stroke();
+
+  // progress bar + step label
+  y += 30;
+  const barH = 12;
   ctx.fillStyle = '#eff3fa';
-  ctx.fillRect(pad, barY, innerW, 14);
-  ctx.fillStyle = '#1f6feb';
-  ctx.fillRect(pad, barY, Math.max(14, innerW * frac), 14);
-  ctx.fillStyle = '#556071';
-  ctx.font = '700 18px system-ui, -apple-system, Segoe UI, sans-serif';
-  ctx.fillText(frac >= 1 ? 'done' : `denoising - step ${step}/${total}`, pad, barY + 42);
+  ctx.fillRect(padX, y, contentW, barH);
+  ctx.fillStyle = done ? '#1a7f4b' : '#1f6feb';
+  ctx.fillRect(padX, y, Math.max(barH, contentW * frac), barH);
+  ctx.fillStyle = done ? '#1a7f4b' : '#5a6677';
+  ctx.font = `700 17px ${GIF_SANS}`;
+  ctx.fillText(done ? '✓ done' : `denoising · step ${step} / ${total}`, padX, y + barH + 27);
 
-  ctx.font = '700 26px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-  const lines = gifFormatSqlLines(sql, ctx, innerW, 13);
-  let y = 280;
-  const lineH = 38;
+  // SQL body — syntax-highlighted, with boxy mask tiles
+  y += barH + 56;
+  ctx.font = `700 25px ${GIF_MONO}`;
+  const lineH = 36;
+  const maxLines = Math.max(4, Math.floor((cardY + cardH - 40 - y) / lineH));
+  const lines = gifFormatSqlLines(sql, ctx, contentW, maxLines);
   for (const line of lines) {
-    let x = pad;
+    let x = padX;
     for (const tok of tokenizeSql(line)) {
       const txt = tok || '';
       const w = ctx.measureText(txt).width;
       if (isMaskToken(txt)) {
         ctx.fillStyle = '#c4d0e2';
-        ctx.fillRect(x, y - 24, Math.max(16, w), 28);
+        ctx.fillRect(x + 1, y - 20, Math.max(14, w - 2), 26);
       } else {
         const cls = classifyToken(txt);
         if (cls.includes('keyword')) ctx.fillStyle = '#1f6feb';
         else if (cls.includes('fn')) ctx.fillStyle = '#7c3aed';
         else if (cls.includes('str')) ctx.fillStyle = '#1a7f4b';
-        else if (cls.includes('punct')) ctx.fillStyle = '#556071';
+        else if (cls.includes('punct')) ctx.fillStyle = '#5a6677';
         else ctx.fillStyle = '#0f172a';
         ctx.fillText(txt, x, y);
       }
@@ -703,6 +767,11 @@ function renderGifFrame(ctx, snap, prompt, size = GIF_SIZE) {
     }
     y += lineH;
   }
+
+  // footer
+  ctx.fillStyle = '#aab4c4';
+  ctx.font = `600 14px ${GIF_SANS}`;
+  ctx.fillText('diffusion-llm · masked-diffusion text-to-SQL', padX, cardY + cardH - 22);
 }
 
 function gifWriteShort(out, value) {
@@ -718,12 +787,14 @@ function gifWriteSubBlocks(out, bytes) {
 }
 
 function gifLzwEncode(indices, minCodeSize = 8) {
-  const clear = 1 << minCodeSize;
-  const end = clear + 1;
-  const codeSize = minCodeSize + 1;
+  const clearCode = 1 << minCodeSize;
+  const eoiCode = clearCode + 1;
+  let codeSize = minCodeSize + 1;
+  let dict = new Map();
+  let next = eoiCode + 1;
+  const bytes = [];
   let bitBuf = 0;
   let bitLen = 0;
-  const bytes = [];
 
   function writeCode(code) {
     bitBuf |= code << bitLen;
@@ -735,17 +806,36 @@ function gifLzwEncode(indices, minCodeSize = 8) {
     }
   }
 
-  // Literal-code GIF LZW. This is intentionally low-compression but robust:
-  // emit clear codes frequently enough that code size never grows past 9 bits.
-  for (let i = 0; i < indices.length;) {
-    writeCode(clear);
-    const chunkEnd = Math.min(indices.length, i + 240);
-    while (i < chunkEnd) {
-      writeCode(indices[i]);
-      i += 1;
+  // Standard variable-width GIF LZW with a real dictionary, so the large flat
+  // UI regions compress strongly (keeps high-res GIFs small). Code-size bump
+  // ordering follows the canonical (omggif) encoder: widen *before* assigning
+  // the code that reaches 2^codeSize, otherwise the decoder desyncs.
+  writeCode(clearCode);
+  if (!indices.length) { writeCode(eoiCode); if (bitLen > 0) bytes.push(bitBuf & 255); return bytes; }
+  let prefix = indices[0];
+  for (let i = 1; i < indices.length; i += 1) {
+    const k = indices[i];
+    const key = (prefix << 8) | k;
+    const found = dict.get(key);
+    if (found !== undefined) {
+      prefix = found;
+    } else {
+      writeCode(prefix);
+      if (next === 4096) {
+        writeCode(clearCode);
+        dict = new Map();
+        next = eoiCode + 1;
+        codeSize = minCodeSize + 1;
+      } else {
+        if (next >= (1 << codeSize) && codeSize < 12) codeSize += 1;
+        dict.set(key, next);
+        next += 1;
+      }
+      prefix = k;
     }
   }
-  writeCode(end);
+  writeCode(prefix);
+  writeCode(eoiCode);
   if (bitLen > 0) bytes.push(bitBuf & 255);
   return bytes;
 }
@@ -767,7 +857,7 @@ function buildGifBlob(frames, prompt) {
 
   frames.forEach((snap, idx) => {
     renderGifFrame(ctx, snap, prompt, GIF_SIZE);
-    const delay = idx === 0 ? 70 : (idx === frames.length - 1 ? 220 : 26);
+    const delay = idx === 0 ? 60 : (idx === frames.length - 1 ? 300 : 20);
     out.push(0x21, 0xf9, 0x04, 0x00);
     gifWriteShort(out, delay);
     out.push(0x00, 0x00);
@@ -783,7 +873,7 @@ function buildGifBlob(frames, prompt) {
   return new Blob([new Uint8Array(out)], { type: 'image/gif' });
 }
 
-function selectGifFrames(frames, maxFrames = 18) {
+function selectGifFrames(frames, maxFrames = 24) {
   if (frames.length <= maxFrames) return frames;
   const out = [];
   const lastIdx = frames.length - 1;
