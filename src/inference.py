@@ -128,6 +128,7 @@ MAX_SQL_LEN = max(1, args.max_sql_len)
 ENABLE_GIF = bool(args.enable_gif)
 RUN_TTL_SECONDS = max(60, args.run_ttl_seconds)
 IS_WORKER = bool(args.worker)
+PRELOAD_MODEL = env_bool("PRELOAD_MODEL", IS_WORKER)
 REDIS_URL = args.redis_url
 INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
 ALLOW_FAKE_REDIS = env_bool("ALLOW_FAKE_REDIS", "REDIS_URL" not in os.environ)
@@ -145,6 +146,8 @@ RESULT_CACHE_VERSION = os.environ.get("RESULT_CACHE_VERSION", "v1")
 CHARS_PER_TOKEN_EST = 3.0
 STRUCTURE_TOKEN_RESERVE = 32
 PROMPT_BUDGET_RATIO = 0.35
+EFFECTIVE_LEN_MULTIPLE = 64
+MIN_EFFECTIVE_MAX_LEN = 64
 
 # -------------------------
 # Flask app & template
@@ -211,6 +214,25 @@ def now_ts() -> float:
     return time.time()
 
 
+def configure_torch_cpu_threads() -> None:
+    torch_threads = env_int("TORCH_NUM_THREADS", 0)
+    if torch_threads > 0:
+        try:
+            torch.set_num_threads(torch_threads)
+        except RuntimeError as exc:
+            print(f"[WARN] Could not set TORCH_NUM_THREADS={torch_threads}: {exc}", flush=True)
+
+    interop_threads = env_int("TORCH_INTEROP_THREADS", 1)
+    if interop_threads > 0:
+        try:
+            torch.set_num_interop_threads(interop_threads)
+        except RuntimeError as exc:
+            print(f"[WARN] Could not set TORCH_INTEROP_THREADS={interop_threads}: {exc}", flush=True)
+
+
+configure_torch_cpu_threads()
+
+
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
 
@@ -230,6 +252,19 @@ def compute_char_heuristic_limits(max_len: int, sql_len: int) -> Dict[str, int]:
         "prompt_char_cap": prompt_char_cap,
         "context_char_cap": context_char_cap,
     }
+
+
+def round_up_to_multiple(value: int, multiple: int) -> int:
+    multiple = max(1, int(multiple))
+    return ((max(0, int(value)) + multiple - 1) // multiple) * multiple
+
+
+def compute_effective_max_len(requested_max_len: int, prompt_tokens: int, context_tokens: int, sql_tokens: int) -> int:
+    requested_max_len = max(1, int(requested_max_len))
+    needed_len_with_slack = int(prompt_tokens) + int(context_tokens) + int(sql_tokens) + 9
+    rounded_len = round_up_to_multiple(needed_len_with_slack, EFFECTIVE_LEN_MULTIPLE)
+    effective_len = max(min(requested_max_len, MIN_EFFECTIVE_MAX_LEN), rounded_len)
+    return min(requested_max_len, effective_len)
 
 
 def extract_sql_only_from_text(s: str) -> str:
@@ -858,6 +893,7 @@ def process_run(run_id: str) -> None:
 
 
 def worker_loop():
+    preload_worker_model()
     r = get_redis()
     while True:
         if active_worker_count() >= MAX_CONCURRENT_RUNS:
@@ -1057,6 +1093,18 @@ def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
     MODEL_CACHE.update({"dir": model_dir, "tokenizer": tokenizer, "model": model})
     return tokenizer, model
 
+
+def preload_worker_model() -> None:
+    if not PRELOAD_MODEL:
+        return
+    try:
+        print(f"[INFO] Preloading model/tokenizer from {DEFAULT_MODEL_DIR}", flush=True)
+        load_model_and_tokenizer(DEFAULT_MODEL_DIR, MAX_MAX_LEN)
+        print("[INFO] Model/tokenizer preload complete", flush=True)
+    except Exception as exc:
+        print(f"[WARN] Model/tokenizer preload failed: {exc}", flush=True)
+
+
 # -------------------------
 # Core denoising with callback for snapshots (reports step)
 # -------------------------
@@ -1114,13 +1162,26 @@ def run_denoising_generation_callback(
     sep_id = tokenizer.sep_token_id if tokenizer.sep_token_id is not None else tokenizer.eos_token_id
     tag_id = {t: tokenizer.convert_tokens_to_ids(t) for t in REQUIRED_TAGS}
 
-    sql_len = max(1, min(int(sql_len_request), max_len - 9))
+    requested_max_len = max(9, int(max_len))
+    sql_len = max(1, min(int(sql_len_request), requested_max_len - 9))
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
     context_ids = tokenizer(context_text, add_special_tokens=False)["input_ids"]
-    budget = max_len - sql_len - 9  # CLS + 6 tags + SEP (+1 slack); mirrors training
+    budget = max(0, requested_max_len - sql_len - 9)  # CLS + 6 tags + SEP (+1 slack); mirrors training
     if len(prompt_ids) + len(context_ids) > budget:
-        context_ids = context_ids[: max(0, budget - len(prompt_ids))]
-        prompt_ids = prompt_ids[:budget]
+        if len(prompt_ids) > budget:
+            prompt_ids = prompt_ids[:budget]
+            context_ids = []
+        else:
+            context_ids = context_ids[: max(0, budget - len(prompt_ids))]
+
+    max_len = compute_effective_max_len(
+        requested_max_len=requested_max_len,
+        prompt_tokens=len(prompt_ids),
+        context_tokens=len(context_ids),
+        sql_tokens=sql_len,
+    )
+    if max_len < requested_max_len:
+        log(f"[INFO] Effective sequence length: {max_len} tokens (requested {requested_max_len})")
 
     head = (
         [cls_id, tag_id["<PROMPT>"]] + prompt_ids
@@ -1131,8 +1192,9 @@ def run_denoising_generation_callback(
     sql_start = len(head)                # first maskable SQL position
     ids = head + [mask_id] * sql_len + [tag_id["</SQL>"], sep_id]
     sql_close_idx = sql_start + sql_len  # index of the </SQL> tag
-    attn = [1] * len(ids) + [0] * (max_len - len(ids))
-    ids = ids + [pad_id] * (max_len - len(ids))
+    pad_count = max(0, max_len - len(ids))
+    attn = [1] * len(ids) + [0] * pad_count
+    ids = ids + [pad_id] * pad_count
 
     current_ids = torch.tensor([ids], dtype=torch.long)
     current_attention = torch.tensor([attn], dtype=torch.long)
