@@ -45,7 +45,10 @@ NUM_EPOCHS = 10
 BATCH_SIZE = 128             # safe on a 96 GB GH200 for ModernBERT-base @ seq 512
 LEARNING_RATE = 1e-4         # ~sqrt-scaled from 3e-5@bs32 for the 4x larger batch
 MAX_LEN = 512
-SQL_WINDOW = 128
+SQL_WINDOW = int(os.environ.get("SQL_WINDOW", "256"))
+SQL_GENERATION_MODE = os.environ.get("SQL_GENERATION_MODE", "block").strip().lower()
+if SQL_GENERATION_MODE not in {"block", "fixed"}:
+    raise ValueError("SQL_GENERATION_MODE must be 'block' or 'fixed'")
 TRAIN_SIZE = 100_000
 VAL_SIZE = 500
 T_EPS = 1e-3          # lower bound for mask ratio t
@@ -85,6 +88,7 @@ wandb.init(project="sql-diffusion", name="modernbert-llada-aug", config={
     "batch_size": BATCH_SIZE,
     "max_len": MAX_LEN,
     "sql_window": SQL_WINDOW,
+    "sql_generation_mode": SQL_GENERATION_MODE,
     "train_size": TRAIN_SIZE,
     "val_size": VAL_SIZE,
     "t_eps": T_EPS,
@@ -120,18 +124,32 @@ MASK_ID = tokenizer.mask_token_id
 
 # 4. Token-level Input Construction
 def encode_text(prompt: str, context: str, sql: str):
-    """Builds:
+    """Build the token-level diffusion example.
+
+    block mode (new default):
+        [CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> sql </SQL> [SEP] [PAD]...
+        The generated span includes </SQL>, so inference can stop when the
+        terminator is produced.
+
+    fixed mode (legacy):
         [CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> sql+pads </SQL> [SEP] [PAD]...
-    The SQL span is padded to SQL_WINDOW with PAD tokens that are part of the
-    diffusion target (the model learns to predict PAD => output length).
+        PADs inside the fixed SQL window are prediction targets, matching older
+        checkpoints.
     """
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     context_ids = tokenizer(context, add_special_tokens=False)["input_ids"]
-    sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][:SQL_WINDOW]
-    sql_ids = sql_ids + [PAD_ID] * (SQL_WINDOW - len(sql_ids))
+    if SQL_GENERATION_MODE == "fixed":
+        sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][:SQL_WINDOW]
+        target_ids = sql_ids + [PAD_ID] * (SQL_WINDOW - len(sql_ids))
+        suffix_ids = [TAG_IDS['</SQL>'], SEP_ID]
+    else:
+        sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][: max(1, SQL_WINDOW - 1)]
+        target_ids = sql_ids + [TAG_IDS['</SQL>']]
+        suffix_ids = [SEP_ID]
 
-    # 9 fixed tokens: CLS, 6 tags, SEP — leave the rest for prompt+context
-    budget = MAX_LEN - SQL_WINDOW - 9
+    # Leave room for CLS, prompt/context tags, <SQL>, target span, and suffix.
+    fixed_overhead = 1 + 5 + 1 + len(suffix_ids)
+    budget = MAX_LEN - len(target_ids) - fixed_overhead
     if len(prompt_ids) + len(context_ids) > budget:
         context_ids = context_ids[: max(0, budget - len(prompt_ids))]
         prompt_ids = prompt_ids[:budget]
@@ -142,8 +160,8 @@ def encode_text(prompt: str, context: str, sql: str):
         TAG_IDS['<SQL>']]
     )
     sql_start = len(ids)
-    ids = ids + sql_ids + [TAG_IDS['</SQL>'], SEP_ID]
-    sql_end = sql_start + SQL_WINDOW
+    ids = ids + target_ids + suffix_ids
+    sql_end = sql_start + len(target_ids)
 
     attention = [1] * len(ids) + [0] * (MAX_LEN - len(ids))
     ids = ids + [PAD_ID] * (MAX_LEN - len(ids))
@@ -152,12 +170,15 @@ def encode_text(prompt: str, context: str, sql: str):
         "attention_mask": attention,
         "sql_start": sql_start,
         "sql_end": sql_end,
+        "sql_span_len": sql_end - sql_start,
     }
 
 
 # 5. Model Setup
 model = AutoModelForMaskedLM.from_pretrained(MODEL_NAME)
 model.resize_token_embeddings(len(tokenizer))
+model.config.diffusion_sql_mode = SQL_GENERATION_MODE
+model.config.diffusion_sql_window = SQL_WINDOW
 
 
 # 6. Collator: Augment + Encode + Continuous-t Bernoulli Masking
@@ -191,6 +212,7 @@ def make_collator(augment: bool):
             "attention_mask": attention,
             "labels": labels,
             "loss_weights": 1.0 / t,
+            "span_lengths": torch.tensor([r["sql_span_len"] for r in rows], dtype=torch.float32),
         }
     return collate
 
@@ -203,6 +225,7 @@ eval_collator = make_collator(augment=False)
 class DiffusionTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         weights = inputs.pop("loss_weights")
+        span_lengths = inputs.pop("span_lengths")
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
@@ -211,8 +234,8 @@ class DiffusionTrainer(Trainer):
             logits.view(-1, V).float(), labels.view(-1),
             reduction="none", ignore_index=-100,
         ).view(B, L)
-        # LLaDA objective: (1/t) * sum of masked-token CE, normalized by span length
-        per_example = ce.sum(dim=1) * weights / SQL_WINDOW
+        # LLaDA objective: (1/t) * sum of masked-token CE, normalized by target span length.
+        per_example = ce.sum(dim=1) * weights / span_lengths.clamp_min(1.0).to(ce.device)
         loss = per_example.mean()
         return (loss, outputs) if return_outputs else loss
 
@@ -251,10 +274,13 @@ def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL
         attn = torch.tensor([enc["attention_mask"]], dtype=torch.long, device=device)
         lo, hi = enc["sql_start"], enc["sql_end"]
         ids[0, lo:hi] = MASK_ID
+        forbid_ids = list(TAG_IDS.values())
+        if SQL_GENERATION_MODE == "block":
+            forbid_ids = [tid for tok, tid in TAG_IDS.items() if tok != '</SQL>']
         with autocast_ctx:
             for _ in denoise_steps(
                 model, ids, attn, list(range(lo, hi)), MASK_ID,
-                n_steps=n_steps, forbid_token_ids=list(TAG_IDS.values()),
+                n_steps=n_steps, forbid_token_ids=forbid_ids,
             ):
                 pass
         out_ids = [tid for tid in ids[0, lo:hi].tolist() if tid not in (PAD_ID, MASK_ID)]

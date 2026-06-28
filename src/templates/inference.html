@@ -1263,13 +1263,14 @@
         <div class="info-title">General Info</div>
         <div class="info-card">
           <strong>What is text diffusion here?</strong>
-          <div>A masked-diffusion language model (LLaDA / MaskGIT style). The SQL answer begins as a fixed window of
-            masked tokens; each step predicts every masked position and permanently commits the most confident ones,
-            so the query emerges in parallel instead of left-to-right. During training, the model sees examples at many
-            noise levels by hiding different fractions of the target SQL, then learns to reconstruct only the hidden
-            tokens from the prompt, schema, and visible SQL tokens. Unlike a causal decoder, the transformer can look
-            across the whole proposed SQL window at once, which helps it coordinate table names, joins, filters, and
-            syntax globally. At inference time this runs in reverse: early high-confidence tokens become anchors, and
+          <div>A masked-diffusion language model (LLaDA / MaskGIT style). The SQL answer begins as masked tokens; each
+            step predicts every masked position and permanently commits the most confident ones, so the query emerges
+            in parallel instead of left-to-right. Newer checkpoints decode in short blocks and stop when the SQL
+            terminator appears, instead of always spending work on one large fixed window. During training, the model
+            sees examples at many noise levels by hiding different fractions of the target SQL, then learns to
+            reconstruct only the hidden tokens from the prompt, schema, and visible SQL tokens. Unlike a causal decoder,
+            the transformer can look across the whole proposed SQL window at once, which helps it coordinate table
+            names, joins, filters, and syntax globally. At inference time this runs in reverse: early high-confidence tokens become anchors, and
             later steps use that partially completed query to resolve the remaining blanks. Adaptive early stopping can
             finish before the full step budget when every remaining blank is already predicted with high confidence.
             The animation shows those intermediate states.</div>
@@ -1308,7 +1309,7 @@
     <div class="modal">
       <h2 id="introTitle">Text → SQL via Masked Diffusion</h2>
       <p>This playground turns a natural-language question plus a table schema into SQL. Instead of writing left to
-        right, it starts from a fully-masked SQL window and <strong>denoises in parallel</strong> over a few steps —
+        right, it starts from masked SQL slots and <strong>denoises in parallel</strong> over a few steps —
         you can watch the query resolve token by token.</p>
       <p>Backbone: <strong>ModernBERT-base</strong>, trained LLaDA-style on synthetic text-to-SQL. Early research
         preview running on <strong>CPU</strong>.</p>

@@ -102,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inference-dtype", type=str, default=os.environ.get("INFERENCE_DTYPE", "fp16"), choices=["fp16", "fp32", "bf16", "auto"], help="Preferred model dtype for inference")
     parser.add_argument("--confidence-stop", type=float, default=float(os.environ.get("CONFIDENCE_STOP", "0.9")), help="Adaptive early-stop: commit any masked position whose top-token probability >= this threshold, so easy queries use fewer denoising steps. 0 disables (fixed steps).")
     parser.add_argument("--inference-backend", type=str, default=os.environ.get("INFERENCE_BACKEND", "torch"), choices=["torch", "onnx", "auto"], help="Inference backend for model forwards")
+    parser.add_argument("--sql-generation-mode", type=str, default=os.environ.get("SQL_GENERATION_MODE", "auto"), choices=["block", "fixed", "auto"], help="SQL denoising layout: block predicts </SQL> as a stop token; fixed matches legacy PAD-padded SQL windows; auto uses checkpoint config.")
     parser.add_argument("--onnx-cache-dir", type=str, default=os.environ.get("ONNX_CACHE_DIR", os.path.join(os.getcwd(), "onnx_cache")), help="Writable cache directory for exported ONNX models")
     parser.add_argument("--onnx-opset", type=int, default=env_int("ONNX_OPSET", 17), help="ONNX opset used when exporting")
     return parser
@@ -144,6 +145,7 @@ INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
 # Adaptive early-stop confidence threshold; <=0 or >=1 disables (fixed steps).
 CONFIDENCE_STOP = args.confidence_stop if 0.0 < float(args.confidence_stop) < 1.0 else None
 INFERENCE_BACKEND = (args.inference_backend or "torch").lower()
+SQL_GENERATION_MODE = (args.sql_generation_mode or "block").lower()
 ONNX_CACHE_DIR = os.path.abspath(args.onnx_cache_dir)
 ONNX_OPSET = max(13, int(args.onnx_opset))
 ALLOW_FAKE_REDIS = env_bool("ALLOW_FAKE_REDIS", "REDIS_URL" not in os.environ)
@@ -478,6 +480,7 @@ def cache_signature_payload(payload: Dict) -> Dict:
         "seed": int(DEFAULT_SEED),
         "dtype": INFERENCE_DTYPE,
         "backend": INFERENCE_BACKEND,
+        "sql_generation_mode": SQL_GENERATION_MODE,
     }
 
 
@@ -1017,7 +1020,7 @@ def process_run(run_id: str) -> None:
             display=res.get("display"),
             step_stats=res.get("step_stats", []),
             steps_used=int(res.get("steps_used", 0) or 0),
-            max_steps_cap=int(payload.get("steps", 0) or 0),
+            max_steps_cap=int(res.get("max_steps_cap", payload.get("steps", 0)) or 0),
             confidence_threshold=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else ""),
         )
 
@@ -1047,7 +1050,7 @@ def process_run(run_id: str) -> None:
             write_result_cache(payload, final_sql, res.get("display", ""), cached_snaps, extra={
                 "step_stats": res.get("step_stats", []),
                 "steps_used": int(res.get("steps_used", 0) or 0),
-                "max_steps_cap": int(payload.get("steps", 0) or 0),
+                "max_steps_cap": int(res.get("max_steps_cap", payload.get("steps", 0)) or 0),
                 "confidence_threshold": (CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else None),
             })
     except TimeoutError:
@@ -1277,6 +1280,15 @@ def is_onnx_runner(model) -> bool:
 
 def model_backend_label(model) -> str:
     return getattr(model, "backend_label", "torch")
+
+
+def resolve_sql_generation_mode(model) -> str:
+    requested = SQL_GENERATION_MODE
+    if requested in {"block", "fixed"}:
+        return requested
+    cfg = getattr(model, "config", None)
+    mode = str(getattr(cfg, "diffusion_sql_mode", "") or "").strip().lower()
+    return mode if mode in {"block", "fixed"} else "fixed"
 
 
 def get_model_device(model) -> torch.device:
@@ -1573,18 +1585,158 @@ def run_denoising_generation_callback(
     mask_id = tokenizer.mask_token_id
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-    # Build the input EXACTLY like training's encode_text (train.py): manual token
-    # assembly with [CLS], single-token tags (no inter-tag spaces) and a fixed
-    # mask-filled SQL window padded to max_len. The earlier string-based
-    # construction did not match the training distribution and produced corrupt SQL.
+    # Build inputs with the same token-level tags as train.py. Block mode predicts
+    # </SQL> as a stop token; fixed mode below preserves the legacy PAD-filled
+    # SQL window contract used by older checkpoints.
     cls_id = tokenizer.cls_token_id if tokenizer.cls_token_id is not None else tokenizer.bos_token_id
     sep_id = tokenizer.sep_token_id if tokenizer.sep_token_id is not None else tokenizer.eos_token_id
     tag_id = {t: tokenizer.convert_tokens_to_ids(t) for t in REQUIRED_TAGS}
+    sql_mode = resolve_sql_generation_mode(model)
+    log(f"[INFO] SQL generation mode: {sql_mode}")
 
     requested_max_len = max(9, int(max_len))
     sql_len = max(1, min(int(sql_len_request), requested_max_len - 9))
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
     context_ids = tokenizer(context_text, add_special_tokens=False)["input_ids"]
+    if sql_mode == "block":
+        block_len = max(1, min(32, sql_len))
+        budget = max(0, requested_max_len - sql_len - 8)
+        if len(prompt_ids) + len(context_ids) > budget:
+            if len(prompt_ids) > budget:
+                prompt_ids = prompt_ids[:budget]
+                context_ids = []
+            else:
+                context_ids = context_ids[: max(0, budget - len(prompt_ids))]
+
+        head = (
+            [cls_id, tag_id["<PROMPT>"]] + prompt_ids
+            + [tag_id["</PROMPT>"], tag_id["<CONTEXT>"]] + context_ids
+            + [tag_id["</CONTEXT>"], tag_id["<SQL>"]]
+        )
+        generated_ids: List[int] = []
+        end_sql_id = int(tag_id["</SQL>"])
+        pad_token = tokenizer.pad_token or "<pad>"
+        sample_temperature = 0.0 if int(top_k) <= 1 else 1.0
+        special_forbid = set(getattr(tokenizer, "all_special_ids", []) or [])
+        special_forbid.update(tag_id.values())
+        special_forbid.discard(end_sql_id)
+        special_forbid.discard(int(mask_id))
+        forbid_ids = list(special_forbid)
+        max_blocks = int(math.ceil(sql_len / block_len))
+        block_steps = max(1, min(int(n_steps), block_len))
+
+        def block_sql_text(ids_for_display: List[int]) -> str:
+            visible = []
+            for tid in ids_for_display:
+                tid = int(tid)
+                if tid == end_sql_id:
+                    break
+                visible.append(tid)
+            return strip_final_masks(decode_sql_from_token_ids(tokenizer, visible, mask_id=mask_id, pad_id=pad_id))
+
+        def snapshot_text_for(ids_for_display: List[int]) -> str:
+            body = tokenizer.decode(ids_for_display, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+            body = body.replace(mask_token, " ____").replace(pad_token, "")
+            return f"<SQL>{body}</SQL>"
+
+        snapshots: List[Dict] = []
+        step_stats: List[Dict] = []
+        steps_used = 0
+        last_render = None
+        stopped = False
+
+        if animate:
+            initial = " ".join(["____"] * min(block_len, 6))
+            snapshots.append({"text": f"<SQL>{initial}</SQL>", "sql_only": initial, "step": 0, "total_steps": block_steps * max_blocks})
+            if on_snapshot:
+                on_snapshot(snapshots[-1])
+            last_render = initial
+
+        log(f"[INFO] Starting block denoising: mode=block block_len={block_len} max_sql_len={sql_len}")
+        t0 = time.time()
+        device = get_model_device(model)
+
+        for block_idx in range(max_blocks):
+            if should_stop is not None and should_stop():
+                raise TimeoutError("Run cancelled or timed out")
+            remaining = sql_len - len(generated_ids)
+            if remaining <= 0:
+                break
+            this_block_len = min(block_len, remaining)
+            current_len = compute_effective_max_len(
+                requested_max_len=requested_max_len,
+                prompt_tokens=len(prompt_ids),
+                context_tokens=len(context_ids),
+                sql_tokens=len(generated_ids) + this_block_len,
+            )
+            ids = head + generated_ids + [mask_id] * this_block_len + [sep_id]
+            pad_count = max(0, current_len - len(ids))
+            attn = [1] * len(ids) + [0] * pad_count
+            ids = ids + [pad_id] * pad_count
+            current_ids = torch.tensor([ids], dtype=torch.long, device=device)
+            current_attention = torch.tensor([attn], dtype=torch.long, device=device)
+            block_start = len(head) + len(generated_ids)
+            block_positions = list(range(block_start, block_start + this_block_len))
+            current_steps = max(1, min(block_steps, this_block_len))
+
+            for step_idx, total_steps, current_ids in denoise_steps(
+                model,
+                current_ids,
+                current_attention,
+                block_positions,
+                mask_id,
+                n_steps=current_steps,
+                temperature=sample_temperature,
+                forbid_token_ids=forbid_ids,
+                should_stop=should_stop,
+                confidence_stop=confidence_stop,
+                on_step_stats=step_stats.append,
+            ):
+                steps_used += 1
+                if status_cb:
+                    status_cb(f"block {block_idx+1}/{max_blocks} step {step_idx+1}/{total_steps}")
+                if animate and step_idx + 1 < total_steps:
+                    block_now = current_ids[0, block_start : block_start + this_block_len].detach().cpu().tolist()
+                    r = block_sql_text(generated_ids + block_now)
+                    if r and r != last_render:
+                        last_render = r
+                        snapshots.append({
+                            "text": snapshot_text_for(generated_ids + block_now),
+                            "sql_only": r,
+                            "step": steps_used,
+                            "total_steps": block_steps * max_blocks,
+                        })
+                        if on_snapshot:
+                            on_snapshot(snapshots[-1])
+
+            block_out = current_ids[0, block_start : block_start + this_block_len].detach().cpu().tolist()
+            if end_sql_id in [int(tid) for tid in block_out]:
+                stop_idx = [int(tid) for tid in block_out].index(end_sql_id)
+                generated_ids.extend(block_out[:stop_idx])
+                stopped = True
+                break
+            generated_ids.extend(block_out)
+
+        final_sql_only = block_sql_text(generated_ids)
+        if animate:
+            snapshots.append({"text": f"<SQL>{final_sql_only}</SQL>", "sql_only": final_sql_only, "step": steps_used, "total_steps": steps_used})
+            if on_snapshot:
+                on_snapshot(snapshots[-1])
+
+        t1 = time.time()
+        log(f"[INFO] Block denoising took {t1 - t0:.2f}s ({'stopped' if stopped else 'budget exhausted'})")
+        display = f"<SQL>{final_sql_only}</SQL>"
+        if not animate:
+            snapshots = [{"text": display, "sql_only": final_sql_only, "step": steps_used, "total_steps": steps_used}]
+        return {
+            "snapshots": snapshots,
+            "sql_only": final_sql_only,
+            "display": display,
+            "steps_used": steps_used,
+            "max_steps_cap": block_steps * max_blocks,
+            "step_stats": step_stats,
+        }
+
     budget = max(0, requested_max_len - sql_len - 9)  # CLS + 6 tags + SEP (+1 slack); mirrors training
     if len(prompt_ids) + len(context_ids) > budget:
         if len(prompt_ids) > budget:
@@ -1641,8 +1793,8 @@ def run_denoising_generation_callback(
     def render_sql_window():
         """Animation-friendly view of the SQL span in *content space*.
 
-        Real SQL tokens form a prefix; the SQL window is PAD-filled out to 128
-        slots. Rendering all 128 means most denoising steps only commit PAD ->
+        Real SQL tokens form a prefix; the SQL window is PAD-filled out to a
+        fixed number of slots. Rendering all slots means most denoising steps only commit PAD ->
         empty, producing dead frames. So we trim everything past the last
         committed real token (the "query ended here" region) and show the
         still-masked content positions as ``____`` glyphs that pop in by
@@ -1654,7 +1806,7 @@ def run_denoising_generation_callback(
             if tid != mask_id and tid != pad_id:
                 content_end = i + 1
         if content_end == 0:
-            # Length not decided yet: short pending field instead of 128 slots.
+            # Length not decided yet: short pending field instead of the full fixed window.
             pending = min(sum(1 for tid in window if tid == mask_id), 6)
             return " ".join(["____"] * pending)
         body = [tid for tid in window[:content_end] if tid != pad_id]
@@ -1734,6 +1886,7 @@ def run_denoising_generation_callback(
         "sql_only": sql_only,
         "display": display,
         "steps_used": steps_used,
+        "max_steps_cap": total_steps,
         "step_stats": step_stats,
     }
 

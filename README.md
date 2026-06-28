@@ -10,9 +10,11 @@ A masked diffusion language model (LLaDA-style) for text-to-SQL generation, buil
 
 - Backbone: `answerdotai/ModernBERT-base` with an MLM head.
 - Inputs are built at the token level:
-  `[CLS] <PROMPT> ... </PROMPT> <CONTEXT> ... </CONTEXT> <SQL> sql + [PAD]s </SQL> [SEP]`
-  The SQL span is a fixed 128-token window; `[PAD]` tokens inside it are real
-  prediction targets, so the model learns output length.
+  `[CLS] <PROMPT> ... </PROMPT> <CONTEXT> ... </CONTEXT> <SQL> target [SEP]`.
+  New checkpoints default to `SQL_GENERATION_MODE=block`, where the denoised
+  target is `sql </SQL>` and inference stops once `</SQL>` is generated.
+  Legacy `SQL_GENERATION_MODE=fixed` keeps the old `sql + [PAD]s </SQL>` fixed
+  window contract for compatibility with older checkpoints.
 - Forward (noising) process: per example a continuous mask ratio `t ~ U(0, 1]`
   is drawn and each SQL-span token is masked independently with probability `t`.
 - Loss: cross-entropy on masked positions weighted by `1/t` (the discrete
@@ -25,7 +27,8 @@ A masked diffusion language model (LLaDA-style) for text-to-SQL generation, buil
 
 Confidence-based iterative unmasking (MaskGIT/LLaDA decoding):
 
-1. The SQL window starts fully masked.
+1. The SQL target starts fully masked: either one legacy fixed window, or a
+   shorter block that can be extended if no stop token appears.
 2. Each step predicts only the currently masked positions.
 3. The most confident predictions are committed permanently (cosine schedule:
    few commits early, more as context fills in).
@@ -35,6 +38,10 @@ Confidence-based iterative unmasking (MaskGIT/LLaDA decoding):
    whose top-token probability is already `>= confidence_stop` is also committed,
    so easy queries empty the window in far fewer forward passes. The step slider
    becomes a *maximum*; the actual number of steps adapts to difficulty.
+6. New block-mode checkpoints decode SQL in 32-token mask blocks and append
+   another block only if `</SQL>` was not produced. In block mode, the steps
+   setting is the denoising cap per block; telemetry reports the total cap
+   across all blocks.
 
 ### Decoding efficiency (steps vs. autoregressive)
 
@@ -189,6 +196,7 @@ Web service listens on `:7860` and is designed to be put behind Caddy/Nginx.
 - `--max-steps`
 - `--max-max-len`
 - `--max-sql-len`
+- `--sql-generation-mode` (`auto`, `block`, or `fixed`; `auto` reads checkpoint config and falls back to legacy `fixed`)
 - `--confidence-stop` (adaptive early-stop threshold; default `0.9`, `0` disables)
 - `--enable-gif`
 - `--run-ttl-seconds`
