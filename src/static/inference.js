@@ -16,6 +16,7 @@ let historyByStep = new Map();
 let pendingSnapshots = [];
 let donePayload = null;
 let exportableRunId = null;
+let gifDownloadUrl = '';
 let lastSnapshotCount = 0;
 let lastStatusMsg = "";
 let lastCompletedSnapshots = [];
@@ -49,6 +50,7 @@ const snapSlider = document.getElementById('snapSlider');
 const snapSliderLabel = document.getElementById('snapSliderLabel');
 const queueChip = document.getElementById('queueChip');
 const exportGifBtn = document.getElementById('exportGifBtn');
+const gifDownloadLink = document.getElementById('gifDownloadLink');
 const liveTokenPre = document.getElementById('liveTokenPre');
 const promptInput = document.getElementById('prompt');
 const contextInput = document.getElementById('context');
@@ -343,6 +345,7 @@ function resetRunState() {
 
   runId = null;
   exportableRunId = null;
+  clearGifDownloadLink();
   if (exportGifBtn) exportGifBtn.disabled = true;
   runSessionId += 1;
   terminalStateReached = false;
@@ -568,7 +571,7 @@ function snapshotText(snap) {
   return normalizeSQLDisplay(snap.sql_only || extractSQL(snap.text || ''));
 }
 
-const GIF_SIZE = 760;
+const GIF_SIZE = 560;
 const GIF_SANS = '-apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 const GIF_MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 
@@ -890,6 +893,26 @@ function selectGifFrames(frames, maxFrames = 24) {
   return out;
 }
 
+function clearGifDownloadLink() {
+  if (gifDownloadUrl) {
+    URL.revokeObjectURL(gifDownloadUrl);
+    gifDownloadUrl = '';
+  }
+  if (gifDownloadLink) {
+    gifDownloadLink.removeAttribute('href');
+    gifDownloadLink.classList.remove('visible');
+  }
+}
+
+function setGifDownloadLink(url) {
+  clearGifDownloadLink();
+  gifDownloadUrl = url;
+  if (gifDownloadLink) {
+    gifDownloadLink.href = url;
+    gifDownloadLink.classList.add('visible');
+  }
+}
+
 function exportGifInBrowser() {
   const frames = cloneSnapshots(historySnapshots);
   if (terminalSqlText) {
@@ -904,15 +927,15 @@ function exportGifInBrowser() {
     }
   }
   if (!frames.length) throw new Error('No animation frames available.');
-  const blob = buildGifBlob(selectGifFrames(frames), promptInput ? promptInput.value : '');
+  const blob = buildGifBlob(selectGifFrames(frames, 18), promptInput ? promptInput.value : '');
   const url = URL.createObjectURL(blob);
+  setGifDownloadLink(url);
   const a = document.createElement('a');
   a.href = url;
   a.download = 'text2sql-diffusion.gif';
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
   return blob.size;
 }
 
@@ -1753,8 +1776,8 @@ if (exportGifBtn) {
     };
     try {
       const size = exportGifInBrowser();
-      setStatus(`GIF ready (${Math.max(1, Math.round(size / 1024))} KB).`);
-      setTimeout(resetLabel, 800);
+      setStatus(`GIF ready (${Math.max(1, Math.round(size / 1024))} KB). If the download did not start, use the Download ready link.`);
+      setTimeout(resetLabel, 1200);
     } catch (err) {
       exportGifBtn.textContent = 'Export failed';
       setStatus(err && err.message ? err.message : 'GIF export failed.');

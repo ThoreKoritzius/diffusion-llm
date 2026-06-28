@@ -153,9 +153,9 @@ Web service listens on `:7860` and is designed to be put behind Caddy/Nginx.
 - Timeout per run: `90s`.
 - Max prompt chars: `1000`.
 - Max context chars: `8000`.
-- Max steps: `48`.
+- Max steps: `64`.
 - Max max_len: `512`.
-- Max sql_len: `128`.
+- Max sql_len: `256`.
 - Adaptive early-stop threshold (`CONFIDENCE_STOP`): `0.9` (on; `0` disables).
 - Run TTL cleanup: `900s`.
 - GIF generation: disabled unless `--enable-gif` is set.
