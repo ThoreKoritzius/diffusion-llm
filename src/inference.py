@@ -1839,7 +1839,7 @@ def start_run():
     form = request.form
     prompt = form.get("prompt", "").strip()
     context = form.get("context", "").strip()
-    model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
+    model_dir = DEFAULT_MODEL_DIR
     gif_size_text = form.get("gif_size", "").strip()
     early_stop = form.get("early_stop", "1").strip().lower() not in ("0", "false", "off", "no", "")
     try:

@@ -583,8 +583,7 @@
 
     textarea,
     input[type="text"],
-    input[type="number"],
-    input[type="file"] {
+    input[type="number"] {
       width: 100%;
       min-height: 44px;
       border: 1px solid var(--color-border);
@@ -770,36 +769,75 @@
       color: var(--color-text);
     }
 
-    .csv-preview {
-      border: 1px solid var(--color-border);
+    .csv-upload-row {
+      min-height: 44px;
+      border: 1px solid var(--color-border-soft);
       border-radius: var(--radius-xs);
       background: #fff;
-      max-height: 220px;
-      overflow: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px;
     }
 
-    #csvTableWrapper table {
-      border-collapse: collapse;
-      width: 100%;
-      font-family: var(--mono);
-      font-size: 12.5px;
+    .csv-upload-row input[type="file"] {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      opacity: 0;
+      pointer-events: none;
     }
 
-    #csvTableWrapper th,
-    #csvTableWrapper td {
+    .csv-upload-btn {
+      min-height: 30px;
       border: 1px solid var(--color-border);
-      padding: 4px 8px;
-      text-align: left;
-      max-width: 180px;
-      overflow-wrap: break-word;
-      background: #fff;
+      border-radius: var(--radius-xs);
+      background: var(--color-surface-soft);
+      color: var(--color-text);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      padding: 0 11px;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: border-color 140ms ease, background 140ms ease;
     }
 
-    #csvTableWrapper th {
-      position: sticky;
-      top: 0;
-      background: #edf3ff;
-      color: #1e3f84;
+    .csv-upload-btn:hover {
+      border-color: var(--color-accent);
+      background: #eef5ff;
+    }
+
+    .csv-upload-row:focus-within {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.12);
+    }
+
+    .csv-upload-meta {
+      min-width: 0;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      flex: 1 1 auto;
+    }
+
+    .csv-upload-title {
+      color: var(--color-text);
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .csv-upload-status {
+      color: var(--color-muted);
+      font-size: 12px;
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .hint {
@@ -1113,10 +1151,14 @@
                 </summary>
                 <div class="advanced-content">
                   <div class="field-wrap">
-                    <label class="field-label" for="csvInput">Upload CSV</label>
-                    <input type="file" id="csvInput" accept=".csv" />
-                    <div class="csv-preview" id="csvTableWrapper"></div>
-                    <div class="hint">CSV preview shows first 30 rows. Schema is written into Context.</div>
+                    <div class="csv-upload-row">
+                      <input type="file" id="csvInput" accept=".csv" />
+                      <label class="csv-upload-btn" for="csvInput">CSV</label>
+                      <div class="csv-upload-meta">
+                        <span class="csv-upload-title">Import schema</span>
+                        <span class="csv-upload-status" id="csvUploadStatus">to Context</span>
+                      </div>
+                    </div>
                   </div>
 
                   <label class="toggle-row" for="early_stop">
@@ -1167,10 +1209,6 @@
                         value="1" />
                     </div>
 
-                    <div class="ctrl-row">
-                      <label class="field-label" for="model_dir">Model Dir</label>
-                      <input name="model_dir" id="model_dir" type="text" value="{{ model_dir }}" />
-                    </div>
                     <input type="hidden" name="max_len" id="max_len" value="{{ max_model_len }}" />
                   </div>
                 </div>

@@ -55,6 +55,8 @@ const contextInput = document.getElementById('context');
 const sqlLenInput = document.getElementById('sql_len');
 const maxLenInput = document.getElementById('max_len');
 const earlyStopInput = document.getElementById('early_stop');
+const csvInput = document.getElementById('csvInput');
+const csvUploadStatus = document.getElementById('csvUploadStatus');
 
 const viewTabs = Array.from(document.querySelectorAll('.view-tab'));
 const inferencePanel = document.getElementById('view-inference');
@@ -104,7 +106,6 @@ function buildRunSignature(form) {
     'sql_len',
     'top_k',
     'top_p',
-    'model_dir',
     'early_stop',
   ];
   const data = {};
@@ -691,11 +692,13 @@ function renderGifFrame(ctx, snap, prompt, size = GIF_SIZE) {
   const cardX = M, cardY = M, cardW = W - 2 * M, cardH = H - 2 * M;
   const padX = cardX + 34;
   const contentW = cardW - 68;
-  const sql = isTerminalSnapshot(snap) ? sanitizeFinalSql(snapshotText(snap)) : snapshotText(snap);
+  const term = isTerminalSnapshot(snap);
+  const sql = term ? sanitizeFinalSql(snapshotText(snap)) : snapshotText(snap);
   const step = Number(snap.step) || 0;
   const total = Math.max(1, Number(snap.total_steps) || step || 1);
-  const frac = Math.max(0, Math.min(1, step / total));
-  const done = frac >= 1;
+  // The terminal frame is complete even when early stop finished before the cap.
+  const done = term || step >= total;
+  const frac = done ? 1 : Math.max(0, Math.min(1, step / total));
 
   ctx.textBaseline = 'alphabetic';
   // backdrop + card
@@ -738,7 +741,10 @@ function renderGifFrame(ctx, snap, prompt, size = GIF_SIZE) {
   ctx.fillRect(padX, y, Math.max(barH, contentW * frac), barH);
   ctx.fillStyle = done ? '#1a7f4b' : '#5a6677';
   ctx.font = `700 17px ${GIF_SANS}`;
-  ctx.fillText(done ? '✓ done' : `denoising · step ${step} / ${total}`, padX, y + barH + 27);
+  const label = done
+    ? (step > 0 ? `✓ done in ${step} step${step === 1 ? '' : 's'}` : '✓ done')
+    : `denoising · step ${step} / ${total}`;
+  ctx.fillText(label, padX, y + barH + 27);
 
   // SQL body — syntax-highlighted, with boxy mask tiles
   y += barH + 56;
@@ -1569,24 +1575,14 @@ function processCSV(text) {
   if (!dataRow) dataRow = headers.map(() => '');
 
   const types = dataRow.map(guessType);
-  const dataRows = lines.slice(1).map((row) => row.split(',')).slice(0, 30);
-
-  let html = `<table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>`;
-  if (!dataRows.length) {
-    html += `<tr><td colspan="${headers.length}"><em>No data rows</em></td></tr>`;
-  }
-  dataRows.forEach((row) => {
-    html += `<tr>${headers.map((_, i) => `<td>${row[i] !== undefined ? row[i] : ''}</td>`).join('')}</tr>`;
-  });
-  html += '</tbody></table>';
-
-  document.getElementById('csvTableWrapper').innerHTML = html;
-
   const colDefs = headers.map((h, i) => `  ${h} ${types[i] || 'TEXT'}`).join(',\n');
   const createStmt = `CREATE TABLE table_name (\n${colDefs}\n);`;
   if (contextInput) {
     contextInput.value = createStmt;
     applyCharLimits(contextInput);
+  }
+  if (csvUploadStatus) {
+    csvUploadStatus.textContent = `${headers.length} col${headers.length === 1 ? '' : 's'} imported`;
   }
 }
 
@@ -1705,9 +1701,10 @@ if (sqlLenInput) {
 
 applyCharLimits();
 
-document.getElementById('csvInput').addEventListener('change', (ev) => {
+if (csvInput) csvInput.addEventListener('change', (ev) => {
   const file = ev.target.files[0];
   if (!file) return;
+  if (csvUploadStatus) csvUploadStatus.textContent = file.name;
   const reader = new FileReader();
   reader.onload = (e) => processCSV(e.target.result);
   reader.readAsText(file);
