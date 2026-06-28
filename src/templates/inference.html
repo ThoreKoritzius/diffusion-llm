@@ -794,6 +794,56 @@
       white-space: pre-wrap;
     }
 
+    /* ---- Confidence-over-steps chart ---- */
+    .conf-chart {
+      border: 1px solid var(--color-border-soft);
+      background: var(--color-surface-soft);
+      padding: 10px 12px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .conf-chart-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .conf-chart-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--color-muted);
+    }
+
+    .conf-chart-meta {
+      font-size: 11px;
+      color: var(--color-muted);
+      font-family: var(--mono);
+      white-space: nowrap;
+    }
+
+    .conf-chart-body {
+      min-height: 134px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .conf-chart-body svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .conf-empty {
+      font-size: 12px;
+      color: var(--color-muted);
+      opacity: 0.7;
+      text-align: center;
+      line-height: 1.5;
+    }
+
     .info-panel {
       padding: var(--space-4);
       display: grid;
@@ -1098,6 +1148,16 @@
             </form>
 
             <div id="status" class="status" aria-live="polite">Ready.</div>
+
+            <div class="conf-chart" id="confChart" data-state="idle">
+              <div class="conf-chart-head">
+                <span class="conf-chart-title">Token confidence over steps</span>
+                <span class="conf-chart-meta" id="confChartMeta"></span>
+              </div>
+              <div class="conf-chart-body" id="confChartBody">
+                <span class="conf-empty">Run a generation to see how confidence rises and when it early-stops.</span>
+              </div>
+            </div>
           </div>
 
           <div class="action-row" id="actionRow">

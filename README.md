@@ -66,9 +66,9 @@ context to resolve the rest:
 | **0.90** (default)| **0.397** | **0.414** | **8.8** |
 
 Easy queries finish in ~4 passes, hard ones use up to the cap. Defaults:
-`default_steps = 16`, `CONFIDENCE_STOP = 0.9`. Toggle per run in the playground's
-Advanced panel, or globally via `--confidence-stop` / `CONFIDENCE_STOP` (set `0`
-to disable).
+`default_steps = 20` (the cap; early stop adapts down from there),
+`CONFIDENCE_STOP = 0.9`. Toggle per run in the playground's Advanced panel, or
+globally via `--confidence-stop` / `CONFIDENCE_STOP` (set `0` to disable).
 
 ## Features
 

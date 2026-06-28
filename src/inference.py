@@ -397,6 +397,22 @@ def from_redis_run(raw: Dict[str, str]) -> Dict:
             out["payload"] = {}
     else:
         out["payload"] = {}
+    if out.get("step_stats"):
+        try:
+            out["step_stats"] = json.loads(out["step_stats"])
+        except json.JSONDecodeError:
+            out["step_stats"] = []
+    else:
+        out["step_stats"] = []
+    for k in ("steps_used", "max_steps_cap"):
+        try:
+            out[k] = int(out[k]) if out.get(k) not in (None, "") else None
+        except (ValueError, TypeError):
+            out[k] = None
+    try:
+        out["confidence_threshold"] = float(out["confidence_threshold"]) if out.get("confidence_threshold") not in (None, "") else None
+    except (ValueError, TypeError):
+        out["confidence_threshold"] = None
     return out
 
 
@@ -486,7 +502,7 @@ def read_result_cache(payload: Dict) -> Dict | None:
     return cached
 
 
-def write_result_cache(payload: Dict, sql_only: str, display: str, snapshots: List[Dict]) -> None:
+def write_result_cache(payload: Dict, sql_only: str, display: str, snapshots: List[Dict], extra: Dict | None = None) -> None:
     if not RESULT_CACHE_ENABLED or not snapshots:
         return
     cached = {
@@ -496,6 +512,8 @@ def write_result_cache(payload: Dict, sql_only: str, display: str, snapshots: Li
         "snapshots": snapshots,
         "created_at": now_ts(),
     }
+    if extra:
+        cached.update(extra)
     get_redis().setex(result_cache_key(payload), RESULT_CACHE_TTL_SECONDS, json.dumps(cached))
 
 
@@ -519,6 +537,10 @@ def create_cached_run(payload: Dict, cached: Dict) -> str:
         "snapshot_count": 0,
         "payload": payload,
         "cache_hit": True,
+        "step_stats": cached.get("step_stats", []),
+        "steps_used": cached.get("steps_used", ""),
+        "max_steps_cap": cached.get("max_steps_cap", ""),
+        "confidence_threshold": cached.get("confidence_threshold", ""),
     })
     for snap in snapshots:
         redis_append_snapshot(run_id, snap)
@@ -989,7 +1011,15 @@ def process_run(run_id: str) -> None:
             confidence_stop=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) else None),
         )
         final_sql = strip_final_masks(res.get("sql_only", ""))
-        redis_update_run(run_id, sql_only=final_sql, display=res.get("display"))
+        redis_update_run(
+            run_id,
+            sql_only=final_sql,
+            display=res.get("display"),
+            step_stats=res.get("step_stats", []),
+            steps_used=int(res.get("steps_used", 0) or 0),
+            max_steps_cap=int(payload.get("steps", 0) or 0),
+            confidence_threshold=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else ""),
+        )
 
         if ENABLE_GIF and not should_stop():
             os.makedirs(OUT_DIR, exist_ok=True)
@@ -1014,7 +1044,12 @@ def process_run(run_id: str) -> None:
             elapsed = max(0.01, now_ts() - start_time)
             update_metric_average("avg_duration", "count", elapsed)
             _snap_count, cached_snaps = redis_get_snapshot_delta(run_id, 0)
-            write_result_cache(payload, final_sql, res.get("display", ""), cached_snaps)
+            write_result_cache(payload, final_sql, res.get("display", ""), cached_snaps, extra={
+                "step_stats": res.get("step_stats", []),
+                "steps_used": int(res.get("steps_used", 0) or 0),
+                "max_steps_cap": int(payload.get("steps", 0) or 0),
+                "confidence_threshold": (CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else None),
+            })
     except TimeoutError:
         set_run_terminal(run_id, state="timed_out", status="timed out")
     except Exception as e:
@@ -1642,6 +1677,7 @@ def run_denoising_generation_callback(
     forbid_ids = [vocab[t] for t in REQUIRED_TAGS if t in vocab]
 
     steps_used = 0
+    step_stats: List[Dict] = []
     for step_idx, total_steps, current_ids in denoise_steps(
         model,
         current_ids,
@@ -1653,6 +1689,7 @@ def run_denoising_generation_callback(
         forbid_token_ids=forbid_ids,
         should_stop=should_stop,
         confidence_stop=confidence_stop,
+        on_step_stats=step_stats.append,
     ):
         steps_used = step_idx + 1  # adaptive early-stop may finish before total_steps
         if status_cb:
@@ -1667,6 +1704,9 @@ def run_denoising_generation_callback(
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
 
+    # Use the count of committing steps (early stop can add a final no-op yield).
+    if step_stats:
+        steps_used = len(step_stats)
     final_token_slice = current_ids[0, sql_open_idx + 1 : sql_close_idx].detach().cpu().tolist()
     final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))
     if animate:
@@ -1689,7 +1729,13 @@ def run_denoising_generation_callback(
     if not animate:
         snapshots = [{"text": display, "sql_only": sql_only, "step": steps_used, "total_steps": total_steps}]
 
-    return {"snapshots": snapshots, "sql_only": sql_only, "display": display, "steps_used": steps_used}
+    return {
+        "snapshots": snapshots,
+        "sql_only": sql_only,
+        "display": display,
+        "steps_used": steps_used,
+        "step_stats": step_stats,
+    }
 
 # -------------------------
 # Flask endpoints
@@ -1771,7 +1817,7 @@ def index():
         model_dir=DEFAULT_MODEL_DIR or "",
         max_model_len=MAX_MAX_LEN,
         max_steps=MAX_STEPS,
-        default_steps=min(16, MAX_STEPS),
+        default_steps=min(20, MAX_STEPS),
         max_sql_len=MAX_SQL_LEN,
         default_sql_len=max(1, min(128, MAX_SQL_LEN)),
         max_prompt_chars=MAX_PROMPT_CHARS,
@@ -1995,6 +2041,10 @@ def stream(run_id):
                 "gif_url": run_now.get("gif_url"),
                 "state": run_now.get("state"),
                 "status": run_now.get("status"),
+                "step_stats": run_now.get("step_stats"),
+                "steps_used": run_now.get("steps_used"),
+                "max_steps_cap": run_now.get("max_steps_cap"),
+                "confidence_threshold": run_now.get("confidence_threshold"),
             }
             if is_done and not done_sent:
                 yield f"event: done\\ndata: {json.dumps(payload)}\\n\\n"
@@ -2043,6 +2093,10 @@ def run_state(run_id):
         "cache_hit": bool(run.get("cache_hit")),
         "snapshot_count": snap_count,
         "snapshots": delta,
+        "step_stats": run.get("step_stats"),
+        "steps_used": run.get("steps_used"),
+        "max_steps_cap": run.get("max_steps_cap"),
+        "confidence_threshold": run.get("confidence_threshold"),
         "demand": demand.get("demand"),
         "started_at": run.get("started_at"),
         "finished_at": run.get("finished_at"),

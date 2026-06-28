@@ -30,6 +30,7 @@ def denoise_steps(
     forbid_token_ids: Optional[List[int]] = None,
     should_stop=None,
     confidence_stop: Optional[float] = None,
+    on_step_stats=None,
 ) -> Iterator[Tuple[int, int, torch.Tensor]]:
     """Iteratively fill mask tokens at `fill_positions` in `current_ids` (shape (1, L)).
 
@@ -100,5 +101,17 @@ def denoise_steps(
 
         commit = torch.topk(conf, n_commit).indices
         current_ids[0, masked_pos[commit]] = pred[commit]
+
+        # Per-step confidence telemetry (probabilities) for visualisation.
+        if on_step_stats is not None:
+            cc = clean_conf
+            on_step_stats({
+                "step": step_idx + 1,
+                "masked": int(masked_pos.numel()),
+                "commit": int(n_commit),
+                "min_p": float(torch.exp(cc.min())),
+                "mean_p": float(torch.exp(cc.mean())),
+                "commit_p": float(torch.exp(cc[commit].mean())),
+            })
 
         yield step_idx, total_steps, current_ids

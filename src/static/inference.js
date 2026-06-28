@@ -22,6 +22,7 @@ let lastCompletedSnapshots = [];
 let lastCompletedTerminalSql = "";
 let lastCompletedSignature = "";
 let pendingRunSignature = "";
+let lastChartData = null;
 
 let queueEtaBaseline = null;
 let queueEtaSeconds = null;
@@ -34,6 +35,9 @@ const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)
 
 const stepBox = document.getElementById('stepBox');
 const effPill = document.getElementById('effPill');
+const confChart = document.getElementById('confChart');
+const confChartBody = document.getElementById('confChartBody');
+const confChartMeta = document.getElementById('confChartMeta');
 const statusBox = document.getElementById('status');
 const runBtn = document.getElementById('runBtn');
 const runBtnLabel = document.getElementById('runBtnLabel');
@@ -367,6 +371,7 @@ function resetRunState() {
   if (snapSlider) snapSlider.disabled = true;
   if (snapSliderLabel) snapSliderLabel.textContent = 'Timeline';
   setEfficiencyIdle();
+  setConfChartIdle();
   setUiState(UI_MODES.IDLE);
 }
 
@@ -870,10 +875,10 @@ function computeEfficiency() {
 
 function setEfficiencyIdle() {
   if (!effPill) return;
-  effPill.textContent = '⚡ vs AR: —';
+  effPill.textContent = '⚡ vs traditional: —';
   effPill.dataset.state = 'idle';
   effPill.title = 'After a run, this shows how many fewer forward passes (steps) '
-    + 'masked-diffusion decoding used versus autoregressive decoding.';
+    + 'masked-diffusion decoding used versus traditional autoregressive (token-by-token) decoding.';
 }
 
 function updateEfficiencyReadout() {
@@ -882,15 +887,123 @@ function updateEfficiencyReadout() {
   if (!eff) { setEfficiencyIdle(); return; }
   const r = eff.ratio;
   if (r >= 1.05) {
-    effPill.textContent = `⚡ ${r.toFixed(1)}× fewer steps`;
+    // "vs AR" = versus traditional autoregressive (token-by-token) decoding; tooltip spells it out.
+    effPill.textContent = `⚡ ${r.toFixed(1)}× fewer steps vs AR`;
     effPill.dataset.state = 'good';
   } else {
     effPill.textContent = `⚡ ${eff.steps} steps`;
     effPill.dataset.state = 'neutral';
   }
   effPill.title = `This run: ${eff.steps} diffusion steps filled the SQL window in parallel. `
-    + `Autoregressive decoding emits ~1 token per step (~${eff.arSteps} steps for this output) → `
-    + `${r.toFixed(2)}× ${r >= 1 ? 'fewer' : 'more'} forward passes.`;
+    + `Traditional autoregressive (token-by-token) decoding emits ~1 token per step `
+    + `(~${eff.arSteps} steps for this output) → ${r.toFixed(2)}× ${r >= 1 ? 'fewer' : 'more'} forward passes.`;
+}
+
+// --- Token-confidence-over-steps chart ---------------------------------------
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function chartDataFromPayload(p) {
+  const stats = p && Array.isArray(p.step_stats) ? p.step_stats.filter((s) => s && Number.isFinite(Number(s.step))) : null;
+  if (!stats || !stats.length) return null;
+  const used = numOrNull(p.steps_used) || stats.length;
+  const cap = Math.max(numOrNull(p.max_steps_cap) || used, used);
+  return { stats, threshold: numOrNull(p.confidence_threshold), cap, used };
+}
+
+function setConfChartIdle() {
+  if (!confChart) return;
+  confChart.dataset.state = 'idle';
+  if (confChartMeta) confChartMeta.textContent = '';
+  if (confChartBody) {
+    confChartBody.innerHTML = '<span class="conf-empty">Run a generation to see how confidence rises and when it early-stops.</span>';
+  }
+}
+
+function renderConfidenceChart(data) {
+  if (!confChart || !confChartBody) return;
+  if (!data || !data.stats || !data.stats.length) { setConfChartIdle(); return; }
+  const { stats, threshold, cap, used } = data;
+
+  // geometry (viewBox; SVG scales to container width)
+  const W = 600, H = 180;
+  const padL = 30, padR = 14, padT = 12, padB = 26;
+  const x0 = padL, x1 = W - padR, y0 = padT, y1 = H - padB;
+  const xFor = (step) => cap <= 1 ? x0 : x0 + ((step - 1) / (cap - 1)) * (x1 - x0);
+  const yFor = (p) => y1 - Math.max(0, Math.min(1, p)) * (y1 - y0);
+
+  const el = (name, attrs, children) => {
+    const n = document.createElementNS(SVG_NS, name);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (children) (Array.isArray(children) ? children : [children]).forEach((c) => c && n.appendChild(c));
+    return n;
+  };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Token confidence over denoising steps' });
+
+  // gridlines + y labels at 0 / 50 / 100%
+  [0, 0.5, 1].forEach((p) => {
+    const y = yFor(p);
+    svg.appendChild(el('line', { x1: x0, y1: y, x2: x1, y2: y, stroke: '#dbe2ee', 'stroke-width': 1 }));
+    const t = el('text', { x: x0 - 6, y: y + 3, 'text-anchor': 'end', 'font-size': 10, fill: '#8a94a6', 'font-family': 'monospace' });
+    t.textContent = `${Math.round(p * 100)}`;
+    svg.appendChild(t);
+  });
+
+  // "saved steps" region (early stop finished before the cap)
+  if (used < cap) {
+    const xs = xFor(used);
+    svg.appendChild(el('rect', { x: xs, y: y0, width: Math.max(0, x1 - xs), height: y1 - y0, fill: '#1f6feb', opacity: 0.06 }));
+    svg.appendChild(el('line', { x1: xs, y1: y0, x2: xs, y2: y1, stroke: '#1f6feb', 'stroke-width': 1.5, 'stroke-dasharray': '3 3', opacity: 0.5 }));
+  }
+
+  // threshold line
+  if (threshold != null) {
+    const yt = yFor(threshold);
+    svg.appendChild(el('line', { x1: x0, y1: yt, x2: x1, y2: yt, stroke: '#a76f1d', 'stroke-width': 1.4, 'stroke-dasharray': '5 4' }));
+    const lab = el('text', { x: x1, y: yt - 4, 'text-anchor': 'end', 'font-size': 10, fill: '#a76f1d', 'font-weight': 700 });
+    lab.textContent = `early-stop ≥ ${Math.round(threshold * 100)}%`;
+    svg.appendChild(lab);
+  }
+
+  const meanPts = stats.map((s) => `${xFor(s.step).toFixed(1)},${yFor(s.mean_p).toFixed(1)}`);
+  const minPts = stats.map((s) => `${xFor(s.step).toFixed(1)},${yFor(s.min_p).toFixed(1)}`);
+  const lastX = xFor(stats[stats.length - 1].step).toFixed(1);
+
+  // area under the gate line (hardest still-masked token's confidence)
+  svg.appendChild(el('polygon', { points: `${x0},${y1} ${minPts.join(' ')} ${lastX},${y1}`, fill: '#1f6feb', opacity: 0.10 }));
+  // mean-confidence line (context: typical remaining token)
+  svg.appendChild(el('polyline', { points: meanPts.join(' '), fill: 'none', stroke: '#8a94a6', 'stroke-width': 1.4, 'stroke-dasharray': '4 3' }));
+  // gate line (hero): early stop fires when this crosses the threshold
+  svg.appendChild(el('polyline', { points: minPts.join(' '), fill: 'none', stroke: '#1f6feb', 'stroke-width': 2.4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+  stats.forEach((s) => svg.appendChild(el('circle', { cx: xFor(s.step), cy: yFor(s.min_p), r: 2.6, fill: '#1f6feb' })));
+
+  // x labels: first, stop, cap
+  const xlab = (step, text, anchor) => {
+    const t = el('text', { x: xFor(step), y: H - 8, 'text-anchor': anchor, 'font-size': 10, fill: '#8a94a6', 'font-family': 'monospace' });
+    t.textContent = text;
+    return t;
+  };
+  svg.appendChild(xlab(1, '1', 'start'));
+  if (used < cap) svg.appendChild(xlab(used, `stop ${used}`, 'middle'));
+  svg.appendChild(xlab(cap, `${cap}`, 'end'));
+
+  confChart.dataset.state = 'ready';
+  confChartBody.innerHTML = '';
+  confChartBody.appendChild(svg);
+  if (confChartMeta) {
+    confChartMeta.textContent = threshold != null
+      ? `${used}/${cap} steps · stop ≥ ${Math.round(threshold * 100)}%`
+      : `${used} steps (early-stop off)`;
+  }
+}
+
+function updateConfidenceChart(payload) {
+  const cd = chartDataFromPayload(payload) || lastChartData;
+  if (cd) { lastChartData = cd; renderConfidenceChart(cd); }
+  else setConfChartIdle();
 }
 
 function applySnapshotAnimated(snap) {
@@ -1033,6 +1146,7 @@ function finishRun(payload) {
   }
 
   updateEfficiencyReadout();
+  updateConfidenceChart(payload);
   setUiState(UI_MODES.IDLE);
 }
 
