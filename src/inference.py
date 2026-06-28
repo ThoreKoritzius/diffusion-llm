@@ -27,7 +27,7 @@ import traceback
 import re
 import hashlib
 import gc
-from typing import List, Dict
+from typing import List, Dict, Optional
 from werkzeug.utils import secure_filename
 
 from flask import Flask, render_template, request, jsonify, Response, send_file, stream_with_context
@@ -100,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker", action="store_true", help="Run worker loop instead of web server")
     parser.add_argument("--redis-url", type=str, default=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
     parser.add_argument("--inference-dtype", type=str, default=os.environ.get("INFERENCE_DTYPE", "fp16"), choices=["fp16", "fp32", "bf16", "auto"], help="Preferred model dtype for inference")
+    parser.add_argument("--confidence-stop", type=float, default=float(os.environ.get("CONFIDENCE_STOP", "0.9")), help="Adaptive early-stop: commit any masked position whose top-token probability >= this threshold, so easy queries use fewer denoising steps. 0 disables (fixed steps).")
     parser.add_argument("--inference-backend", type=str, default=os.environ.get("INFERENCE_BACKEND", "torch"), choices=["torch", "onnx", "auto"], help="Inference backend for model forwards")
     parser.add_argument("--onnx-cache-dir", type=str, default=os.environ.get("ONNX_CACHE_DIR", os.path.join(os.getcwd(), "onnx_cache")), help="Writable cache directory for exported ONNX models")
     parser.add_argument("--onnx-opset", type=int, default=env_int("ONNX_OPSET", 17), help="ONNX opset used when exporting")
@@ -140,6 +141,8 @@ PRELOAD_MODEL = env_bool("PRELOAD_MODEL", IS_WORKER)
 PRELOAD_WARMUP_FORWARD = env_bool("PRELOAD_WARMUP_FORWARD", PRELOAD_MODEL)
 REDIS_URL = args.redis_url
 INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
+# Adaptive early-stop confidence threshold; <=0 or >=1 disables (fixed steps).
+CONFIDENCE_STOP = args.confidence_stop if 0.0 < float(args.confidence_stop) < 1.0 else None
 INFERENCE_BACKEND = (args.inference_backend or "torch").lower()
 ONNX_CACHE_DIR = os.path.abspath(args.onnx_cache_dir)
 ONNX_OPSET = max(13, int(args.onnx_opset))
@@ -455,6 +458,7 @@ def cache_signature_payload(payload: Dict) -> Dict:
         "sql_len": int(payload.get("sql_len", 0)),
         "top_k": int(payload.get("top_k", 0)),
         "top_p": float(payload.get("top_p", 0)),
+        "early_stop": int(payload.get("early_stop", 1)),
         "seed": int(DEFAULT_SEED),
         "dtype": INFERENCE_DTYPE,
         "backend": INFERENCE_BACKEND,
@@ -982,6 +986,7 @@ def process_run(run_id: str) -> None:
             status_cb=status_cb,
             deterministic_seed=DEFAULT_SEED,
             should_stop=should_stop,
+            confidence_stop=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) else None),
         )
         final_sql = strip_final_masks(res.get("sql_only", ""))
         redis_update_run(run_id, sql_only=final_sql, display=res.get("display"))
@@ -1497,6 +1502,7 @@ def run_denoising_generation_callback(
     status_cb = None,
     deterministic_seed: int = DEFAULT_SEED,
     should_stop=None,
+    confidence_stop: Optional[float] = None,
 ) -> Dict:
     def log(s):
         if status_cb:
@@ -1635,6 +1641,7 @@ def run_denoising_generation_callback(
     vocab = tokenizer.get_vocab()
     forbid_ids = [vocab[t] for t in REQUIRED_TAGS if t in vocab]
 
+    steps_used = 0
     for step_idx, total_steps, current_ids in denoise_steps(
         model,
         current_ids,
@@ -1645,7 +1652,9 @@ def run_denoising_generation_callback(
         temperature=sample_temperature,
         forbid_token_ids=forbid_ids,
         should_stop=should_stop,
+        confidence_stop=confidence_stop,
     ):
+        steps_used = step_idx + 1  # adaptive early-stop may finish before total_steps
         if status_cb:
             status_cb(f"step {step_idx+1}/{total_steps}")
         if animate and step_idx + 1 < total_steps:
@@ -1662,7 +1671,7 @@ def run_denoising_generation_callback(
     final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))
     if animate:
         s_clean_final = replace_sql_section(snapshot_text(), final_sql_only)
-        snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": total_steps, "total_steps": total_steps})
+        snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": steps_used, "total_steps": total_steps})
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -1678,9 +1687,9 @@ def run_denoising_generation_callback(
     sql_only = strip_final_masks(sql_only)
 
     if not animate:
-        snapshots = [{"text": display, "sql_only": sql_only, "step": total_steps, "total_steps": total_steps}]
+        snapshots = [{"text": display, "sql_only": sql_only, "step": steps_used, "total_steps": total_steps}]
 
-    return {"snapshots": snapshots, "sql_only": sql_only, "display": display}
+    return {"snapshots": snapshots, "sql_only": sql_only, "display": display, "steps_used": steps_used}
 
 # -------------------------
 # Flask endpoints
@@ -1786,6 +1795,7 @@ def start_run():
     context = form.get("context", "").strip()
     model_dir = form.get("model_dir", DEFAULT_MODEL_DIR).strip() or DEFAULT_MODEL_DIR
     gif_size_text = form.get("gif_size", "").strip()
+    early_stop = form.get("early_stop", "1").strip().lower() not in ("0", "false", "off", "no", "")
     try:
         steps = int(form.get("steps", "24"))
         max_len = int(form.get("max_len", "512"))
@@ -1849,6 +1859,7 @@ def start_run():
         "top_p": top_p,
         "model_dir": model_dir,
         "gif_size_text": gif_size_text,
+        "early_stop": 1 if early_stop else 0,
     }
     cached = read_result_cache(payload)
     if cached:

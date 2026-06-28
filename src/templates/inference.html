@@ -711,6 +711,36 @@
       gap: var(--space-2);
     }
 
+    .toggle-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--color-border);
+      background: #f9fbff;
+      cursor: pointer;
+    }
+
+    .toggle-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 1px 0 0;
+      flex-shrink: 0;
+      accent-color: var(--color-accent);
+      cursor: pointer;
+    }
+
+    .toggle-text {
+      display: grid;
+      gap: 3px;
+    }
+
+    .toggle-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-text);
+    }
+
     .csv-preview {
       border: 1px solid var(--color-border);
       border-radius: var(--radius-xs);
@@ -1008,6 +1038,15 @@
                     <div class="csv-preview" id="csvTableWrapper"></div>
                     <div class="hint">CSV preview shows first 30 rows. Schema is written into Context.</div>
                   </div>
+
+                  <label class="toggle-row" for="early_stop">
+                    <input type="checkbox" id="early_stop" name="early_stop" checked />
+                    <span class="toggle-text">
+                      <span class="toggle-title">Adaptive early stop</span>
+                      <span class="hint">Commit high-confidence tokens early to use fewer denoising steps on easy
+                        queries — faster, with no measured quality loss. The step slider sets the maximum.</span>
+                    </span>
+                  </label>
 
                   <div class="controls-grid">
                     <div class="ctrl-row">

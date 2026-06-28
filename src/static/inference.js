@@ -50,6 +50,7 @@ const promptInput = document.getElementById('prompt');
 const contextInput = document.getElementById('context');
 const sqlLenInput = document.getElementById('sql_len');
 const maxLenInput = document.getElementById('max_len');
+const earlyStopInput = document.getElementById('early_stop');
 
 const viewTabs = Array.from(document.querySelectorAll('.view-tab'));
 const inferencePanel = document.getElementById('view-inference');
@@ -100,6 +101,7 @@ function buildRunSignature(form) {
     'top_k',
     'top_p',
     'model_dir',
+    'early_stop',
   ];
   const data = {};
   fields.forEach((k) => {
@@ -841,10 +843,11 @@ function updateSliderLabel() {
 }
 
 // --- Efficiency vs autoregressive decoding (in forward passes / "steps") ---
-// Masked diffusion fills the whole SQL window in a fixed number of steps,
-// independent of output length. An autoregressive decoder emits ~1 token per
-// forward pass, so it needs roughly one step per generated token. We estimate
-// the output token count from the final SQL and compare against the steps used.
+// Masked diffusion fills the whole SQL window in a bounded number of steps,
+// independent of output length, and confidence-based early stopping can finish
+// well before the step cap. An autoregressive decoder emits ~1 token per forward
+// pass, so it needs roughly one step per generated token. We compare the AR token
+// estimate against the actual diffusion steps used (last snapshot's `step`).
 function computeEfficiency() {
   const sql = (terminalSqlText || '').trim();
   if (!sql) return null;
@@ -852,7 +855,7 @@ function computeEfficiency() {
   let steps = 0;
   if (historySnapshots.length) {
     const last = historySnapshots[historySnapshots.length - 1] || {};
-    steps = Number(last.total_steps) || (historySnapshots.length - 1) || historySnapshots.length;
+    steps = Number(last.step) || Number(last.total_steps) || (historySnapshots.length - 1) || historySnapshots.length;
   }
   if (!steps) {
     const stepsEl = document.getElementById('steps');
@@ -1268,6 +1271,8 @@ runForm.addEventListener('submit', async (ev) => {
   const active = document.activeElement === promptInput ? promptInput : (document.activeElement === contextInput ? contextInput : null);
   applyCharLimits(active);
   const form = new FormData(runForm);
+  // Normalise the checkbox to an explicit 1/0 (unchecked boxes are omitted from FormData).
+  form.set('early_stop', earlyStopInput && earlyStopInput.checked ? '1' : '0');
   const runSignature = buildRunSignature(form);
   if (replayCachedRunIfAvailable(runSignature)) {
     return;
