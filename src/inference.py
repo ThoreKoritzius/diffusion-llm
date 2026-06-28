@@ -103,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence-stop", type=float, default=float(os.environ.get("CONFIDENCE_STOP", "0.9")), help="Adaptive early-stop: commit any masked position whose top-token probability >= this threshold, so easy queries use fewer denoising steps. 0 disables (fixed steps).")
     parser.add_argument("--inference-backend", type=str, default=os.environ.get("INFERENCE_BACKEND", "torch"), choices=["torch", "onnx", "auto"], help="Inference backend for model forwards")
     parser.add_argument("--sql-generation-mode", type=str, default=os.environ.get("SQL_GENERATION_MODE", "auto"), choices=["block", "fixed", "auto"], help="SQL denoising layout: block predicts </SQL> as a stop token; fixed matches legacy PAD-padded SQL windows; auto uses checkpoint config.")
+    parser.add_argument("--sql-block-size", type=int, default=env_int("SQL_BLOCK_SIZE", 32), help="Block size for variable-length block SQL generation.")
+    parser.add_argument("--eos-token-bias", type=float, default=env_float("EOS_TOKEN_BIAS", 1.5), help="Logit bias for </SQL> during block generation; 0 disables.")
     parser.add_argument("--onnx-cache-dir", type=str, default=os.environ.get("ONNX_CACHE_DIR", os.path.join(os.getcwd(), "onnx_cache")), help="Writable cache directory for exported ONNX models")
     parser.add_argument("--onnx-opset", type=int, default=env_int("ONNX_OPSET", 17), help="ONNX opset used when exporting")
     return parser
@@ -146,6 +148,8 @@ INFERENCE_DTYPE = (args.inference_dtype or "fp16").lower()
 CONFIDENCE_STOP = args.confidence_stop if 0.0 < float(args.confidence_stop) < 1.0 else None
 INFERENCE_BACKEND = (args.inference_backend or "torch").lower()
 SQL_GENERATION_MODE = (args.sql_generation_mode or "block").lower()
+SQL_BLOCK_SIZE = max(1, int(args.sql_block_size))
+EOS_TOKEN_BIAS = float(args.eos_token_bias)
 ONNX_CACHE_DIR = os.path.abspath(args.onnx_cache_dir)
 ONNX_OPSET = max(13, int(args.onnx_opset))
 ALLOW_FAKE_REDIS = env_bool("ALLOW_FAKE_REDIS", "REDIS_URL" not in os.environ)
@@ -1599,7 +1603,8 @@ def run_denoising_generation_callback(
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
     context_ids = tokenizer(context_text, add_special_tokens=False)["input_ids"]
     if sql_mode == "block":
-        block_len = max(1, min(32, sql_len))
+        configured_block = int(getattr(model.config, "diffusion_sql_block_size", SQL_BLOCK_SIZE) or SQL_BLOCK_SIZE)
+        block_len = max(1, min(configured_block, sql_len))
         budget = max(0, requested_max_len - sql_len - 8)
         if len(prompt_ids) + len(context_ids) > budget:
             if len(prompt_ids) > budget:
@@ -1688,6 +1693,7 @@ def run_denoising_generation_callback(
                 n_steps=current_steps,
                 temperature=sample_temperature,
                 forbid_token_ids=forbid_ids,
+                bias_token_ids={end_sql_id: EOS_TOKEN_BIAS} if EOS_TOKEN_BIAS else None,
                 should_stop=should_stop,
                 confidence_stop=confidence_stop,
                 on_step_stats=step_stats.append,

@@ -17,6 +17,7 @@ Key design (vs. the previous version):
 """
 
 import contextlib
+import math
 import os
 import random
 import re
@@ -26,7 +27,7 @@ os.environ.setdefault("USE_FLAX", "0")
 
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset
 from transformers import (
     AutoModelForMaskedLM,
     AutoTokenizer,
@@ -46,11 +47,23 @@ BATCH_SIZE = 128             # safe on a 96 GB GH200 for ModernBERT-base @ seq 5
 LEARNING_RATE = 1e-4         # ~sqrt-scaled from 3e-5@bs32 for the 4x larger batch
 MAX_LEN = 512
 SQL_WINDOW = int(os.environ.get("SQL_WINDOW", "256"))
+SQL_BLOCK_SIZE = int(os.environ.get("SQL_BLOCK_SIZE", "32"))
+EOS_TOKEN_BIAS = float(os.environ.get("EOS_TOKEN_BIAS", "1.5"))
+BLOCK_TRAINING_STYLE = os.environ.get("BLOCK_TRAINING_STYLE", "prefix").strip().lower()
+if BLOCK_TRAINING_STYLE not in {"prefix", "full"}:
+    raise ValueError("BLOCK_TRAINING_STYLE must be 'prefix' or 'full'")
 SQL_GENERATION_MODE = os.environ.get("SQL_GENERATION_MODE", "block").strip().lower()
 if SQL_GENERATION_MODE not in {"block", "fixed"}:
     raise ValueError("SQL_GENERATION_MODE must be 'block' or 'fixed'")
-TRAIN_SIZE = 100_000
-VAL_SIZE = 500
+TRAIN_SIZE = int(os.environ.get("TRAIN_SIZE", "100000"))
+VAL_SIZE = int(os.environ.get("VAL_SIZE", "500"))
+EMPTY_CONTEXT_RATE = float(os.environ.get("EMPTY_CONTEXT_RATE", "0.05"))
+CUSTOM_SQL_TRAIN_JSONL = os.environ.get("CUSTOM_SQL_TRAIN_JSONL", "").strip()
+CUSTOM_SQL_EVAL_JSONL = os.environ.get("CUSTOM_SQL_EVAL_JSONL", "").strip()
+CUSTOM_SQL_MIX_RATE = float(os.environ.get("CUSTOM_SQL_MIX_RATE", "0.20"))
+CUSTOM_SQL_EVAL_SIZE = int(os.environ.get("CUSTOM_SQL_EVAL_SIZE", "120"))
+CUSTOM_SQL_ONLY = os.environ.get("CUSTOM_SQL_ONLY", "0") == "1"
+ENABLE_AUGMENTATION = os.environ.get("ENABLE_AUGMENTATION", "1") != "0"
 T_EPS = 1e-3          # lower bound for mask ratio t
 FILTER_JOINS = False
 
@@ -64,10 +77,10 @@ USE_TORCH_COMPILE = os.environ.get("USE_TORCH_COMPILE", "0") == "1"
 MAX_TRAIN_STEPS = int(os.environ.get("MAX_TRAIN_STEPS", "0"))
 EVAL_STEPS = int(os.environ.get("EVAL_STEPS", "500"))
 
-GEN_EVAL_SIZE = 32    # examples for generation-based exact-match eval
-GEN_EVAL_STEPS = 24   # denoising steps during eval
+GEN_EVAL_SIZE = int(os.environ.get("GEN_EVAL_SIZE", "32"))     # examples for generation-based exact-match eval
+GEN_EVAL_STEPS = int(os.environ.get("GEN_EVAL_STEPS", "24"))   # denoising steps during eval
 
-OUTPUT_DIR = "diffusion-sql-modernbert"
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "diffusion-sql-modernbert")
 
 # Hopper perf: TF32 matmuls + avoid the fast-tokenizer fork warning/deadlock
 # once dataloader workers are forking the module-level tokenizer.
@@ -88,12 +101,20 @@ wandb.init(project="sql-diffusion", name="modernbert-llada-aug", config={
     "batch_size": BATCH_SIZE,
     "max_len": MAX_LEN,
     "sql_window": SQL_WINDOW,
+    "sql_block_size": SQL_BLOCK_SIZE,
     "sql_generation_mode": SQL_GENERATION_MODE,
+    "block_training_style": BLOCK_TRAINING_STYLE,
+    "eos_token_bias": EOS_TOKEN_BIAS,
     "train_size": TRAIN_SIZE,
     "val_size": VAL_SIZE,
+    "empty_context_rate": EMPTY_CONTEXT_RATE,
+    "custom_sql_train_jsonl": CUSTOM_SQL_TRAIN_JSONL,
+    "custom_sql_eval_jsonl": CUSTOM_SQL_EVAL_JSONL,
+    "custom_sql_mix_rate": CUSTOM_SQL_MIX_RATE,
+    "custom_sql_only": CUSTOM_SQL_ONLY,
     "t_eps": T_EPS,
     "filter_joins": FILTER_JOINS,
-    "augmentation": True,
+    "augmentation": ENABLE_AUGMENTATION,
     "learning_rate": LEARNING_RATE,
     "dataloader_workers": DATALOADER_WORKERS,
     "torch_compile": USE_TORCH_COMPILE,
@@ -107,6 +128,15 @@ for split in dataset.keys():
 if FILTER_JOINS:
     for split in dataset.keys():
         dataset[split] = dataset[split].filter(lambda ex: "join" not in ex["sql"].lower())
+
+custom_dataset = None
+if CUSTOM_SQL_TRAIN_JSONL:
+    data_files = {"train": CUSTOM_SQL_TRAIN_JSONL}
+    if CUSTOM_SQL_EVAL_JSONL:
+        data_files["test"] = CUSTOM_SQL_EVAL_JSONL
+    custom_dataset = load_dataset("json", data_files=data_files)
+    for split in custom_dataset.keys():
+        custom_dataset[split] = custom_dataset[split].filter(lambda ex: ex["sql_prompt"].strip() != "")
 
 
 # 3. Tokenizer Setup
@@ -126,10 +156,11 @@ MASK_ID = tokenizer.mask_token_id
 def encode_text(prompt: str, context: str, sql: str):
     """Build the token-level diffusion example.
 
-    block mode (new default):
-        [CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> sql </SQL> [SEP] [PAD]...
-        The generated span includes </SQL>, so inference can stop when the
-        terminator is produced.
+    block mode, prefix style (new default for dynamic length):
+        [CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> prefix next_block [SEP] [PAD]...
+        Only next_block is maskable. This matches inference, which repeatedly
+        conditions on the already-generated SQL prefix and denoises the next
+        masked block, including </SQL> when the query ends.
 
     fixed mode (legacy):
         [CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> sql+pads </SQL> [SEP] [PAD]...
@@ -141,16 +172,32 @@ def encode_text(prompt: str, context: str, sql: str):
     if SQL_GENERATION_MODE == "fixed":
         sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][:SQL_WINDOW]
         target_ids = sql_ids + [PAD_ID] * (SQL_WINDOW - len(sql_ids))
+        prefix_ids = []
         suffix_ids = [TAG_IDS['</SQL>'], SEP_ID]
+    elif BLOCK_TRAINING_STYLE == "prefix":
+        full_sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][: max(1, SQL_WINDOW - 1)]
+        full_target = full_sql_ids + [TAG_IDS['</SQL>']]
+        # Sample the exact inference state: a known SQL prefix followed by one
+        # unknown block. Bias toward prefix=0 so fully-empty generation is
+        # trained often, but also cover later continuation/termination blocks.
+        if len(full_target) <= 1 or random.random() < 0.35:
+            prefix_len = 0
+        else:
+            prefix_len = random.randrange(0, len(full_target))
+        prefix_ids = full_target[:prefix_len]
+        target_ids = full_target[prefix_len : prefix_len + max(1, SQL_BLOCK_SIZE)]
+        suffix_ids = [SEP_ID]
     else:
         sql_ids = tokenizer(sql, add_special_tokens=False)["input_ids"][: max(1, SQL_WINDOW - 1)]
+        prefix_ids = []
         target_ids = sql_ids + [TAG_IDS['</SQL>']]
         suffix_ids = [SEP_ID]
 
     # Leave room for CLS, prompt/context tags, <SQL>, target span, and suffix.
     fixed_overhead = 1 + 5 + 1 + len(suffix_ids)
-    budget = MAX_LEN - len(target_ids) - fixed_overhead
+    budget = MAX_LEN - len(prefix_ids) - len(target_ids) - fixed_overhead
     if len(prompt_ids) + len(context_ids) > budget:
+        budget = max(0, budget)
         context_ids = context_ids[: max(0, budget - len(prompt_ids))]
         prompt_ids = prompt_ids[:budget]
 
@@ -159,6 +206,7 @@ def encode_text(prompt: str, context: str, sql: str):
         TAG_IDS['<CONTEXT>']] + context_ids + [TAG_IDS['</CONTEXT>'],
         TAG_IDS['<SQL>']]
     )
+    ids = ids + prefix_ids
     sql_start = len(ids)
     ids = ids + target_ids + suffix_ids
     sql_end = sql_start + len(target_ids)
@@ -179,6 +227,9 @@ model = AutoModelForMaskedLM.from_pretrained(MODEL_NAME)
 model.resize_token_embeddings(len(tokenizer))
 model.config.diffusion_sql_mode = SQL_GENERATION_MODE
 model.config.diffusion_sql_window = SQL_WINDOW
+model.config.diffusion_sql_block_size = SQL_BLOCK_SIZE
+model.config.diffusion_block_training_style = BLOCK_TRAINING_STYLE
+model.config.diffusion_eos_token_bias = EOS_TOKEN_BIAS
 
 
 # 6. Collator: Augment + Encode + Continuous-t Bernoulli Masking
@@ -189,6 +240,8 @@ def make_collator(augment: bool):
             p, c, s = f["sql_prompt"], f.get("sql_context", ""), f.get("sql", "")
             if augment:
                 p, c, s = augment_example(p, c, s)
+                if c and random.random() < EMPTY_CONTEXT_RATE:
+                    c = ""
             rows.append(encode_text(p, c, s))
 
         input_ids = torch.tensor([r["input_ids"] for r in rows], dtype=torch.long)
@@ -217,7 +270,7 @@ def make_collator(augment: bool):
     return collate
 
 
-train_collator = make_collator(augment=True)
+train_collator = make_collator(augment=ENABLE_AUGMENTATION)
 eval_collator = make_collator(augment=False)
 
 
@@ -253,6 +306,14 @@ def normalize_sql(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().rstrip(";")).lower()
 
 
+def trim_generated_sql(s: str) -> str:
+    s = re.sub(r"\s+", " ", (s or "").replace("</SQL>", " ")).strip()
+    semi = s.find(";")
+    if semi >= 0:
+        s = s[:semi]
+    return s.strip()
+
+
 @torch.no_grad()
 def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL_STEPS) -> float:
     model.eval()
@@ -269,22 +330,68 @@ def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL
         p, c, s = ex["sql_prompt"], ex.get("sql_context", ""), ex.get("sql", "")
         if transform is not None:
             p, c, s = transform(p, c, s, rng=rng)
-        enc = encode_text(p, c, s)
-        ids = torch.tensor([enc["input_ids"]], dtype=torch.long, device=device)
-        attn = torch.tensor([enc["attention_mask"]], dtype=torch.long, device=device)
-        lo, hi = enc["sql_start"], enc["sql_end"]
-        ids[0, lo:hi] = MASK_ID
-        forbid_ids = list(TAG_IDS.values())
         if SQL_GENERATION_MODE == "block":
-            forbid_ids = [tid for tok, tid in TAG_IDS.items() if tok != '</SQL>']
-        with autocast_ctx:
-            for _ in denoise_steps(
-                model, ids, attn, list(range(lo, hi)), MASK_ID,
-                n_steps=n_steps, forbid_token_ids=forbid_ids,
-            ):
-                pass
-        out_ids = [tid for tid in ids[0, lo:hi].tolist() if tid not in (PAD_ID, MASK_ID)]
-        pred_sql = tokenizer.decode(out_ids, skip_special_tokens=True)
+            prompt_ids = tokenizer(p, add_special_tokens=False)["input_ids"]
+            context_ids = tokenizer(c, add_special_tokens=False)["input_ids"]
+            budget = MAX_LEN - SQL_WINDOW - 8
+            if len(prompt_ids) + len(context_ids) > budget:
+                context_ids = context_ids[: max(0, budget - len(prompt_ids))]
+                prompt_ids = prompt_ids[:budget]
+            head = (
+                [CLS_ID, TAG_IDS['<PROMPT>']] + prompt_ids + [TAG_IDS['</PROMPT>'],
+                TAG_IDS['<CONTEXT>']] + context_ids + [TAG_IDS['</CONTEXT>'],
+                TAG_IDS['<SQL>']]
+            )
+            generated_ids = []
+            block_len = max(1, min(SQL_BLOCK_SIZE, SQL_WINDOW))
+            max_blocks = int(math.ceil(SQL_WINDOW / block_len))
+            end_sql_id = TAG_IDS['</SQL>']
+            forbid_ids = set(tokenizer.all_special_ids or [])
+            forbid_ids.update(TAG_IDS.values())
+            forbid_ids.discard(end_sql_id)
+            forbid_ids.discard(MASK_ID)
+            with autocast_ctx:
+                for _block in range(max_blocks):
+                    this_block_len = min(block_len, SQL_WINDOW - len(generated_ids))
+                    if this_block_len <= 0:
+                        break
+                    ids_list = head + generated_ids + [MASK_ID] * this_block_len + [SEP_ID]
+                    attn_list = [1] * len(ids_list)
+                    if len(ids_list) < MAX_LEN:
+                        attn_list += [0] * (MAX_LEN - len(ids_list))
+                        ids_list += [PAD_ID] * (MAX_LEN - len(ids_list))
+                    ids = torch.tensor([ids_list[:MAX_LEN]], dtype=torch.long, device=device)
+                    attn = torch.tensor([attn_list[:MAX_LEN]], dtype=torch.long, device=device)
+                    start = len(head) + len(generated_ids)
+                    positions = list(range(start, min(start + this_block_len, MAX_LEN - 1)))
+                    for _ in denoise_steps(
+                        model, ids, attn, positions, MASK_ID,
+                        n_steps=min(n_steps, len(positions)),
+                        forbid_token_ids=list(forbid_ids),
+                        bias_token_ids={end_sql_id: EOS_TOKEN_BIAS} if EOS_TOKEN_BIAS else None,
+                    ):
+                        pass
+                    block_out = [int(tid) for tid in ids[0, start:start + len(positions)].tolist()]
+                    if end_sql_id in block_out:
+                        generated_ids.extend(block_out[:block_out.index(end_sql_id)])
+                        break
+                    generated_ids.extend(block_out)
+            out_ids = [tid for tid in generated_ids if tid not in (PAD_ID, MASK_ID)]
+            pred_sql = trim_generated_sql(tokenizer.decode(out_ids, skip_special_tokens=True))
+        else:
+            enc = encode_text(p, c, s)
+            ids = torch.tensor([enc["input_ids"]], dtype=torch.long, device=device)
+            attn = torch.tensor([enc["attention_mask"]], dtype=torch.long, device=device)
+            lo, hi = enc["sql_start"], enc["sql_end"]
+            ids[0, lo:hi] = MASK_ID
+            with autocast_ctx:
+                for _ in denoise_steps(
+                    model, ids, attn, list(range(lo, hi)), MASK_ID,
+                    n_steps=n_steps, forbid_token_ids=list(TAG_IDS.values()),
+                ):
+                    pass
+            out_ids = [tid for tid in ids[0, lo:hi].tolist() if tid not in (PAD_ID, MASK_ID)]
+            pred_sql = trim_generated_sql(tokenizer.decode(out_ids, skip_special_tokens=True))
         if normalize_sql(pred_sql) == normalize_sql(s):
             hits += 1
     return hits / max(1, len(raw_examples))
@@ -335,9 +442,34 @@ training_args = TrainingArguments(
 
 
 # 10. Dataset Slices (collator encodes on the fly, so these stay raw)
-train_ds = dataset["train"].select(range(min(TRAIN_SIZE, len(dataset["train"]))))
-val_ds = dataset["test"].select(range(min(VAL_SIZE, len(dataset["test"]))))
-gen_eval_examples = [dataset["test"][i] for i in range(min(GEN_EVAL_SIZE, len(dataset["test"])))]
+if custom_dataset is not None and CUSTOM_SQL_ONLY:
+    custom_train_size = min(len(custom_dataset["train"]), TRAIN_SIZE)
+    train_ds = custom_dataset["train"].shuffle(seed=42).select(range(custom_train_size))
+elif custom_dataset is not None:
+    custom_train_size = min(len(custom_dataset["train"]), max(1, int(TRAIN_SIZE * CUSTOM_SQL_MIX_RATE)))
+    base_train_size = max(1, TRAIN_SIZE - custom_train_size)
+    train_parts = [
+        dataset["train"].select(range(min(base_train_size, len(dataset["train"])))),
+        custom_dataset["train"].shuffle(seed=42).select(range(custom_train_size)),
+    ]
+    train_ds = concatenate_datasets(train_parts).shuffle(seed=42)
+else:
+    train_ds = dataset["train"].select(range(min(TRAIN_SIZE, len(dataset["train"]))))
+
+if custom_dataset is not None and CUSTOM_SQL_ONLY and "test" in custom_dataset:
+    val_ds = custom_dataset["test"].select(range(min(max(1, VAL_SIZE), len(custom_dataset["test"]))))
+else:
+    val_ds = dataset["test"].select(range(min(VAL_SIZE, len(dataset["test"]))))
+
+if custom_dataset is not None and not CUSTOM_SQL_ONLY and "test" in custom_dataset:
+    custom_eval_size = min(CUSTOM_SQL_EVAL_SIZE, len(custom_dataset["test"]))
+    if custom_eval_size > 0:
+        val_ds = concatenate_datasets([
+            val_ds,
+            custom_dataset["test"].select(range(custom_eval_size)),
+        ])
+
+gen_eval_examples = [val_ds[i] for i in range(min(GEN_EVAL_SIZE, len(val_ds)))]
 
 # 11. Train
 trainer = DiffusionTrainer(

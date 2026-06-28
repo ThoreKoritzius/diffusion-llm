@@ -118,6 +118,8 @@ python src/inference.py --model-dir /absolute/path/to/model
 
 Both old (roberta) and new (ModernBERT) checkpoints load via the Auto classes.
 
+For the GH200 training runbook, see [`RUNS.md`](RUNS.md).
+
 ## Docker Deployment (CPU-safe public playground)
 
 ### Build image

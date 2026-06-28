@@ -28,6 +28,7 @@ def denoise_steps(
     n_steps: int = 10,
     temperature: float = 0.0,
     forbid_token_ids: Optional[List[int]] = None,
+    bias_token_ids: Optional[dict] = None,
     should_stop=None,
     confidence_stop: Optional[float] = None,
     on_step_stats=None,
@@ -60,6 +61,7 @@ def denoise_steps(
 
     forbid = set(forbid_token_ids or [])
     forbid.add(int(mask_id))
+    token_bias = {int(k): float(v) for k, v in (bias_token_ids or {}).items()}
 
     for step_idx in range(total_steps):
         if should_stop is not None and should_stop():
@@ -75,6 +77,9 @@ def denoise_steps(
         logits = logits[0, masked_pos, :].float()
         for tok_id in forbid:
             logits[:, tok_id] = -float("inf")
+        for tok_id, bias in token_bias.items():
+            if tok_id not in forbid:
+                logits[:, tok_id] = logits[:, tok_id] + bias
 
         pred = logits.argmax(dim=-1)
         chosen_logits = logits.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
