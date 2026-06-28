@@ -4,7 +4,7 @@ services:
     container_name: diffusion-llm-redis
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -45,9 +45,9 @@ services:
       - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-60}
       - MAX_PROMPT_CHARS=${MAX_PROMPT_CHARS:-1000}
       - MAX_CONTEXT_CHARS=${MAX_CONTEXT_CHARS:-8000}
-      - MAX_STEPS=${MAX_STEPS:-48}
+      - MAX_STEPS=${MAX_STEPS:-64}
       - MAX_MAX_LEN=${MAX_MAX_LEN:-512}
-      - MAX_SQL_LEN=${MAX_SQL_LEN:-128}
+      - MAX_SQL_LEN=${MAX_SQL_LEN:-256}
       - RUN_TTL_SECONDS=${RUN_TTL_SECONDS:-900}
       - START_RUN_RATE_LIMIT=${START_RUN_RATE_LIMIT:-30 per minute; 300 per hour}
       - ADAPTIVE_RATE_LIMITS=${ADAPTIVE_RATE_LIMITS:-true}
@@ -72,7 +72,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    entrypoint: ["python", "src/inference.py", "--worker", "--model-dir", "/models/model"]
+    entrypoint: [ "python", "src/inference.py", "--worker", "--model-dir", "/models/model" ]
     environment:
       - PYTHONUNBUFFERED=1
       - TORCH_NUM_THREADS=${TORCH_NUM_THREADS:-3}
