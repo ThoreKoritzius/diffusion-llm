@@ -33,6 +33,7 @@ let queueZeroSinceMs = 0;
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 const stepBox = document.getElementById('stepBox');
+const effPill = document.getElementById('effPill');
 const statusBox = document.getElementById('status');
 const runBtn = document.getElementById('runBtn');
 const runBtnLabel = document.getElementById('runBtnLabel');
@@ -335,7 +336,7 @@ function resetRunState() {
 
   runId = null;
   exportableRunId = null;
-  if (exportGifBtn) exportGifBtn.hidden = true;
+  if (exportGifBtn) exportGifBtn.disabled = true;
   runSessionId += 1;
   terminalStateReached = false;
   terminalSqlText = '';
@@ -358,7 +359,12 @@ function resetRunState() {
   queueDemandCurrent = '';
   queueZeroSinceMs = 0;
 
+  // Keep the timeline + GIF controls in the layout at all times; just disable
+  // them until a run completes, so nothing appears/disappears mid-generation.
   sliderRow.classList.remove('visible');
+  if (snapSlider) snapSlider.disabled = true;
+  if (snapSliderLabel) snapSliderLabel.textContent = 'Timeline';
+  setEfficiencyIdle();
   setUiState(UI_MODES.IDLE);
 }
 
@@ -834,6 +840,56 @@ function updateSliderLabel() {
   snapSliderLabel.textContent = `Step ${snap.step || idx} / ${snap.total_steps || historySnapshots.length - 1}`;
 }
 
+// --- Efficiency vs autoregressive decoding (in forward passes / "steps") ---
+// Masked diffusion fills the whole SQL window in a fixed number of steps,
+// independent of output length. An autoregressive decoder emits ~1 token per
+// forward pass, so it needs roughly one step per generated token. We estimate
+// the output token count from the final SQL and compare against the steps used.
+function computeEfficiency() {
+  const sql = (terminalSqlText || '').trim();
+  if (!sql) return null;
+
+  let steps = 0;
+  if (historySnapshots.length) {
+    const last = historySnapshots[historySnapshots.length - 1] || {};
+    steps = Number(last.total_steps) || (historySnapshots.length - 1) || historySnapshots.length;
+  }
+  if (!steps) {
+    const stepsEl = document.getElementById('steps');
+    steps = stepsEl ? parseInt(stepsEl.value, 10) : 0;
+  }
+  if (!steps || steps < 1) return null;
+
+  // Autoregressive steps ≈ number of generated tokens (subword estimate).
+  const arSteps = Math.max(1, Math.round(sql.length / CHARS_PER_TOKEN_EST));
+  return { steps, arSteps, ratio: arSteps / steps };
+}
+
+function setEfficiencyIdle() {
+  if (!effPill) return;
+  effPill.textContent = '⚡ vs AR: —';
+  effPill.dataset.state = 'idle';
+  effPill.title = 'After a run, this shows how many fewer forward passes (steps) '
+    + 'masked-diffusion decoding used versus autoregressive decoding.';
+}
+
+function updateEfficiencyReadout() {
+  if (!effPill) return;
+  const eff = computeEfficiency();
+  if (!eff) { setEfficiencyIdle(); return; }
+  const r = eff.ratio;
+  if (r >= 1.05) {
+    effPill.textContent = `⚡ ${r.toFixed(1)}× fewer steps`;
+    effPill.dataset.state = 'good';
+  } else {
+    effPill.textContent = `⚡ ${eff.steps} steps`;
+    effPill.dataset.state = 'neutral';
+  }
+  effPill.title = `This run: ${eff.steps} diffusion steps filled the SQL window in parallel. `
+    + `Autoregressive decoding emits ~1 token per step (~${eff.arSteps} steps for this output) → `
+    + `${r.toFixed(2)}× ${r >= 1 ? 'fewer' : 'more'} forward passes.`;
+}
+
 function applySnapshotAnimated(snap) {
   if (!snap) return;
   const isTerm = isTerminalSnapshot(snap);
@@ -956,6 +1012,7 @@ function finishRun(payload) {
   if (historySnapshots.length > 0) {
     snapSlider.max = String(historySnapshots.length - 1);
     snapSlider.value = snapSlider.max;
+    snapSlider.disabled = false;
     sliderRow.classList.add('visible');
     updateSliderLabel();
     if (terminalSqlText) {
@@ -969,9 +1026,10 @@ function finishRun(payload) {
 
   if (exportGifBtn && historySnapshots.length > 0 && runId) {
     exportableRunId = runId;
-    exportGifBtn.hidden = false;
+    exportGifBtn.disabled = false;
   }
 
+  updateEfficiencyReadout();
   setUiState(UI_MODES.IDLE);
 }
 
