@@ -179,9 +179,9 @@ function renderQueuedCountdown() {
   if (remaining <= 0) {
     if (!queueZeroSinceMs) queueZeroSinceMs = Date.now();
     const elapsed = formatElapsed(Date.now() - queueZeroSinceMs);
-    setRunButtonText('Preparing worker', `Queued ${posText} • waiting ${elapsed}`);
+    setRunButtonText('Waiting for worker', `Queued ${posText} • no frames yet • ${elapsed}`);
     setQueueChip('', '');
-    setStatus(`Queued ${posText} • worker is preparing`);
+    setStatus(`Queued ${posText} • waiting for worker or first frame`);
     setProgressIndeterminate();
     return;
   }
@@ -552,7 +552,7 @@ function snapshotText(snap) {
   return normalizeSQLDisplay(snap.sql_only || extractSQL(snap.text || ''));
 }
 
-const GIF_SIZE = 640;
+const GIF_SIZE = 480;
 const GIF_PALETTE = [
   [255, 255, 255], [246, 247, 251], [239, 243, 250], [215, 222, 234],
   [15, 23, 42], [85, 96, 113], [31, 111, 235], [26, 127, 75],
@@ -705,8 +705,7 @@ function gifWriteSubBlocks(out, bytes) {
 function gifLzwEncode(indices, minCodeSize = 8) {
   const clear = 1 << minCodeSize;
   const end = clear + 1;
-  let codeSize = minCodeSize + 1;
-  let nextCode = end + 1;
+  const codeSize = minCodeSize + 1;
   let bitBuf = 0;
   let bitLen = 0;
   const bytes = [];
@@ -721,33 +720,16 @@ function gifLzwEncode(indices, minCodeSize = 8) {
     }
   }
 
-  const dict = new Map();
-  for (let i = 0; i < clear; i += 1) dict.set(String(i), i);
-  writeCode(clear);
-
-  let phrase = String(indices[0]);
-  for (let i = 1; i < indices.length; i += 1) {
-    const k = indices[i];
-    const combo = `${phrase},${k}`;
-    if (dict.has(combo)) {
-      phrase = combo;
-    } else {
-      writeCode(dict.get(phrase));
-      if (nextCode < 2048) {
-        dict.set(combo, nextCode);
-        nextCode += 1;
-        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize += 1;
-      } else {
-        writeCode(clear);
-        dict.clear();
-        for (let j = 0; j < clear; j += 1) dict.set(String(j), j);
-        codeSize = minCodeSize + 1;
-        nextCode = end + 1;
-      }
-      phrase = String(k);
+  // Literal-code GIF LZW. This is intentionally low-compression but robust:
+  // emit clear codes frequently enough that code size never grows past 9 bits.
+  for (let i = 0; i < indices.length;) {
+    writeCode(clear);
+    const chunkEnd = Math.min(indices.length, i + 240);
+    while (i < chunkEnd) {
+      writeCode(indices[i]);
+      i += 1;
     }
   }
-  writeCode(dict.get(phrase));
   writeCode(end);
   if (bitLen > 0) bytes.push(bitBuf & 255);
   return bytes;
@@ -786,7 +768,7 @@ function buildGifBlob(frames, prompt) {
   return new Blob([new Uint8Array(out)], { type: 'image/gif' });
 }
 
-function selectGifFrames(frames, maxFrames = 28) {
+function selectGifFrames(frames, maxFrames = 18) {
   if (frames.length <= maxFrames) return frames;
   const out = [];
   const lastIdx = frames.length - 1;
