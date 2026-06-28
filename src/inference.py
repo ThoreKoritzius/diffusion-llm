@@ -777,6 +777,74 @@ def format_param_count(n: int | None) -> str:
     return str(n)
 
 
+def product_int(values) -> int:
+    total = 1
+    for value in values:
+        total *= int(value)
+    return total
+
+
+def count_safetensors_parameters(path: str) -> int | None:
+    try:
+        with open(path, "rb") as f:
+            header_len = int.from_bytes(f.read(8), byteorder="little", signed=False)
+            header = json.loads(f.read(header_len))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+    total = 0
+    for name, meta in header.items():
+        if name == "__metadata__" or not isinstance(meta, dict):
+            continue
+        shape = meta.get("shape")
+        if isinstance(shape, list):
+            total += product_int(shape)
+    return total or None
+
+
+def count_model_parameters_from_weights(model_dir: str) -> tuple[int | None, str]:
+    single_safetensors = os.path.join(model_dir, "model.safetensors")
+    if os.path.isfile(single_safetensors):
+        count = count_safetensors_parameters(single_safetensors)
+        if count:
+            return count, "model.safetensors"
+
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                index = json.load(f)
+            shard_names = sorted(set((index.get("weight_map") or {}).values()))
+        except (OSError, json.JSONDecodeError):
+            shard_names = []
+        total = 0
+        for shard_name in shard_names:
+            count = count_safetensors_parameters(os.path.join(model_dir, shard_name))
+            if count:
+                total += count
+        if total:
+            return total, "model.safetensors.index.json"
+
+    return None, "unknown"
+
+
+def configured_backend_display() -> str:
+    if INFERENCE_BACKEND == "onnx":
+        return "onnxruntime"
+    if INFERENCE_BACKEND == "auto":
+        return "onnxruntime preferred, PyTorch fallback"
+    return "pytorch"
+
+
+def runtime_backend_display() -> str:
+    loaded = MODEL_CACHE.get("backend")
+    if loaded:
+        return str(loaded)
+    if not IS_WORKER and not ALLOW_FAKE_REDIS:
+        return f"{configured_backend_display()} (worker process)"
+    return f"{configured_backend_display()} (not loaded yet)"
+
+
 def get_model_info(model_dir: str) -> Dict:
     cached = MODEL_INFO_CACHE.get(model_dir)
     if cached:
@@ -787,7 +855,13 @@ def get_model_info(model_dir: str) -> Dict:
         "architecture": "unknown",
         "hidden_size": None,
         "num_hidden_layers": None,
+        "param_count_source": "unknown",
     }
+    param_count, param_source = count_model_parameters_from_weights(model_dir)
+    if param_count:
+        info["param_count"] = param_count
+        info["param_count_display"] = format_param_count(param_count)
+        info["param_count_source"] = param_source
     try:
         config_path = os.path.join(model_dir, "config.json")
         with open(config_path, "r", encoding="utf-8") as f:
@@ -1648,6 +1722,7 @@ def healthz():
         "result_cache_ttl_seconds": RESULT_CACHE_TTL_SECONDS,
         "result_cache_version": RESULT_CACHE_VERSION,
         "inference_backend_requested": INFERENCE_BACKEND,
+        "inference_backend_runtime": runtime_backend_display(),
         "inference_backend_loaded": MODEL_CACHE.get("backend"),
         "onnxruntime_available": ort is not None,
         "onnxruntime_version": getattr(ort, "__version__", None) if ort else None,
@@ -1671,8 +1746,8 @@ def healthz():
 
 @app.route("/")
 def index():
-    default_prompt = "which pirate found the most treasure?"
-    default_context = "CREATE TABLE treasure_finds (pirate TEXT, coins INT, island TEXT)"
+    default_prompt = "What is the highest car price for each make?"
+    default_context = "CREATE TABLE cars (id INT, make VARCHAR(50), model VARCHAR(50), year INT, price DECIMAL(10,2));"
     model_info = get_model_info(DEFAULT_MODEL_DIR)
     effective_dtype = resolve_model_dtype(get_inference_device())[1]
     static_js_path = os.path.join(os.path.dirname(__file__), "static", "inference.js")
@@ -1687,17 +1762,18 @@ def index():
         model_dir=DEFAULT_MODEL_DIR or "",
         max_model_len=MAX_MAX_LEN,
         max_steps=MAX_STEPS,
-        default_steps=min(24, MAX_STEPS),
+        default_steps=min(16, MAX_STEPS),
         max_sql_len=MAX_SQL_LEN,
         default_sql_len=max(1, min(128, MAX_SQL_LEN)),
         max_prompt_chars=MAX_PROMPT_CHARS,
         max_context_chars=MAX_CONTEXT_CHARS,
         model_param_count=model_info.get("param_count"),
         model_param_count_display=model_info.get("param_count_display", "unknown"),
+        model_param_count_source=model_info.get("param_count_source", "unknown"),
         inference_dtype_requested=INFERENCE_DTYPE,
         inference_dtype_effective=effective_dtype,
         inference_backend_requested=INFERENCE_BACKEND,
-        inference_backend_loaded=MODEL_CACHE.get("backend") or "not loaded",
+        inference_backend_runtime=runtime_backend_display(),
         static_version=static_version,
     )
 

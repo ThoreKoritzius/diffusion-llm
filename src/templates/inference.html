@@ -981,7 +981,7 @@
                   <span class="char-count" id="promptCount"></span>
                 </div>
                 <textarea name="prompt" id="prompt" maxlength="{{ max_prompt_chars }}"
-                  placeholder="e.g. which pirate found the most treasure?">{{ prompt_prefill }}</textarea>
+                  placeholder="e.g. What is the highest car price for each make?">{{ prompt_prefill }}</textarea>
               </div>
 
               <div class="field-wrap">
@@ -1094,7 +1094,7 @@
           <p>This is an early Research Preview deployed on a <strong>CPU</strong> (yes i cant afford GPUs).</p>
           <div>Model parameters: <strong>{{ model_param_count_display }}</strong></div>
           <div>Requested backend: <strong>{{ inference_backend_requested }}</strong></div>
-          <div>Loaded backend: <strong>{{ inference_backend_loaded }}</strong></div>
+          <div>Runtime backend: <strong>{{ inference_backend_runtime }}</strong></div>
           <div>Requested dtype: <strong>{{ inference_dtype_requested }}</strong></div>
           <div>Effective dtype: <strong>{{ inference_dtype_effective }}</strong></div>
         </div>
