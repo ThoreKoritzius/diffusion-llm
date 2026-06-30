@@ -1663,9 +1663,23 @@ def run_denoising_generation_callback(
 
     snapshots: List[Dict] = []
     last_render = None
+    # Per-step confidence is attached to each snapshot so the frontend can animate
+    # the confidence chart in sync with the live token reveal (not just at the end).
+    conf_threshold_val = float(confidence_stop) if confidence_stop else None
+
+    def with_conf(snap: Dict, stat: Optional[Dict] = None) -> Dict:
+        if stat is not None:
+            if stat.get("min_p") is not None:
+                snap["min_p"] = stat["min_p"]
+            if stat.get("mean_p") is not None:
+                snap["mean_p"] = stat["mean_p"]
+        if conf_threshold_val is not None:
+            snap["conf_threshold"] = conf_threshold_val
+        return snap
+
     if animate:
         last_render = render_sql_window()
-        snapshots.append({"text": snapshot_text(), "sql_only": last_render, "step": 0, "total_steps": total_steps})
+        snapshots.append(with_conf({"text": snapshot_text(), "sql_only": last_render, "step": 0, "total_steps": total_steps}))
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -1700,7 +1714,10 @@ def run_denoising_generation_callback(
             # the PAD-only commit steps that previously rendered as no-ops).
             if r != last_render:
                 last_render = r
-                snapshots.append({"text": snapshot_text(), "sql_only": r, "step": step_idx+1, "total_steps": total_steps})
+                snapshots.append(with_conf(
+                    {"text": snapshot_text(), "sql_only": r, "step": step_idx+1, "total_steps": total_steps},
+                    step_stats[-1] if step_stats else None,
+                ))
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
 
@@ -1711,7 +1728,10 @@ def run_denoising_generation_callback(
     final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))
     if animate:
         s_clean_final = replace_sql_section(snapshot_text(), final_sql_only)
-        snapshots.append({"text": s_clean_final, "sql_only": final_sql_only, "step": steps_used, "total_steps": total_steps})
+        snapshots.append(with_conf(
+            {"text": s_clean_final, "sql_only": final_sql_only, "step": steps_used, "total_steps": total_steps},
+            step_stats[-1] if step_stats else None,
+        ))
         if on_snapshot:
             on_snapshot(snapshots[-1])
 

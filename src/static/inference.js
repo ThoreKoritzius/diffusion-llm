@@ -36,18 +36,18 @@ const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)
 
 const stepBox = document.getElementById('stepBox');
 const effPill = document.getElementById('effPill');
-const confChart = document.getElementById('confChart');
-const confChartBody = document.getElementById('confChartBody');
-const confChartMeta = document.getElementById('confChartMeta');
 const statusBox = document.getElementById('status');
 const runBtn = document.getElementById('runBtn');
 const runBtnLabel = document.getElementById('runBtnLabel');
 const runBtnSub = document.getElementById('runBtnSub');
 const runBtnProgress = document.getElementById('runBtnProgress');
 const runForm = document.getElementById('runForm');
-const sliderRow = document.getElementById('sliderRow');
+const timeline = document.getElementById('timeline');
+const timelineSvg = document.getElementById('timelineSvg');
+const timelinePlayhead = document.getElementById('timelinePlayhead');
+const timelineDot = document.getElementById('timelineDot');
+const timelineReadout = document.getElementById('timelineReadout');
 const snapSlider = document.getElementById('snapSlider');
-const snapSliderLabel = document.getElementById('snapSliderLabel');
 const queueChip = document.getElementById('queueChip');
 const exportGifBtn = document.getElementById('exportGifBtn');
 const gifDownloadLink = document.getElementById('gifDownloadLink');
@@ -371,11 +371,8 @@ function resetRunState() {
 
   // Keep the timeline + GIF controls in the layout at all times; just disable
   // them until a run completes, so nothing appears/disappears mid-generation.
-  sliderRow.classList.remove('visible');
-  if (snapSlider) snapSlider.disabled = true;
-  if (snapSliderLabel) snapSliderLabel.textContent = 'Timeline';
+  setTimelineIdle();
   setEfficiencyIdle();
-  setConfChartIdle();
   setUiState(UI_MODES.IDLE);
 }
 
@@ -956,16 +953,6 @@ function upsertSnapshot(snap) {
     .map(([, v]) => v);
 }
 
-function updateSliderLabel() {
-  if (!historySnapshots.length) {
-    snapSliderLabel.textContent = '';
-    return;
-  }
-  const idx = parseInt(snapSlider.value, 10);
-  const snap = historySnapshots[idx] || {};
-  snapSliderLabel.textContent = `Step ${snap.step || idx} / ${snap.total_steps || historySnapshots.length - 1}`;
-}
-
 // --- Efficiency vs autoregressive decoding (in forward passes / "steps") ---
 // Masked diffusion fills the whole SQL window in a bounded number of steps,
 // independent of output length, and confidence-based early stopping can finish
@@ -1033,96 +1020,289 @@ function chartDataFromPayload(p) {
   return { stats, threshold: numOrNull(p.confidence_threshold), cap, used };
 }
 
-function setConfChartIdle() {
-  if (!confChart) return;
-  confChart.dataset.state = 'idle';
-  if (confChartMeta) confChartMeta.textContent = '';
-  if (confChartBody) {
-    confChartBody.innerHTML = '<span class="conf-empty">Run a generation to see how confidence rises and when it early-stops.</span>';
-  }
+// --- Interactive confidence timeline ----------------------------------------
+// One component scrubs the denoising steps *and* visualises per-step token
+// confidence. The x-axis is the denoising *step* over the full budget [0..cap],
+// so the saved region (steps early-stop skipped) stays visible on the right. The
+// range input is driven by step (not snapshot index): steps 0..used map 1:1 to
+// snapshots, and steps beyond `used` clamp to the final result, so the native
+// thumb and the drawn playhead stay perfectly aligned.
+// The "gate" line is the hardest still-masked token's confidence (what early
+// stop watches); the "mean" line is the typical remaining token.
+const TL_VB_W = 1000, TL_VB_H = 140, TL_PT = 16, TL_PB = 16;
+let timelineData = null;
+let liveTL = null;
+
+function clamp01(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return n < 0 ? 0 : n > 1 ? 1 : n;
 }
 
-function renderConfidenceChart(data) {
-  if (!confChart || !confChartBody) return;
-  if (!data || !data.stats || !data.stats.length) { setConfChartIdle(); return; }
-  const { stats, threshold, cap, used } = data;
+function tlYVB(p) {
+  return TL_PT + (1 - clamp01(p)) * (TL_VB_H - TL_PT - TL_PB);
+}
 
-  // geometry (viewBox; SVG scales to container width)
-  const W = 600, H = 180;
-  const padL = 30, padR = 14, padT = 12, padB = 26;
-  const x0 = padL, x1 = W - padR, y0 = padT, y1 = H - padB;
-  const xFor = (step) => cap <= 1 ? x0 : x0 + ((step - 1) / (cap - 1)) * (x1 - x0);
-  const yFor = (p) => y1 - Math.max(0, Math.min(1, p)) * (y1 - y0);
+function tlXStep(step, cap) {
+  return cap <= 0 ? 0 : (Math.max(0, Math.min(step, cap)) / cap) * TL_VB_W;
+}
 
-  const el = (name, attrs, children) => {
-    const n = document.createElementNS(SVG_NS, name);
-    for (const k in attrs) n.setAttribute(k, attrs[k]);
-    if (children) (Array.isArray(children) ? children : [children]).forEach((c) => c && n.appendChild(c));
-    return n;
-  };
-  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Token confidence over denoising steps' });
+function setTimelineIdle() {
+  timelineData = null;
+  liveTL = null;
+  if (snapSlider) {
+    snapSlider.disabled = true;
+    snapSlider.value = '0';
+    snapSlider.max = '0';
+  }
+  if (timelineSvg) timelineSvg.replaceChildren();
+  if (timeline) {
+    timeline.dataset.state = 'idle';
+    timeline.dataset.hasConf = '0';
+    timeline.dataset.hasStop = '0';
+  }
+  if (timelineReadout) timelineReadout.textContent = '—';
+}
 
-  // gridlines + y labels at 0 / 50 / 100%
-  [0, 0.5, 1].forEach((p) => {
-    const y = yFor(p);
-    svg.appendChild(el('line', { x1: x0, y1: y, x2: x1, y2: y, stroke: '#dbe2ee', 'stroke-width': 1 }));
-    const t = el('text', { x: x0 - 6, y: y + 3, 'text-anchor': 'end', 'font-size': 10, fill: '#8a94a6', 'font-family': 'monospace' });
-    t.textContent = `${Math.round(p * 100)}`;
-    svg.appendChild(t);
+function buildTimelineData(chartData) {
+  const snaps = historySnapshots;
+  if (!snaps.length) return null;
+  const statByStep = new Map();
+  if (chartData && Array.isArray(chartData.stats)) {
+    chartData.stats.forEach((s) => {
+      const st = Number(s.step);
+      if (Number.isFinite(st)) statByStep.set(st, s);
+    });
+  }
+  const stepToIdx = new Map();
+  const points = snaps.map((snap, idx) => {
+    const step = Number.isFinite(Number(snap.step)) ? Number(snap.step) : idx;
+    const stat = statByStep.get(step);
+    stepToIdx.set(step, idx);
+    return {
+      idx,
+      step,
+      minP: stat ? clamp01(stat.min_p) : null,
+      meanP: stat ? clamp01(stat.mean_p) : null,
+    };
+  });
+  const last = points[points.length - 1];
+  const used = chartData && Number.isFinite(chartData.used) ? chartData.used : last.step;
+  const lastTotal = Number(snaps[snaps.length - 1].total_steps);
+  const cap = chartData && Number.isFinite(chartData.cap)
+    ? Math.max(chartData.cap, used)
+    : Math.max(Number.isFinite(lastTotal) ? lastTotal : used, used);
+  const threshold = chartData && chartData.threshold != null ? clamp01(chartData.threshold) : null;
+  const hasConf = points.some((p) => p.minP != null);
+  return { points, stepToIdx, used, cap, threshold, hasConf };
+}
+
+// Map a step on the scrubber to the snapshot that should be shown. Steps beyond
+// `used` (inside the saved region) resolve to the final committed snapshot.
+function snapshotForStep(step) {
+  if (!timelineData) return { snap: null, idx: 0, point: null };
+  const { points, stepToIdx, used } = timelineData;
+  const target = Math.min(step, used);
+  let idx = stepToIdx.has(target) ? stepToIdx.get(target) : points.length - 1;
+  // Nearest lower step if an exact match is missing (defensive).
+  if (!stepToIdx.has(target)) {
+    for (let s = target; s >= 0; s -= 1) {
+      if (stepToIdx.has(s)) { idx = stepToIdx.get(s); break; }
+    }
+  }
+  return { snap: historySnapshots[idx], idx, point: points[idx] };
+}
+
+function svgNode(name, attrs) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const k in attrs) node.setAttribute(k, attrs[k]);
+  return node;
+}
+
+function renderTimeline(data) {
+  if (!timelineSvg) return;
+  timelineSvg.replaceChildren();
+  const { points, used, cap, threshold, hasConf } = data;
+  const baseY = tlYVB(0);
+
+  // faint gridlines at 0 / 50 / 100%
+  [0, 0.5, 1].forEach((g) => {
+    timelineSvg.appendChild(svgNode('line', {
+      x1: 0, x2: TL_VB_W, y1: tlYVB(g), y2: tlYVB(g),
+      stroke: '#e3e9f3', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
   });
 
-  // "saved steps" region (early stop finished before the cap)
-  if (used < cap) {
-    const xs = xFor(used);
-    svg.appendChild(el('rect', { x: xs, y: y0, width: Math.max(0, x1 - xs), height: y1 - y0, fill: '#1f6feb', opacity: 0.06 }));
-    svg.appendChild(el('line', { x1: xs, y1: y0, x2: xs, y2: y1, stroke: '#1f6feb', 'stroke-width': 1.5, 'stroke-dasharray': '3 3', opacity: 0.5 }));
+  // saved-steps region (early stop finished before the cap) — drawn first so the
+  // curve and threshold sit on top of the shading. Suppressed while the run is
+  // still animating (we don't yet know where it will stop).
+  if (!data.live && used < cap) {
+    const xs = tlXStep(used, cap);
+    timelineSvg.appendChild(svgNode('rect', {
+      x: xs, y: 0, width: Math.max(0, TL_VB_W - xs), height: TL_VB_H,
+      fill: '#1f6feb', opacity: 0.06,
+    }));
+    timelineSvg.appendChild(svgNode('line', {
+      x1: xs, x2: xs, y1: 0, y2: TL_VB_H,
+      stroke: '#1f6feb', 'stroke-width': 1.5, 'stroke-dasharray': '4 4',
+      opacity: 0.5, 'vector-effect': 'non-scaling-stroke',
+    }));
   }
 
-  // threshold line
+  if (!hasConf) {
+    // No confidence telemetry — keep a clean centred scrubber baseline.
+    timelineSvg.appendChild(svgNode('line', {
+      x1: 0, x2: tlXStep(used, cap), y1: TL_VB_H / 2, y2: TL_VB_H / 2,
+      stroke: '#cfd8e6', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
+    }));
+    return;
+  }
+
+  // threshold line (early-stop gate level)
   if (threshold != null) {
-    const yt = yFor(threshold);
-    svg.appendChild(el('line', { x1: x0, y1: yt, x2: x1, y2: yt, stroke: '#a76f1d', 'stroke-width': 1.4, 'stroke-dasharray': '5 4' }));
-    const lab = el('text', { x: x1, y: yt - 4, 'text-anchor': 'end', 'font-size': 10, fill: '#a76f1d', 'font-weight': 700 });
-    lab.textContent = `early-stop ≥ ${Math.round(threshold * 100)}%`;
-    svg.appendChild(lab);
+    const yt = tlYVB(threshold);
+    timelineSvg.appendChild(svgNode('line', {
+      x1: 0, x2: TL_VB_W, y1: yt, y2: yt,
+      stroke: '#a76f1d', 'stroke-width': 1.4, 'stroke-dasharray': '6 5',
+      'vector-effect': 'non-scaling-stroke',
+    }));
   }
 
-  const meanPts = stats.map((s) => `${xFor(s.step).toFixed(1)},${yFor(s.mean_p).toFixed(1)}`);
-  const minPts = stats.map((s) => `${xFor(s.step).toFixed(1)},${yFor(s.min_p).toFixed(1)}`);
-  const lastX = xFor(stats[stats.length - 1].step).toFixed(1);
+  // Gate value for a point: step 0 (all masked) has no stat → treat as 0 so the
+  // curve rises from the baseline; later gaps reuse the previous known value.
+  let prevMin = 0;
+  let prevMean = 0;
+  const withVals = points.map((p) => {
+    const minP = p.minP != null ? p.minP : (p.idx === 0 ? 0 : prevMin);
+    const meanP = p.meanP != null ? p.meanP : (p.idx === 0 ? 0 : prevMean);
+    prevMin = minP; prevMean = meanP;
+    return { x: tlXStep(p.step, cap), minP, meanP };
+  });
 
-  // area under the gate line (hardest still-masked token's confidence)
-  svg.appendChild(el('polygon', { points: `${x0},${y1} ${minPts.join(' ')} ${lastX},${y1}`, fill: '#1f6feb', opacity: 0.10 }));
-  // mean-confidence line (context: typical remaining token)
-  svg.appendChild(el('polyline', { points: meanPts.join(' '), fill: 'none', stroke: '#8a94a6', 'stroke-width': 1.4, 'stroke-dasharray': '4 3' }));
-  // gate line (hero): early stop fires when this crosses the threshold
-  svg.appendChild(el('polyline', { points: minPts.join(' '), fill: 'none', stroke: '#1f6feb', 'stroke-width': 2.4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-  stats.forEach((s) => svg.appendChild(el('circle', { cx: xFor(s.step), cy: yFor(s.min_p), r: 2.6, fill: '#1f6feb' })));
+  const gatePts = withVals.map((p) => `${p.x.toFixed(1)},${tlYVB(p.minP).toFixed(1)}`);
+  const meanPts = withVals.map((p) => `${p.x.toFixed(1)},${tlYVB(p.meanP).toFixed(1)}`);
+  const lastX = withVals[withVals.length - 1].x.toFixed(1);
 
-  // x labels: first, stop, cap
-  const xlab = (step, text, anchor) => {
-    const t = el('text', { x: xFor(step), y: H - 8, 'text-anchor': anchor, 'font-size': 10, fill: '#8a94a6', 'font-family': 'monospace' });
-    t.textContent = text;
-    return t;
-  };
-  svg.appendChild(xlab(1, '1', 'start'));
-  if (used < cap) svg.appendChild(xlab(used, `stop ${used}`, 'middle'));
-  svg.appendChild(xlab(cap, `${cap}`, 'end'));
+  // area under the gate line
+  timelineSvg.appendChild(svgNode('polygon', {
+    points: `0,${baseY.toFixed(1)} ${gatePts.join(' ')} ${lastX},${baseY.toFixed(1)}`,
+    fill: '#1f6feb', opacity: 0.10,
+  }));
+  // mean line (dashed, context)
+  timelineSvg.appendChild(svgNode('polyline', {
+    points: meanPts.join(' '), fill: 'none', stroke: '#8a94a6',
+    'stroke-width': 1.5, 'stroke-dasharray': '5 4', 'vector-effect': 'non-scaling-stroke',
+  }));
+  // gate line (hero)
+  timelineSvg.appendChild(svgNode('polyline', {
+    points: gatePts.join(' '), fill: 'none', stroke: '#1f6feb',
+    'stroke-width': 2.4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    'vector-effect': 'non-scaling-stroke',
+  }));
+}
 
-  confChart.dataset.state = 'ready';
-  confChartBody.innerHTML = '';
-  confChartBody.appendChild(svg);
-  if (confChartMeta) {
-    confChartMeta.textContent = threshold != null
-      ? `${used}/${cap} steps · stop ≥ ${Math.round(threshold * 100)}%`
-      : `${used} steps (early-stop off)`;
+function updateTimelinePlayhead(stepVal) {
+  if (!timelineData || !timelinePlayhead) return;
+  const { cap, used } = timelineData;
+  const step = Math.max(0, Math.min(stepVal, cap));
+  timelinePlayhead.style.left = `${cap <= 0 ? 50 : (step / cap) * 100}%`;
+
+  const { point } = snapshotForStep(step);
+  if (timelineDot) {
+    const gate = point && point.minP != null ? point.minP : (timelineData.hasConf ? 0 : 0.5);
+    timelineDot.style.top = `${(tlYVB(gate) / TL_VB_H) * 100}%`;
+  }
+
+  if (timelineReadout) {
+    if (step > used) {
+      timelineReadout.innerHTML =
+        `<span class="ro-step">Step ${step} / ${cap}</span> · early-stopped at ${used}`;
+    } else if (!point || point.minP == null) {
+      timelineReadout.innerHTML =
+        `<span class="ro-step">Step ${step} / ${cap}</span> · start`;
+    } else {
+      const gatePct = Math.round(point.minP * 100);
+      const meanPct = Math.round((point.meanP != null ? point.meanP : point.minP) * 100);
+      timelineReadout.innerHTML =
+        `<span class="ro-step">Step ${step} / ${cap}</span>`
+        + ` · gate <span class="ro-gate">${gatePct}%</span>`
+        + ` · mean <span class="ro-mean">${meanPct}%</span>`;
+    }
   }
 }
 
-function updateConfidenceChart(payload) {
-  const cd = chartDataFromPayload(payload) || lastChartData;
-  if (cd) { lastChartData = cd; renderConfidenceChart(cd); }
-  else setConfChartIdle();
+function showTimeline(payload) {
+  const chartData = chartDataFromPayload(payload) || lastChartData;
+  if (chartData) lastChartData = chartData;
+  timelineData = buildTimelineData(chartData);
+  if (!timelineData) { setTimelineIdle(); return; }
+
+  renderTimeline(timelineData);
+  if (snapSlider) {
+    snapSlider.max = String(timelineData.cap);
+    snapSlider.value = String(timelineData.used);
+    snapSlider.disabled = false;
+  }
+  if (timeline) {
+    timeline.dataset.state = 'ready';
+    timeline.dataset.hasConf = timelineData.hasConf ? '1' : '0';
+    timeline.dataset.hasStop = timelineData.used < timelineData.cap ? '1' : '0';
+  }
+  updateTimelinePlayhead(timelineData.used);
+}
+
+// Grow the confidence curve in sync with the live token reveal: each animated
+// snapshot carries its step's confidence, so we upsert a point and re-render the
+// partial curve with the playhead riding the newest step. The saved-region and
+// scrubbing are deferred to showTimeline() once the run is done.
+function appendLiveTimeline(snap) {
+  if (!snap || !timeline) return;
+  const step = Number(snap.step);
+  if (!Number.isFinite(step)) return;
+  const cap = Number(snap.total_steps);
+  const minP = snap.min_p != null ? clamp01(snap.min_p) : null;
+  const meanP = snap.mean_p != null ? clamp01(snap.mean_p) : null;
+  const thr = snap.conf_threshold != null ? clamp01(snap.conf_threshold) : null;
+
+  if (!liveTL) {
+    liveTL = {
+      stepToIdx: new Map(),
+      points: [],
+      cap: Number.isFinite(cap) ? cap : step,
+      threshold: thr,
+      hasConf: false,
+    };
+  }
+  if (Number.isFinite(cap)) liveTL.cap = Math.max(liveTL.cap, cap);
+  if (thr != null) liveTL.threshold = thr;
+
+  if (liveTL.stepToIdx.has(step)) {
+    const p = liveTL.points[liveTL.stepToIdx.get(step)];
+    if (minP != null) p.minP = minP;
+    if (meanP != null) p.meanP = meanP;
+  } else {
+    liveTL.points.push({ idx: liveTL.points.length, step, minP, meanP });
+  }
+  if (minP != null) liveTL.hasConf = true;
+
+  liveTL.points.sort((a, b) => a.step - b.step);
+  liveTL.points.forEach((p, i) => { p.idx = i; liveTL.stepToIdx.set(p.step, i); });
+
+  // Drive the shared timeline with a live view (used = newest step, no saved region).
+  timelineData = {
+    points: liveTL.points,
+    stepToIdx: liveTL.stepToIdx,
+    used: step,
+    cap: liveTL.cap,
+    threshold: liveTL.threshold,
+    hasConf: liveTL.hasConf,
+    live: true,
+  };
+  timeline.dataset.state = 'ready';
+  timeline.dataset.hasConf = liveTL.hasConf ? '1' : '0';
+  timeline.dataset.hasStop = '0';
+  renderTimeline(timelineData);
+  updateTimelinePlayhead(step);
 }
 
 function applySnapshotAnimated(snap) {
@@ -1133,6 +1313,7 @@ function applySnapshotAnimated(snap) {
     : snapshotText(snap);
   updateTokenDisplay(text);
   stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
+  appendLiveTimeline(snap);
 }
 
 function applySnapshotImmediate(snap) {
@@ -1245,17 +1426,14 @@ function finishRun(payload) {
   setStatus('Completed.');
 
   if (historySnapshots.length > 0) {
-    snapSlider.max = String(historySnapshots.length - 1);
-    snapSlider.value = snapSlider.max;
-    snapSlider.disabled = false;
-    sliderRow.classList.add('visible');
-    updateSliderLabel();
+    showTimeline(payload);
     if (terminalSqlText) {
       updateTokenDisplay(terminalSqlText);
     } else {
       applySnapshotImmediate(historySnapshots[historySnapshots.length - 1]);
     }
   } else if (terminalSqlText) {
+    setTimelineIdle();
     updateTokenDisplay(terminalSqlText);
   }
 
@@ -1265,7 +1443,6 @@ function finishRun(payload) {
   }
 
   updateEfficiencyReadout();
-  updateConfidenceChart(payload);
   setUiState(UI_MODES.IDLE);
 }
 
@@ -1561,20 +1738,19 @@ runForm.addEventListener('submit', async (ev) => {
 });
 
 snapSlider.addEventListener('input', () => {
-  if (!historySnapshots.length) return;
-  const idx = parseInt(snapSlider.value, 10);
-  const snap = historySnapshots[idx];
+  if (!timelineData) return;
+  const step = parseInt(snapSlider.value, 10);
+  const { snap } = snapshotForStep(step);
+  if (!snap) return;
 
-  if (terminalSqlText && idx === historySnapshots.length - 1) {
+  if (terminalSqlText && step >= timelineData.used) {
     updateTokenDisplay(terminalSqlText);
-    if (snap) {
-      stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
-    }
+    stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
   } else {
     applySnapshotImmediate(snap);
   }
 
-  updateSliderLabel();
+  updateTimelinePlayhead(step);
 });
 
 function guessType(value) {

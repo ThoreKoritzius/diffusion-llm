@@ -369,24 +369,166 @@
       }
     }
 
-    /* Timeline + GIF row stays in the layout at all times so nothing shifts
-       during a run; it is simply disabled until snapshots are available. */
-    .slider-row {
+    /* ---- Interactive confidence timeline ----
+       The confidence curve doubles as the scrubber track: a draggable playhead
+       rides the gate line, scrubs denoising steps, and drives the live output.
+       Stays in the layout at all times; disabled until a run completes. */
+    .timeline {
       display: grid;
-      gap: var(--space-1);
+      gap: 9px;
+      border: 1px solid var(--color-border-soft);
+      background: var(--color-surface-soft);
+      padding: 10px 12px 11px;
     }
 
-    .range {
+    .timeline-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: var(--space-2);
+    }
+
+    .timeline-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--color-muted);
+    }
+
+    .timeline-readout {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--color-muted);
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .timeline-readout .ro-step {
+      color: var(--color-text);
+    }
+
+    .timeline-readout .ro-gate {
+      color: var(--color-accent);
+    }
+
+    .timeline-readout .ro-mean {
+      color: #8a94a6;
+    }
+
+    .timeline-plot {
+      position: relative;
+      height: 96px;
+      background: #fff;
+      border: 1px solid var(--color-border-soft);
+      overflow: hidden;
+    }
+
+    .timeline-svg {
+      position: absolute;
+      inset: 0;
       width: 100%;
-      min-height: 44px;
+      height: 100%;
+      display: block;
     }
 
-    .range:disabled {
-      opacity: 0.45;
+    .timeline-empty {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 0 16px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--color-muted);
+      opacity: 0.7;
+    }
+
+    .timeline-playhead {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: 0;
+      pointer-events: none;
+      border-left: 2px solid var(--color-accent);
+      transform: translateX(-1px);
+      transition: left 70ms linear;
+    }
+
+    .timeline-dot {
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 11px;
+      height: 11px;
+      transform: translate(-50%, -50%);
+      background: var(--color-accent);
+      border: 2px solid #fff;
+      box-shadow: 0 1px 5px rgba(15, 23, 42, 0.35);
+      transition: top 70ms linear;
+    }
+
+    .timeline-range {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      cursor: ew-resize;
+      outline: none;
+    }
+
+    .timeline-range:disabled {
       cursor: default;
     }
 
-    .slider-foot {
+    .timeline-range::-webkit-slider-runnable-track {
+      background: transparent;
+      height: 100%;
+    }
+
+    .timeline-range::-moz-range-track {
+      background: transparent;
+      height: 100%;
+    }
+
+    .timeline-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 100%;
+      background: transparent;
+      cursor: ew-resize;
+    }
+
+    .timeline-range::-moz-range-thumb {
+      width: 16px;
+      height: 100%;
+      border: 0;
+      background: transparent;
+      cursor: ew-resize;
+    }
+
+    .timeline-range:focus-visible {
+      outline: 2px solid #9bbcff;
+      outline-offset: 2px;
+    }
+
+    .timeline[data-state="idle"] .timeline-svg,
+    .timeline[data-state="idle"] .timeline-playhead {
+      display: none;
+    }
+
+    .timeline[data-state="ready"] .timeline-empty {
+      display: none;
+    }
+
+    .timeline-foot {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -394,10 +536,60 @@
       min-height: 30px;
     }
 
-    .slider-label {
-      font-size: 12px;
-      color: var(--color-muted);
+    .timeline-legend {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      font-size: 11px;
       font-weight: 600;
+      color: var(--color-muted);
+    }
+
+    .timeline[data-has-conf="0"] .timeline-legend {
+      visibility: hidden;
+    }
+
+    .timeline[data-has-stop="0"] .lg-stop {
+      display: none;
+    }
+
+    .lg {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .lg::before {
+      content: "";
+      width: 15px;
+      border-top: 2px solid currentColor;
+    }
+
+    .lg-gate {
+      color: var(--color-accent);
+    }
+
+    .lg-mean {
+      color: #8a94a6;
+    }
+
+    .lg-mean::before {
+      border-top-style: dashed;
+    }
+
+    .lg-stop {
+      color: var(--color-warn);
+    }
+
+    .lg-stop::before {
+      border-top-style: dashed;
+    }
+
+    .timeline-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
     /* ---- Console (right pane: inputs + action) ---- */
@@ -879,56 +1071,6 @@
       white-space: pre-wrap;
     }
 
-    /* ---- Confidence-over-steps chart ---- */
-    .conf-chart {
-      border: 1px solid var(--color-border-soft);
-      background: var(--color-surface-soft);
-      padding: 10px 12px;
-      display: grid;
-      gap: 8px;
-    }
-
-    .conf-chart-head {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 8px;
-    }
-
-    .conf-chart-title {
-      font-size: 12.5px;
-      font-weight: 700;
-      color: var(--color-muted);
-    }
-
-    .conf-chart-meta {
-      font-size: 11px;
-      color: var(--color-muted);
-      font-family: var(--mono);
-      white-space: nowrap;
-    }
-
-    .conf-chart-body {
-      min-height: 134px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .conf-chart-body svg {
-      width: 100%;
-      height: auto;
-      display: block;
-    }
-
-    .conf-empty {
-      font-size: 12px;
-      color: var(--color-muted);
-      opacity: 0.7;
-      text-align: center;
-      line-height: 1.5;
-    }
-
     .info-panel {
       padding: var(--space-4);
       display: grid;
@@ -1059,6 +1201,27 @@
         grid-template-columns: 1fr;
       }
 
+      .timeline-plot {
+        height: 82px;
+      }
+
+      .timeline-head {
+        flex-wrap: wrap;
+        row-gap: 2px;
+      }
+
+      .timeline-title {
+        white-space: nowrap;
+      }
+
+      .timeline-readout {
+        font-size: 11.5px;
+      }
+
+      .timeline-legend {
+        gap: 10px;
+      }
+
       #liveTokenPre {
         text-align: left;
       }
@@ -1126,15 +1289,34 @@
             </div>
           </div>
 
-          <div class="slider-row" id="sliderRow">
-            <input type="range" class="range" min="0" value="0" id="snapSlider" disabled
-              aria-label="Snapshot timeline" />
-            <div class="slider-foot">
-              <div class="slider-label" id="snapSliderLabel">Timeline</div>
-              <button type="button" id="exportGifBtn" class="gif-btn" disabled aria-label="Export animation as GIF">
-                <span class="gif-ico" aria-hidden="true">↓</span> GIF
-              </button>
-              <a id="gifDownloadLink" class="gif-download-link" download="text2sql-diffusion.gif">Download ready</a>
+          <div class="timeline" id="timeline" data-state="idle" data-has-conf="0" data-has-stop="0">
+            <div class="timeline-head">
+              <span class="timeline-title">Token confidence</span>
+              <span class="timeline-readout" id="timelineReadout">—</span>
+            </div>
+            <div class="timeline-plot" id="timelinePlot">
+              <svg class="timeline-svg" id="timelineSvg" viewBox="0 0 1000 140" preserveAspectRatio="none"
+                aria-hidden="true"></svg>
+              <div class="timeline-playhead" id="timelinePlayhead">
+                <span class="timeline-dot" id="timelineDot"></span>
+              </div>
+              <span class="timeline-empty" id="timelineEmpty">Run a generation, then scrub the steps to watch token
+                confidence rise.</span>
+              <input type="range" class="timeline-range" min="0" value="0" id="snapSlider" disabled
+                aria-label="Denoising step timeline" />
+            </div>
+            <div class="timeline-foot">
+              <div class="timeline-legend">
+                <span class="lg lg-gate">gate</span>
+                <span class="lg lg-mean">mean</span>
+                <span class="lg lg-stop">early-stop</span>
+              </div>
+              <div class="timeline-actions">
+                <button type="button" id="exportGifBtn" class="gif-btn" disabled aria-label="Export animation as GIF">
+                  <span class="gif-ico" aria-hidden="true">↓</span> GIF
+                </button>
+                <a id="gifDownloadLink" class="gif-download-link" download="text2sql-diffusion.gif">Download ready</a>
+              </div>
             </div>
           </div>
         </section>
@@ -1233,16 +1415,6 @@
                 </div>
               </details>
             </form>
-
-            <div class="conf-chart" id="confChart" data-state="idle">
-              <div class="conf-chart-head">
-                <span class="conf-chart-title">Token confidence over steps</span>
-                <span class="conf-chart-meta" id="confChartMeta"></span>
-              </div>
-              <div class="conf-chart-body" id="confChartBody">
-                <span class="conf-empty">Run a generation to see how confidence rises and when it early-stops.</span>
-              </div>
-            </div>
 
             <div id="status" class="status" aria-live="polite">Ready.</div>
           </div>
