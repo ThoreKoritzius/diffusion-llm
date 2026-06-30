@@ -36,6 +36,8 @@ const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)
 
 const stepBox = document.getElementById('stepBox');
 const effPill = document.getElementById('effPill');
+const effText = document.getElementById('effText');
+const effInfoDyn = document.getElementById('effInfoDyn');
 const statusBox = document.getElementById('status');
 const runBtn = document.getElementById('runBtn');
 const runBtnLabel = document.getElementById('runBtnLabel');
@@ -981,10 +983,9 @@ function computeEfficiency() {
 
 function setEfficiencyIdle() {
   if (!effPill) return;
-  effPill.textContent = '⚡ vs traditional: —';
+  if (effText) effText.textContent = 'vs traditional: —';
   effPill.dataset.state = 'idle';
-  effPill.title = 'After a run, this shows how many fewer forward passes (steps) '
-    + 'masked-diffusion decoding used versus traditional autoregressive (token-by-token) decoding.';
+  if (effInfoDyn) effInfoDyn.textContent = 'Run a generation to see this run’s step savings.';
 }
 
 function updateEfficiencyReadout() {
@@ -994,15 +995,17 @@ function updateEfficiencyReadout() {
   const r = eff.ratio;
   if (r >= 1.05) {
     // "vs AR" = versus traditional autoregressive (token-by-token) decoding; tooltip spells it out.
-    effPill.textContent = `⚡ ${r.toFixed(1)}× fewer steps vs AR`;
+    if (effText) effText.textContent = `${r.toFixed(1)}× fewer steps vs AR`;
     effPill.dataset.state = 'good';
   } else {
-    effPill.textContent = `⚡ ${eff.steps} steps`;
+    if (effText) effText.textContent = `${eff.steps} steps`;
     effPill.dataset.state = 'neutral';
   }
-  effPill.title = `This run: ${eff.steps} diffusion steps filled the SQL window in parallel. `
-    + `Traditional autoregressive (token-by-token) decoding emits ~1 token per step `
-    + `(~${eff.arSteps} steps for this output) → ${r.toFixed(2)}× ${r >= 1 ? 'fewer' : 'more'} forward passes.`;
+  if (effInfoDyn) {
+    effInfoDyn.textContent = `This run: ${eff.steps} diffusion steps filled the SQL window in parallel; `
+      + `autoregressive decoding emits ~1 token/step (~${eff.arSteps} steps here) → `
+      + `${r.toFixed(2)}× ${r >= 1 ? 'fewer' : 'more'} forward passes.`;
+  }
 }
 
 // --- Token-confidence-over-steps chart ---------------------------------------
@@ -1967,3 +1970,77 @@ fitLiveFont();
 setUiState(UI_MODES.IDLE);
 setStatus('Ready.');
 renderImmediate('Ready for generation. Submit a prompt to start.');
+
+// --- Info tips (ⓘ) ----------------------------------------------------------
+// Hover on desktop, tap-to-pin on touch, focusable for keyboard. The popover is
+// position:fixed and placed in JS so it never clips against the card's
+// overflow:hidden and always stays inside the viewport on any screen size.
+(function initInfoTips() {
+  const tips = Array.from(document.querySelectorAll('.info-tip'));
+  if (!tips.length) return;
+  let pinned = null;
+
+  function place(btn, pop) {
+    const b = btn.getBoundingClientRect();
+    const r = pop.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const M = 8;
+    const spaceBelow = vh - b.bottom;
+    const dir = (spaceBelow < r.height + 16 && b.top > spaceBelow) ? 'up' : 'down';
+    const top = dir === 'down' ? b.bottom + 10 : b.top - 10 - r.height;
+    let left = b.left + b.width / 2 - r.width / 2;
+    left = Math.max(M, Math.min(left, vw - M - r.width));
+    pop.dataset.dir = dir;
+    pop.style.top = `${Math.round(top)}px`;
+    pop.style.left = `${Math.round(left)}px`;
+    const center = b.left + b.width / 2 - left;
+    const arrowX = Math.max(12, Math.min(center, r.width - 12));
+    pop.style.setProperty('--arrow-x', `${Math.round(arrowX - 7)}px`);
+  }
+
+  function open(tip) {
+    const btn = tip.querySelector('.info-btn');
+    const pop = tip.querySelector('.info-pop');
+    if (!btn || !pop) return;
+    place(btn, pop);
+    pop.setAttribute('data-show', '');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+
+  function close(tip) {
+    const btn = tip.querySelector('.info-btn');
+    const pop = tip.querySelector('.info-pop');
+    if (pop) pop.removeAttribute('data-show');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    if (pinned === tip) pinned = null;
+  }
+
+  function closeAll() {
+    tips.forEach(close);
+    pinned = null;
+  }
+
+  tips.forEach((tip) => {
+    const btn = tip.querySelector('.info-btn');
+    if (!btn) return;
+    tip.addEventListener('mouseenter', () => { if (!pinned) open(tip); });
+    tip.addEventListener('mouseleave', () => { if (pinned !== tip) close(tip); });
+    btn.addEventListener('focus', () => { if (!pinned) open(tip); });
+    btn.addEventListener('blur', () => { if (pinned !== tip) close(tip); });
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (pinned === tip) { close(tip); return; }
+      closeAll();
+      pinned = tip;
+      open(tip);
+    });
+  });
+
+  document.addEventListener('click', (ev) => {
+    if (pinned && !ev.target.closest('.info-tip')) closeAll();
+  });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeAll(); });
+  window.addEventListener('scroll', () => { if (pinned) closeAll(); }, true);
+  window.addEventListener('resize', () => { if (pinned) closeAll(); });
+})();
