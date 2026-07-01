@@ -70,6 +70,55 @@ Easy queries finish in ~4 passes, hard ones use up to the cap. Defaults:
 `CONFIDENCE_STOP = 0.9`. Toggle per run in the playground's Advanced panel, or
 globally via `--confidence-stop` / `CONFIDENCE_STOP` (set `0` to disable).
 
+### Commit ordering: confidence vs. dependency (DOS)
+
+`denoise_steps` supports an alternative `strategy="dependency"` that reorders
+commits by a DOS-style ([arXiv:2603.15340](https://arxiv.org/abs/2603.15340))
+attention-groundedness score: for each masked position, the fraction of its
+attention mass (averaged over heads, read from a single tuned layer via
+`dep_layer_index`) that lands on already-revealed context. The paper's intuition
+is that committing the best-grounded tokens first respects inter-token
+dependencies. `dep_alpha` blends it with confidence (1.0 = standalone DOS).
+
+We evaluated it faithfully with `src/compare_strategies.py` on the gretelai
+text-to-SQL test split (eager attention). **It does not beat the confidence
+baseline on this model, across three tests:**
+
+**1. Standalone DOS, single layer swept shallow→deep** (fixed 24 steps, n=128):
+
+| layer read | exact | Δ vs baseline | latency |
+|:--|:--:|:--:|:--:|
+| **confidence (default)** | **0.242** | — | — |
+| DOS layer 4 (best) | 0.250 | +0.008 (1 example) | +30% |
+| DOS layers 0/2/6/8/10/21 | 0.195–0.234 | −0.008 to −0.047 | +22–30% |
+
+The paper tunes the attention layer (favoring shallow, syntax-bearing layers);
+sweeping layers 0–21 here, the best beats baseline by a single example (noise)
+and most layers are *worse*. No layer redeems it.
+
+**2. Under adaptive early-stop** (`confidence_stop=0.9`, n=256): DOS reaches the
+threshold in fewer steps but commits the wrong tokens early —
+
+| config | exact | avg steps | latency |
+|:--|:--:|:--:|:--:|
+| **confidence (default)** | **0.320** | 11.8 | 1017 ms/ex |
+| DOS layer 4 (standalone) | 0.102 | 5.4 | 472 ms/ex |
+
+It is ~2× faster only because it's a fast path to a **−0.219 accuracy** answer.
+
+Why it doesn't transfer: DOS is training-free and can only exploit dependency
+structure the model already encodes in attention. The paper's gains are on 7–8B
+reasoning DLMs (LLaDA/Dream); this is a ~150M SQL-tuned ModernBERT encoder whose
+attention carries little exploitable dependency signal — consistent with
+standalone dependency being *worse* than confidence at every layer.
+
+**Decision: confidence remains the default; DOS is not wired into the inference
+frontend.** The dependency path stays opt-in (`strategy`/`dep_alpha`/`dep_layers`/
+`dep_layer_index` args to `denoise_steps`, exercised by `compare_strategies.py`)
+for future experimentation — e.g. against a larger or dependency-supervised
+model. Note it also silently no-ops to confidence on the ONNX backend and on any
+torch model not loaded with `attn_implementation="eager"`.
+
 ## Features
 
 - LLaDA-style masked diffusion training with `1/t`-weighted ELBO loss.
