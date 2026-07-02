@@ -1,0 +1,51 @@
+{
+  "base+both_c0.9": {
+    "n": 256,
+    "avg_steps": 14.11328125,
+    "parse_valid": 0.9375,
+    "exact": 0.328125,
+    "semantic": 0.5078125
+  },
+  "base+none_c0.9": {
+    "n": 256,
+    "avg_steps": 11.79296875,
+    "parse_valid": 0.859375,
+    "exact": 0.3203125,
+    "semantic": 0.5
+  },
+  "base+refine_c0.9": {
+    "n": 256,
+    "avg_steps": 13.44921875,
+    "parse_valid": 0.859375,
+    "exact": 0.328125,
+    "semantic": 0.5078125
+  },
+  "base+repair_c0.8": {
+    "n": 256,
+    "avg_steps": 9.390625,
+    "parse_valid": 0.953125,
+    "exact": 0.3046875,
+    "semantic": 0.46484375
+  },
+  "base+repair_c0.9": {
+    "n": 256,
+    "avg_steps": 12.45703125,
+    "parse_valid": 0.9375,
+    "exact": 0.3203125,
+    "semantic": 0.50390625
+  },
+  "base+repair_c0.95": {
+    "n": 256,
+    "avg_steps": 15.1640625,
+    "parse_valid": 0.9375,
+    "exact": 0.31640625,
+    "semantic": 0.4921875
+  },
+  "base+repair_c0.99": {
+    "n": 256,
+    "avg_steps": 20.5546875,
+    "parse_valid": 0.93359375,
+    "exact": 0.296875,
+    "semantic": 0.42578125
+  }
+}

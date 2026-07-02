@@ -65,6 +65,12 @@ REFINE_FRAC = float(os.environ.get("REFINE_FRAC", "0"))
 REFINE_ROUNDS = int(os.environ.get("REFINE_ROUNDS", "1"))
 REPAIR = os.environ.get("REPAIR", "0") == "1"
 TAG = os.environ.get("TAG", "")
+# pass@k sampling mode: SAMPLES>1 draws that many stochastic rollouts per
+# example (token-level temperature + nucleus), one pred_<name>_s<i>.jsonl per
+# sample index, at a fixed step budget (early stop off under sampling).
+SAMPLES = int(os.environ.get("SAMPLES", "1"))
+TOKEN_TEMP = float(os.environ.get("TOKEN_TEMP", "0.7"))
+TOP_P = float(os.environ.get("TOP_P", "0.9"))
 OUT_DIR = os.environ.get("DUMP_OUT", os.path.join(AB_DIR, "predictions"))
 os.makedirs(OUT_DIR, exist_ok=True)
 DEVICE = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
@@ -103,7 +109,7 @@ def normalize_sql(s):
 
 
 @torch.no_grad()
-def predict(model, ex, conf_stop=CONF_STOP, n_steps=GEN_STEPS):
+def predict(model, ex, conf_stop=CONF_STOP, n_steps=GEN_STEPS, token_temp=0.0):
     """Returns (predicted_sql, steps_used). Steps include any refinement and
     repair passes, so the frontier accounting stays honest."""
     p, c, s = ex["sql_prompt"], ex.get("sql_context", ""), ex.get("sql", "")
@@ -119,7 +125,8 @@ def predict(model, ex, conf_stop=CONF_STOP, n_steps=GEN_STEPS):
         for _ in denoise_steps(model, ids, attn, list(range(lo, hi)), MASK_ID,
                                n_steps=n_steps, forbid_token_ids=list(TAG_IDS.values()),
                                confidence_stop=conf_stop,
-                               refine_frac=REFINE_FRAC, refine_rounds=REFINE_ROUNDS):
+                               refine_frac=REFINE_FRAC, refine_rounds=REFINE_ROUNDS,
+                               token_temperature=token_temp, top_p=TOP_P):
             steps += 1
             if REFINE_FRAC <= 0 and (ids[0, lo:hi] == MASK_ID).sum().item() == 0:
                 break
@@ -143,13 +150,14 @@ FIXED_STEPS = [int(k) for k in os.environ.get("FIXED_STEPS", "").split(",") if k
 CONF_SWEEP = [float(c) for c in os.environ.get("CONF_SWEEP", "").split(",") if c.strip()]
 
 
-def dump_one(model, name, examples, conf_stop, n_steps, suffix=""):
+def dump_one(model, name, examples, conf_stop, n_steps, suffix="", token_temp=0.0):
     out_path = os.path.join(OUT_DIR, f"pred_{name}{suffix}.jsonl")
     hits = 0
     tot_steps = 0
     with open(out_path, "w") as f:
         for i, ex in enumerate(examples):
-            pred, steps = predict(model, ex, conf_stop=conf_stop, n_steps=n_steps)
+            pred, steps = predict(model, ex, conf_stop=conf_stop, n_steps=n_steps,
+                                  token_temp=token_temp)
             em = normalize_sql(pred) == normalize_sql(ex.get("sql", ""))
             hits += int(em); tot_steps += steps
             f.write(json.dumps({
@@ -165,7 +173,9 @@ def dump_one(model, name, examples, conf_stop, n_steps, suffix=""):
 ds = load_dataset("gretelai/synthetic_text_to_sql")["test"]
 ds = ds.filter(lambda ex: ex["sql_prompt"].strip() != "")
 examples = [ds[i] for i in range(min(N, len(ds)))]
-mode = (f"fixed-NFE K={FIXED_STEPS}" if FIXED_STEPS else
+mode = (f"pass@k SAMPLES={SAMPLES} token_temp={TOKEN_TEMP} top_p={TOP_P} steps={GEN_STEPS}"
+        if SAMPLES > 1 else
+        f"fixed-NFE K={FIXED_STEPS}" if FIXED_STEPS else
         f"conf-sweep {CONF_SWEEP}" if CONF_SWEEP else f"early-stop conf_stop={CONF_STOP}")
 print(f"[dump] device={DEVICE} n={len(examples)} models={list(MODELS)} mode={mode} -> {OUT_DIR}")
 
@@ -175,7 +185,12 @@ for name, path in MODELS.items():
     print(f"[dump] {name}: loading {path}")
     model = AutoModelForMaskedLM.from_pretrained(path).to(DEVICE).eval()
     out_name = f"{name}+{TAG}" if TAG else name
-    if FIXED_STEPS:
+    if SAMPLES > 1:
+        for si in range(SAMPLES):
+            torch.manual_seed(1000 + si)  # reproducible per-sample rollouts
+            dump_one(model, out_name, examples, conf_stop=None, n_steps=GEN_STEPS,
+                     suffix=f"_s{si}", token_temp=TOKEN_TEMP)
+    elif FIXED_STEPS:
         for k in FIXED_STEPS:
             dump_one(model, out_name, examples, conf_stop=None, n_steps=k, suffix=f"_k{k}")
     elif CONF_SWEEP:

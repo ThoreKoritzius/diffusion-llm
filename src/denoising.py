@@ -97,6 +97,8 @@ def denoise_steps(
     dep_layer_index: Optional[int] = None,
     refine_frac: float = 0.0,
     refine_rounds: int = 1,
+    token_temperature: float = 0.0,
+    top_p: float = 1.0,
 ) -> Iterator[Tuple[int, int, torch.Tensor]]:
     """Iteratively fill mask tokens at `fill_positions` in `current_ids` (shape (1, L)).
 
@@ -188,7 +190,20 @@ def denoise_steps(
         for tok_id in forbid:
             logits[:, tok_id] = -float("inf")
 
-        pred = logits.argmax(dim=-1)
+        if token_temperature > 0:
+            # Token-level sampling (for best-of-N diversity): temperature +
+            # top-k, drawn via the Gumbel-max trick over the top-k slice only
+            # (== categorical sampling; avoids full-vocab sort/scatter, which
+            # misbehaves on MPS). `top_p` is reused as top-k when >1, else 20.
+            # Distinct from `temperature`, which only perturbs the commit ORDER.
+            kk = int(top_p) if top_p > 1 else 20
+            vals, idx = torch.topk(logits / token_temperature, kk, dim=-1)
+            g = -torch.log(-torch.log(
+                torch.rand_like(vals).clamp_min(1e-9)).clamp_min(1e-9))
+            choice = (vals + g).argmax(dim=-1)
+            pred = idx.gather(-1, choice.unsqueeze(-1)).squeeze(-1)
+        else:
+            pred = logits.argmax(dim=-1)
         chosen_logits = logits.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
         # Calibrated log-prob of the chosen token; the canonical confidence
         # used for the early-stop threshold and telemetry (noise-free).
