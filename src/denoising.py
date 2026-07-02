@@ -95,6 +95,8 @@ def denoise_steps(
     dep_alpha: float = 0.5,
     dep_layers: int = 1,
     dep_layer_index: Optional[int] = None,
+    refine_frac: float = 0.0,
+    refine_rounds: int = 1,
 ) -> Iterator[Tuple[int, int, torch.Tensor]]:
     """Iteratively fill mask tokens at `fill_positions` in `current_ids` (shape (1, L)).
 
@@ -124,6 +126,13 @@ def denoise_steps(
     of forward passes; hard ones still use the full `n_steps` budget. `None`
     disables it (fixed-step behaviour). Only applies when temperature == 0
     (greedy), since the threshold compares calibrated log-probabilities.
+
+    `refine_frac` > 0 enables targeted-remask refinement (ReMDM-style): once the
+    window first fills, the `refine_frac` fraction of tokens with the LOWEST
+    commit-time confidence are re-masked and re-predicted with full context
+    (`refine_rounds` times, each position at most once). Costs a few extra
+    steps within the same `n_steps` budget; lets early low-context commits be
+    revised instead of frozen.
     """
     conf_stop_logp = None
     if confidence_stop is not None and temperature == 0.0:
@@ -142,6 +151,18 @@ def denoise_steps(
 
     want_attn = strategy == "dependency" and dep_alpha > 0.0
 
+    # Targeted-remask refinement (ReMDM-style, leak-free): committed tokens are
+    # never rescored under a forward where they are visible (BERT-style models
+    # copy the input, so that confidence is meaningless). Instead we record each
+    # token's confidence AT COMMIT TIME; once the window first fills, the
+    # shakiest `refine_frac` of tokens are re-masked and re-predicted with the
+    # full (rather than partially masked) context. Repeats `refine_rounds`
+    # times; each position is refined at most once.
+    track_refine = refine_frac > 0.0
+    commit_conf: dict = {}
+    refined: set = set()
+    rounds_left = int(refine_rounds) if track_refine else 0
+
     for step_idx in range(total_steps):
         if should_stop is not None and should_stop():
             raise TimeoutError("Run cancelled or timed out")
@@ -149,6 +170,16 @@ def denoise_steps(
         still_masked = current_ids[0, positions] == mask_id
         masked_pos = positions[still_masked]
         if masked_pos.numel() == 0:
+            if rounds_left > 0 and step_idx < total_steps - 2:
+                rounds_left -= 1
+                k = max(1, int(round(refine_frac * n_total)))
+                cand = sorted((p for p in commit_conf if p not in refined),
+                              key=commit_conf.get)[:k]
+                if cand:
+                    refined.update(cand)
+                    current_ids[0, torch.as_tensor(cand, dtype=torch.long,
+                                                   device=device)] = mask_id
+                    continue  # bookkeeping only — no forward, no yield
             yield step_idx, total_steps, current_ids
             return
 
@@ -192,6 +223,10 @@ def denoise_steps(
 
         commit = torch.topk(order_score, n_commit).indices
         current_ids[0, masked_pos[commit]] = pred[commit]
+        if track_refine:
+            for p_, c_ in zip(masked_pos[commit].tolist(),
+                              clean_conf[commit].tolist()):
+                commit_conf[p_] = c_
 
         # Per-step confidence telemetry (probabilities) for visualisation.
         if on_step_stats is not None:
