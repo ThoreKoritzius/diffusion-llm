@@ -440,6 +440,77 @@
       background: #fff;
       border: 1px solid var(--color-border-soft);
       overflow: hidden;
+      transition: height 180ms ease;
+    }
+
+    /* The heatmap trades a taller plot for per-token rows */
+    .timeline[data-view="heat"] .timeline-plot {
+      height: 150px;
+    }
+
+    /* ---- Timeline view switcher (curves | tokens heatmap) ---- */
+    .tl-tabs {
+      display: inline-flex;
+      gap: 1px;
+      padding: 2px;
+      background: var(--color-border-soft);
+      flex-shrink: 0;
+    }
+
+    .tl-tab {
+      border: 0;
+      background: transparent;
+      color: var(--color-muted);
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 3px 9px;
+      cursor: pointer;
+      transition: background 140ms ease, color 140ms ease;
+    }
+
+    .tl-tab:hover {
+      color: var(--color-text);
+    }
+
+    .tl-tab.active {
+      background: #fff;
+      color: var(--color-accent);
+    }
+
+    /* Hide the switcher until a run produced per-token telemetry */
+    .timeline[data-has-grid="0"] .tl-tabs {
+      display: none;
+    }
+
+    .timeline-heat {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+    }
+
+    .timeline[data-view="heat"][data-state="ready"] .timeline-heat {
+      display: block;
+    }
+
+    /* Heat view draws its own step highlight on the canvas; the vertical
+       playhead belongs to the curves view only. */
+    .timeline[data-view="heat"] .timeline-svg,
+    .timeline[data-view="heat"] .timeline-playhead {
+      display: none;
+    }
+
+    /* Steps run top-to-bottom in heat view, so scrubbing is a vertical drag */
+    .timeline[data-view="heat"] .timeline-range,
+    .timeline[data-view="heat"] .timeline-range::-webkit-slider-thumb {
+      cursor: ns-resize;
+    }
+
+    .timeline[data-view="heat"] .timeline-range::-moz-range-thumb {
+      cursor: ns-resize;
     }
 
     .timeline-svg {
@@ -603,6 +674,38 @@
 
     .lg-stop::before {
       border-top-style: dashed;
+    }
+
+    /* Heatmap legend: gradient swatch + commit chip instead of line samples */
+    .lg-conf::before {
+      border-top: 0;
+      height: 8px;
+      background: linear-gradient(90deg, #e7edf8, #1f6feb);
+    }
+
+    .lg-commit {
+      color: #1a7f4b;
+    }
+
+    .lg-commit::before {
+      border-top: 0;
+      height: 8px;
+      background: #1a7f4b;
+    }
+
+    .timeline .lg-conf,
+    .timeline .lg-commit {
+      display: none;
+    }
+
+    .timeline[data-view="heat"] .lg-conf,
+    .timeline[data-view="heat"] .lg-commit {
+      display: inline-flex;
+    }
+
+    .timeline[data-view="heat"] .lg-gate,
+    .timeline[data-view="heat"] .lg-mean {
+      display: none;
     }
 
     .timeline-actions {
@@ -1339,6 +1442,10 @@
         height: 82px;
       }
 
+      .timeline[data-view="heat"] .timeline-plot {
+        height: 126px;
+      }
+
       .timeline-head {
         flex-wrap: wrap;
         row-gap: 2px;
@@ -1438,7 +1545,8 @@
             </div>
           </div>
 
-          <div class="timeline" id="timeline" data-state="idle" data-has-conf="0" data-has-stop="0">
+          <div class="timeline" id="timeline" data-state="idle" data-has-conf="0" data-has-stop="0" data-has-grid="0"
+            data-view="curves">
             <div class="timeline-head">
               <span class="timeline-title-wrap">
                 <span class="timeline-title">Token confidence</span>
@@ -1457,8 +1565,15 @@
                       watches this one.</span>
                     <span><b class="ip-mean">Mean</b> — the average across remaining tokens.</span>
                     <span class="ip-dim">A wide gap means a few hard tokens are holding back the
-                      rest.</span>
+                      rest. Switch to <b>Tokens</b> to see every token's confidence and the step where
+                      it locked in.</span>
                   </span>
+                </span>
+                <span class="tl-tabs" role="tablist" aria-label="Timeline view">
+                  <button type="button" class="tl-tab active" id="tlTabCurves" data-tlview="curves"
+                    aria-pressed="true">Curves</button>
+                  <button type="button" class="tl-tab" id="tlTabHeat" data-tlview="heat"
+                    aria-pressed="false">Tokens</button>
                 </span>
               </span>
               <span class="timeline-readout" id="timelineReadout">—</span>
@@ -1466,6 +1581,7 @@
             <div class="timeline-plot" id="timelinePlot">
               <svg class="timeline-svg" id="timelineSvg" viewBox="0 0 1000 140" preserveAspectRatio="none"
                 aria-hidden="true"></svg>
+              <canvas class="timeline-heat" id="timelineHeat" aria-hidden="true"></canvas>
               <div class="timeline-playhead" id="timelinePlayhead">
                 <span class="timeline-dot" id="timelineDot"></span>
               </div>
@@ -1478,7 +1594,9 @@
               <div class="timeline-legend">
                 <span class="lg lg-gate">gate</span>
                 <span class="lg lg-mean">mean</span>
-                <span class="lg lg-stop">early-stop</span>
+                <span class="lg lg-conf">masked · low → high</span>
+                <span class="lg lg-commit">committed</span>
+                <span class="lg lg-stop" id="lgStop">early-stop</span>
               </div>
               <div class="timeline-actions">
                 <button type="button" id="exportGifBtn" class="gif-btn" disabled aria-label="Export animation as GIF">

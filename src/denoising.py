@@ -253,6 +253,12 @@ def denoise_steps(
                 "min_p": float(torch.exp(cc.min())),
                 "mean_p": float(torch.exp(cc.mean())),
                 "commit_p": float(torch.exp(cc[commit].mean())),
+                # Per-position telemetry (absolute sequence indices) for the
+                # token-confidence heatmap: every still-masked position with its
+                # calibrated probability, and the subset committed this step.
+                "pos": masked_pos.tolist(),
+                "pos_p": [round(v, 4) for v in torch.exp(cc).tolist()],
+                "commit_pos": masked_pos[commit].tolist(),
             }
             if dep is not None:
                 stat["mean_dep"] = float(dep.mean())

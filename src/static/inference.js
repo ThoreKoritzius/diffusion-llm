@@ -24,6 +24,8 @@ let lastCompletedTerminalSql = "";
 let lastCompletedSignature = "";
 let pendingRunSignature = "";
 let lastChartData = null;
+let tlHeatActiveStep = null;
+let heatRepaintQueued = false;
 
 let queueEtaBaseline = null;
 let queueEtaSeconds = null;
@@ -49,6 +51,11 @@ const timelineSvg = document.getElementById('timelineSvg');
 const timelinePlayhead = document.getElementById('timelinePlayhead');
 const timelineDot = document.getElementById('timelineDot');
 const timelineReadout = document.getElementById('timelineReadout');
+const lgStop = document.getElementById('lgStop');
+const timelinePlot = document.getElementById('timelinePlot');
+const timelineHeat = document.getElementById('timelineHeat');
+const tlTabCurves = document.getElementById('tlTabCurves');
+const tlTabHeat = document.getElementById('tlTabHeat');
 const snapSlider = document.getElementById('snapSlider');
 const queueChip = document.getElementById('queueChip');
 const exportGifBtn = document.getElementById('exportGifBtn');
@@ -132,6 +139,15 @@ function replayCachedRunIfAvailable(signature) {
   );
   terminalSqlText = lastCompletedTerminalSql || '';
   donePayload = { state: 'done', status: 'replayed previous run' };
+  // Attach the completed run's chart data so the replay animates with the
+  // final grid geometry (labels, exact step count) instead of rediscovering it.
+  if (lastChartData && Array.isArray(lastChartData.stats)) {
+    donePayload.step_stats = lastChartData.stats;
+    donePayload.steps_used = lastChartData.used;
+    donePayload.max_steps_cap = lastChartData.cap;
+    donePayload.confidence_threshold = lastChartData.threshold;
+    if (lastChartData.windowTokens) donePayload.window_tokens = lastChartData.windowTokens;
+  }
   setStatus('Replaying previous generation...');
   replayAllOnceAndFinalize();
   return true;
@@ -1020,7 +1036,8 @@ function chartDataFromPayload(p) {
   if (!stats || !stats.length) return null;
   const used = numOrNull(p.steps_used) || stats.length;
   const cap = Math.max(numOrNull(p.max_steps_cap) || used, used);
-  return { stats, threshold: numOrNull(p.confidence_threshold), cap, used };
+  const windowTokens = Array.isArray(p.window_tokens) && p.window_tokens.length ? p.window_tokens : null;
+  return { stats, threshold: numOrNull(p.confidence_threshold), cap, used, windowTokens };
 }
 
 // --- Interactive confidence timeline ----------------------------------------
@@ -1058,11 +1075,19 @@ function setTimelineIdle() {
     snapSlider.value = '0';
     snapSlider.max = '0';
   }
+  tlHeatActiveStep = null;
+  if (lgStop) lgStop.textContent = 'early-stop';
   if (timelineSvg) timelineSvg.replaceChildren();
+  if (timelineHeat) {
+    const ctx = timelineHeat.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, timelineHeat.width, timelineHeat.height);
+  }
   if (timeline) {
     timeline.dataset.state = 'idle';
     timeline.dataset.hasConf = '0';
     timeline.dataset.hasStop = '0';
+    timeline.dataset.hasGrid = '0';
+    applyTlView();
   }
   if (timelineReadout) timelineReadout.textContent = '—';
 }
@@ -1097,7 +1122,11 @@ function buildTimelineData(chartData) {
     : Math.max(Number.isFinite(lastTotal) ? lastTotal : used, used);
   const threshold = chartData && chartData.threshold != null ? clamp01(chartData.threshold) : null;
   const hasConf = points.some((p) => p.minP != null);
-  return { points, stepToIdx, used, cap, threshold, hasConf };
+  return {
+    points, stepToIdx, used, cap, threshold, hasConf,
+    stats: chartData ? chartData.stats : null,
+    windowTokens: chartData ? chartData.windowTokens : null,
+  };
 }
 
 // Map a step on the scrubber to the snapshot that should be shown. Steps beyond
@@ -1204,11 +1233,282 @@ function renderTimeline(data) {
   }));
 }
 
+// --- Token heatmap view -------------------------------------------------------
+// Alternative rendering of the same timeline: x = denoising step, y = token
+// position in the SQL window. Masked cells are shaded by that token's calibrated
+// confidence (pale -> accent blue); the step where a token locks in flashes
+// strong green and stays pale green afterwards. Same scrubber, same playhead.
+const HEAT_COMMIT = [26, 127, 75];     // #1a7f4b — cell where the token commits
+const HEAT_COMMIT_PALE = [205, 234, 219]; // committed & settled
+const HEAT_CONF_LO = [231, 237, 248];  // masked, no confidence yet
+const HEAT_CONF_HI = [31, 111, 235];   // masked, confidence ~1
+
+function heatRgb(rgb, alpha) {
+  return alpha == null ? `rgb(${rgb[0]},${rgb[1]},${rgb[2]})` : `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
+}
+
+function heatConfColor(p) {
+  const t = clamp01(p);
+  const mix = (i) => Math.round(HEAT_CONF_LO[i] + (HEAT_CONF_HI[i] - HEAT_CONF_LO[i]) * t);
+  return `rgb(${mix(0)},${mix(1)},${mix(2)})`;
+}
+
+// Normalise step_stats into per-step columns for painting/hover. Returns null
+// when the run carries no per-position telemetry (old cached runs). `rowCap`
+// (the query's committed content length) trims the PAD tail while a run is
+// still live and the final token labels are unknown.
+function buildHeatGrid(stats, windowTokens, rowCap) {
+  if (!Array.isArray(stats)) return null;
+  const cols = stats
+    .filter((s) => s && Number.isFinite(Number(s.step)) && Array.isArray(s.pos) && s.pos.length)
+    .map((s) => ({
+      step: Number(s.step),
+      maskP: new Map(s.pos.map((p, i) => [p, clamp01(Array.isArray(s.pos_p) ? s.pos_p[i] : 0)])),
+      commit: new Set(Array.isArray(s.commit_pos) ? s.commit_pos : []),
+    }))
+    .sort((a, b) => a.step - b.step);
+  if (!cols.length) return null;
+  let rowCount = Array.isArray(windowTokens) && windowTokens.length ? windowTokens.length : 0;
+  if (!rowCount && Number.isFinite(Number(rowCap)) && rowCap > 0) rowCount = Number(rowCap);
+  if (!rowCount) {
+    cols.forEach((c) => c.maskP.forEach((_, p) => { rowCount = Math.max(rowCount, p + 1); }));
+  }
+  if (!rowCount) return null;
+  // Last step that committed each row (targeted-remask can re-open a row, so a
+  // later masked sighting clears an earlier commit).
+  const committedAt = new Array(rowCount).fill(null);
+  cols.forEach((c) => {
+    c.maskP.forEach((_, p) => { if (p < rowCount) committedAt[p] = null; });
+    c.commit.forEach((p) => { if (p < rowCount) committedAt[p] = c.step; });
+  });
+  return { cols, colByStep: new Map(cols.map((c) => [c.step, c])), rowCount, committedAt };
+}
+
+function heatGridFor(data) {
+  if (!data) return null;
+  if (data._heatGrid === undefined) {
+    data._heatGrid = buildHeatGrid(data.stats, data.windowTokens, data.liveTokens);
+  }
+  return data._heatGrid;
+}
+
+const HEAT_MONO = '"DejaVu Sans Mono", ui-monospace, Menlo, Monaco, Consolas, monospace';
+
+// The trace is transposed relative to a naive heatmap: x = token position in
+// reading order (mirrors the SQL in the live box above), y = denoising step,
+// top to bottom. Token count grows horizontally where there is room, so the
+// plot height is fixed no matter how long the query gets; the y-axis is
+// bounded by the steps actually used. The scrubbed step renders as a
+// highlighted row. (tlHeatActiveStep / heatRepaintQueued live with the other
+// module state at the top of the file.)
+function queueHeatRepaint() {
+  if (heatRepaintQueued) return;
+  heatRepaintQueued = true;
+  requestAnimationFrame(() => {
+    heatRepaintQueued = false;
+    if (timeline && timeline.dataset.view === 'heat' && timelineData) {
+      renderHeatTimeline(timelineData);
+    }
+  });
+}
+
+function renderHeatTimeline(data) {
+  if (!timelineHeat || !data) return;
+  const w = timelineHeat.clientWidth;
+  const h = timelineHeat.clientHeight;
+  if (!w || !h) return; // hidden — rendered again when the view becomes visible
+  const dpr = window.devicePixelRatio || 1;
+  timelineHeat.width = Math.round(w * dpr);
+  timelineHeat.height = Math.round(h * dpr);
+  const ctx = timelineHeat.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  const grid = heatGridFor(data);
+  if (!grid) return;
+
+  const { rowCount: tokens, colByStep } = grid;
+  // `revealed` — rows the animation has reached (0 on the step-0 frame);
+  // `layoutSteps` — rows the grid is laid out for. When the final step count
+  // is already known (post-run replay), lay out for it from the first frame
+  // so the grid fills in without reflowing.
+  const revealed = Math.max(0, Number(data.used) || 0);
+  const layoutSteps = Math.max(1, revealed, Number(data.totalUsed) || 0);
+  const used = Math.max(1, revealed); // interaction clamp (scrub/hover)
+  const cap = Math.max(layoutSteps, Number(data.cap) || 0);
+  const labels = Array.isArray(data.windowTokens)
+    ? data.windowTokens.map((t) => String(t || '').trim())
+    : null;
+
+  const gutterW = 22; // step numbers
+  const rightPad = 4;
+  const gridX0 = gutterW;
+  const gridW = Math.max(10, w - gutterW - rightPad);
+  const colW = gridW / tokens;
+  const showAxis = !!labels && colW >= 8 && h >= 110;
+  const axisH = showAxis ? 38 : 6;
+  const gridY0 = 4;
+  const gridH = Math.max(10, h - gridY0 - axisH);
+  const rowH = gridH / layoutSteps;
+  const active = tlHeatActiveStep == null
+    ? revealed
+    : Math.max(0, Math.min(tlHeatActiveStep, revealed));
+  data._heatLayout = { gutterW, gridX0, gridW, gridY0, gridH, axisH, rowH, colW, used, cap, layoutSteps, tokens };
+
+  // cells
+  const gapX = colW >= 3 ? 1 : 0;
+  const gapY = rowH >= 4 ? 1 : 0;
+  const committed = new Array(tokens).fill(false);
+  let lastCol = null;
+  for (let s = 1; s <= revealed; s += 1) {
+    const col = colByStep.get(s);
+    const eff = col || lastCol; // live snapshots may skip dedup'd steps
+    if (col) col.maskP.forEach((_, p) => { if (p < tokens) committed[p] = false; });
+    const y = gridY0 + (s - 1) * rowH;
+    const ch = Math.max(0.5, rowH - gapY);
+    for (let p = 0; p < tokens; p += 1) {
+      let fill;
+      if (col && col.commit.has(p)) fill = heatRgb(HEAT_COMMIT);
+      else if (committed[p]) fill = heatRgb(HEAT_COMMIT_PALE);
+      else if (eff && eff.maskP.has(p)) fill = heatConfColor(eff.maskP.get(p));
+      else fill = heatConfColor(0);
+      ctx.fillStyle = fill;
+      ctx.fillRect(gridX0 + p * colW, y, Math.max(0.5, colW - gapX), ch);
+    }
+    if (col) {
+      col.commit.forEach((p) => { if (p < tokens) committed[p] = true; });
+      lastCol = col;
+    }
+  }
+
+  // rows the replay has not reached yet: faint placeholders holding the layout
+  if (layoutSteps > revealed) {
+    ctx.fillStyle = '#f2f6fb';
+    for (let s = revealed + 1; s <= layoutSteps; s += 1) {
+      ctx.fillRect(gridX0, gridY0 + (s - 1) * rowH, gridW, Math.max(0.5, rowH - gapY));
+    }
+  }
+
+  // step numbers in the gutter (sparse when rows get thin)
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const every = Math.max(1, Math.ceil(10 / rowH));
+  for (let s = 1; s <= layoutSteps; s += 1) {
+    if (s !== 1 && s !== layoutSteps && s !== active && (s - 1) % every !== 0) continue;
+    const isActive = s === active;
+    ctx.fillStyle = isActive ? '#1f6feb' : (s > revealed ? '#c4cdda' : '#8a94a6');
+    ctx.font = `${isActive ? 700 : 600} 9px ${GIF_SANS}`;
+    ctx.fillText(String(s), gridX0 - 6, gridY0 + (s - 0.5) * rowH);
+  }
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  // scrubbed-step highlight
+  if (active >= 1) {
+    ctx.strokeStyle = '#1f6feb';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(gridX0 - 0.75, gridY0 + (active - 1) * rowH - 0.75, gridW + 1.5, rowH + 0.5);
+  }
+
+  // Token labels under their columns, matplotlib-style rotated ticks. The
+  // rotated baselines are colW*cos45 apart, so when columns get narrow only
+  // every k-th column is labelled — labels never overlap each other. (The
+  // early-stop note lives in the legend row, not on the canvas, for the same
+  // reason: nothing drawn here can collide with it.)
+  if (showAxis) {
+    const yTop = gridY0 + gridH + 7;
+    const maxLabelPx = (axisH - 8) / 0.707;
+    const fontPx = colW >= 14 ? 9.5 : 8.5;
+    const labelEvery = colW * 0.707 >= fontPx ? 1 : Math.ceil(fontPx / (colW * 0.707));
+    ctx.fillStyle = '#5a6677';
+    ctx.font = `600 ${fontPx}px ${HEAT_MONO}`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let p = 0; p < tokens; p += 1) {
+      if (p % labelEvery !== 0) continue;
+      let t = labels[p];
+      if (!t) continue;
+      while (t.length > 1 && ctx.measureText(t).width > maxLabelPx) t = t.slice(0, -1);
+      ctx.save();
+      ctx.translate(gridX0 + (p + 0.5) * colW, yTop);
+      ctx.rotate(-Math.PI / 4);
+      ctx.fillText(t, 0, 0);
+      ctx.restore();
+    }
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+}
+
+// In heat view the scrubber covers only the steps that actually ran — the
+// saved budget is one frozen final state, nothing to scrub.
+function syncScrubberToView() {
+  if (!snapSlider || !timelineData || timelineData.live) return;
+  const heat = timeline && timeline.dataset.view === 'heat';
+  snapSlider.max = String(heat ? timelineData.used : timelineData.cap);
+  if (heat && parseInt(snapSlider.value, 10) > timelineData.used) {
+    snapSlider.value = String(timelineData.used);
+  }
+  if (!snapSlider.disabled) {
+    updateTimelinePlayhead(parseInt(snapSlider.value, 10) || 0);
+  }
+}
+
+// View preference persists across runs; the heatmap only activates when the
+// current run actually carries per-position telemetry.
+let tlViewPref = 'curves';
+try { if (localStorage.getItem('tlView') === 'heat') tlViewPref = 'heat'; } catch (e) { /* no-op */ }
+
+function applyTlView() {
+  if (!timeline) return;
+  const hasGrid = timeline.dataset.hasGrid === '1';
+  const eff = tlViewPref === 'heat' && hasGrid ? 'heat' : 'curves';
+  timeline.dataset.view = eff;
+  [tlTabCurves, tlTabHeat].forEach((btn) => {
+    if (!btn) return;
+    const active = btn.dataset.tlview === tlViewPref;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  if (eff === 'heat' && timelineData) {
+    requestAnimationFrame(() => {
+      renderHeatTimeline(timelineData);
+      syncScrubberToView();
+    });
+  } else if (timelineData) {
+    syncScrubberToView();
+  }
+}
+
+function setTlView(v) {
+  tlViewPref = v === 'heat' ? 'heat' : 'curves';
+  try { localStorage.setItem('tlView', tlViewPref); } catch (e) { /* no-op */ }
+  applyTlView();
+}
+
+function syncTimelineGridState(data) {
+  if (!timeline) return;
+  const hasGrid = !!(data && data.stats && data.stats.some((s) => s && Array.isArray(s.pos) && s.pos.length));
+  timeline.dataset.hasGrid = hasGrid ? '1' : '0';
+  applyTlView();
+}
+
+function renderTimelineView(data) {
+  renderTimeline(data); // SVG curves stay warm so switching back is instant
+  if (timeline && timeline.dataset.view === 'heat') renderHeatTimeline(data);
+}
+
 function updateTimelinePlayhead(stepVal) {
   if (!timelineData || !timelinePlayhead) return;
   const { cap, used } = timelineData;
   const step = Math.max(0, Math.min(stepVal, cap));
-  timelinePlayhead.style.left = `${cap <= 0 ? 50 : (step / cap) * 100}%`;
+  if (timeline && timeline.dataset.view === 'heat') {
+    // heat view: the scrubbed step is a highlighted row, redrawn on the canvas
+    tlHeatActiveStep = step;
+    queueHeatRepaint();
+  } else {
+    timelinePlayhead.style.left = `${cap <= 0 ? 50 : (step / cap) * 100}%`;
+  }
 
   const { point } = snapshotForStep(step);
   if (timelineDot) {
@@ -1240,16 +1540,22 @@ function showTimeline(payload) {
   timelineData = buildTimelineData(chartData);
   if (!timelineData) { setTimelineIdle(); return; }
 
-  renderTimeline(timelineData);
-  if (snapSlider) {
-    snapSlider.max = String(timelineData.cap);
-    snapSlider.value = String(timelineData.used);
-    snapSlider.disabled = false;
-  }
   if (timeline) {
     timeline.dataset.state = 'ready';
     timeline.dataset.hasConf = timelineData.hasConf ? '1' : '0';
     timeline.dataset.hasStop = timelineData.used < timelineData.cap ? '1' : '0';
+  }
+  if (lgStop) {
+    lgStop.textContent = timelineData.used < timelineData.cap
+      ? `early-stop @ ${timelineData.used} · ${timelineData.cap - timelineData.used} saved`
+      : 'early-stop';
+  }
+  syncTimelineGridState(timelineData);
+  renderTimelineView(timelineData);
+  if (snapSlider) {
+    snapSlider.max = String(timelineData.cap);
+    snapSlider.value = String(timelineData.used);
+    snapSlider.disabled = false;
   }
   updateTimelinePlayhead(timelineData.used);
 }
@@ -1258,53 +1564,99 @@ function showTimeline(payload) {
 // snapshot carries its step's confidence, so we upsert a point and re-render the
 // partial curve with the playhead riding the newest step. The saved-region and
 // scrubbing are deferred to showTimeline() once the run is done.
-function appendLiveTimeline(snap) {
-  if (!snap || !timeline) return;
-  const step = Number(snap.step);
-  if (!Number.isFinite(step)) return;
+function ensureLiveTL(snap) {
   const cap = Number(snap.total_steps);
-  const minP = snap.min_p != null ? clamp01(snap.min_p) : null;
-  const meanP = snap.mean_p != null ? clamp01(snap.mean_p) : null;
   const thr = snap.conf_threshold != null ? clamp01(snap.conf_threshold) : null;
-
   if (!liveTL) {
     liveTL = {
       stepToIdx: new Map(),
       points: [],
-      cap: Number.isFinite(cap) ? cap : step,
+      gridStats: new Map(),
+      contentEnd: 0,
+      cap: Number.isFinite(cap) ? cap : 0,
       threshold: thr,
       hasConf: false,
     };
   }
   if (Number.isFinite(cap)) liveTL.cap = Math.max(liveTL.cap, cap);
   if (thr != null) liveTL.threshold = thr;
+  return liveTL;
+}
 
+function upsertLivePoint(step, minP, meanP) {
   if (liveTL.stepToIdx.has(step)) {
     const p = liveTL.points[liveTL.stepToIdx.get(step)];
     if (minP != null) p.minP = minP;
     if (meanP != null) p.meanP = meanP;
   } else {
     liveTL.points.push({ idx: liveTL.points.length, step, minP, meanP });
+    liveTL.stepToIdx.set(step, liveTL.points.length - 1);
   }
   if (minP != null) liveTL.hasConf = true;
+}
+
+// Merge a snapshot's step telemetry into the live model. Snapshots carry every
+// stat produced since the previous emitted frame (`stats_delta`), so frames the
+// server deduplicated still deliver their commits/confidences here. Called for
+// every received snapshot — including ones the animator skips while catching up.
+function mergeLiveTimelineStats(snap) {
+  if (!snap) return;
+  ensureLiveTL(snap);
+  const deltas = Array.isArray(snap.stats_delta)
+    ? snap.stats_delta
+    // pre-stats_delta cache entries: single stat attached to the snapshot
+    : (Array.isArray(snap.pos) && snap.pos.length
+      ? [{ step: snap.step, pos: snap.pos, pos_p: snap.pos_p, commit_pos: snap.commit_pos, min_p: snap.min_p, mean_p: snap.mean_p }]
+      : []);
+  deltas.forEach((st) => {
+    const sn = Number(st && st.step);
+    if (!Number.isFinite(sn)) return;
+    if (Array.isArray(st.pos) && st.pos.length) liveTL.gridStats.set(sn, st);
+    upsertLivePoint(sn, st.min_p != null ? clamp01(st.min_p) : null, st.mean_p != null ? clamp01(st.mean_p) : null);
+  });
+  const ce = Number(snap.content_end);
+  if (Number.isFinite(ce)) liveTL.contentEnd = Math.max(liveTL.contentEnd, ce);
+}
+
+function appendLiveTimeline(snap) {
+  if (!snap || !timeline) return;
+  const step = Number(snap.step);
+  if (!Number.isFinite(step)) return;
+  ensureLiveTL(snap);
+  mergeLiveTimelineStats(snap);
+  upsertLivePoint(
+    step,
+    snap.min_p != null ? clamp01(snap.min_p) : null,
+    snap.mean_p != null ? clamp01(snap.mean_p) : null,
+  );
 
   liveTL.points.sort((a, b) => a.step - b.step);
   liveTL.points.forEach((p, i) => { p.idx = i; liveTL.stepToIdx.set(p.step, i); });
 
-  // Drive the shared timeline with a live view (used = newest step, no saved region).
+  // During the post-run replay the final payload is already in hand, so the
+  // trace animates with its exact final geometry: correct token count, labels,
+  // and complete per-step stats — only the reveal advances with the replay.
+  const finalChart = donePayload ? chartDataFromPayload(donePayload) : null;
+
   timelineData = {
     points: liveTL.points,
     stepToIdx: liveTL.stepToIdx,
     used: step,
-    cap: liveTL.cap,
+    cap: Math.max(liveTL.cap, step),
     threshold: liveTL.threshold,
     hasConf: liveTL.hasConf,
+    stats: finalChart && finalChart.stats ? finalChart.stats
+      : (liveTL.gridStats.size ? Array.from(liveTL.gridStats.values()) : null),
+    windowTokens: finalChart ? finalChart.windowTokens : null,
+    totalUsed: finalChart ? finalChart.used : null,
+    liveTokens: !finalChart && liveTL.contentEnd ? liveTL.contentEnd : null,
     live: true,
   };
   timeline.dataset.state = 'ready';
   timeline.dataset.hasConf = liveTL.hasConf ? '1' : '0';
   timeline.dataset.hasStop = '0';
-  renderTimeline(timelineData);
+  syncTimelineGridState(timelineData);
+  renderTimelineView(timelineData);
   updateTimelinePlayhead(step);
 }
 
@@ -1564,6 +1916,9 @@ async function pollRunState(id) {
 
     for (const snap of list) {
       upsertSnapshot(snap);
+      // The animator only plays a subset while catching up, but every
+      // snapshot's step telemetry must land in the live timeline model.
+      mergeLiveTimelineStats(snap);
     }
 
     if (list.length === 1) {
@@ -1754,6 +2109,122 @@ snapSlider.addEventListener('input', () => {
   }
 
   updateTimelinePlayhead(step);
+});
+
+// --- Heatmap view wiring ------------------------------------------------------
+[tlTabCurves, tlTabHeat].forEach((btn) => {
+  if (btn) btn.addEventListener('click', () => setTlView(btn.dataset.tlview));
+});
+applyTlView();
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// Hovering a heatmap cell explains it in the readout: which token, its
+// confidence at that step, and when it locked in. Scrubbing restores the
+// step/gate/mean readout via updateTimelinePlayhead.
+function describeHeatCell(ev) {
+  if (!timeline || timeline.dataset.view !== 'heat') return;
+  if (!timelineData || !timelineReadout) return;
+  const grid = heatGridFor(timelineData);
+  if (!grid) return;
+  const lay = timelineData._heatLayout;
+  if (!lay) return;
+  const rect = timelineHeat.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const x = ev.clientX - rect.left;
+  const y = ev.clientY - rect.top;
+  const pos = Math.max(0, Math.min(lay.tokens - 1, Math.floor((x - lay.gridX0) / lay.colW)));
+  const step = Math.max(1, Math.min(lay.used, Math.floor((y - lay.gridY0) / lay.rowH) + 1));
+
+  const rawTok = timelineData.windowTokens ? String(timelineData.windowTokens[pos] || '').trim() : '';
+  const tokLabel = rawTok ? `»${rawTok}«` : `pos ${pos}`;
+  const lockStep = grid.committedAt[pos];
+  let stateLabel;
+  if (lockStep != null && step >= lockStep) {
+    stateLabel = step === lockStep ? `locks @ step ${lockStep}` : `locked @ step ${lockStep}`;
+  } else {
+    // nearest recorded step at or before the hovered row
+    let p = null;
+    for (let s = step; s >= 1; s -= 1) {
+      const col = grid.colByStep.get(s);
+      if (col) { p = col.maskP.has(pos) ? col.maskP.get(pos) : null; break; }
+    }
+    stateLabel = p != null ? `masked · ${Math.round(p * 100)}%` : 'masked';
+  }
+  timelineReadout.innerHTML =
+    `<span class="ro-step">Step ${step}</span> · ${escapeHtml(tokLabel)} · ${stateLabel}`;
+}
+
+// In heat view steps run top-to-bottom, so the native horizontal seek of the
+// range input would fight the visual: clicking row 3 must select step 3, not
+// whatever the click's x-position maps to. Take over pointer seeking and map
+// the y-coordinate instead; keyboard arrows keep working natively.
+let heatScrubPointer = null;
+
+function heatPointerScrub(ev) {
+  if (!timelineData || !timelineData._heatLayout) return;
+  const lay = timelineData._heatLayout;
+  const rect = timelineHeat.getBoundingClientRect();
+  if (!rect.height) return;
+  const y = ev.clientY - rect.top;
+  const step = Math.max(1, Math.min(lay.used, Math.floor((y - lay.gridY0) / lay.rowH) + 1));
+  if (String(step) !== snapSlider.value) {
+    snapSlider.value = String(step);
+    snapSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+if (snapSlider && timelineHeat) {
+  snapSlider.addEventListener('pointerdown', (ev) => {
+    if (!timeline || timeline.dataset.view !== 'heat' || snapSlider.disabled) return;
+    ev.preventDefault();
+    heatScrubPointer = ev.pointerId;
+    try { snapSlider.setPointerCapture(ev.pointerId); } catch (e) { /* no-op */ }
+    snapSlider.focus();
+    heatPointerScrub(ev);
+  });
+  snapSlider.addEventListener('pointermove', (ev) => {
+    if (heatScrubPointer !== ev.pointerId) return;
+    heatPointerScrub(ev);
+  });
+  const endHeatScrub = (ev) => {
+    if (heatScrubPointer !== ev.pointerId) return;
+    heatScrubPointer = null;
+    try { snapSlider.releasePointerCapture(ev.pointerId); } catch (e) { /* no-op */ }
+  };
+  snapSlider.addEventListener('pointerup', endHeatScrub);
+  snapSlider.addEventListener('pointercancel', endHeatScrub);
+}
+
+if (timelinePlot) {
+  timelinePlot.addEventListener('mousemove', describeHeatCell);
+  timelinePlot.addEventListener('mouseleave', () => {
+    if (!timelineData || !snapSlider) return;
+    if (timeline && timeline.dataset.view !== 'heat') return;
+    updateTimelinePlayhead(parseInt(snapSlider.value, 10) || timelineData.used);
+  });
+  // The plot height animates when switching views; repaint once it settles
+  // (row height — and with it the label gutter — depends on the final height).
+  timelinePlot.addEventListener('transitionend', (ev) => {
+    if (ev.propertyName !== 'height') return;
+    if (timeline && timeline.dataset.view === 'heat' && timelineData) {
+      renderHeatTimeline(timelineData);
+      syncScrubberToView();
+    }
+  });
+}
+
+window.addEventListener('resize', () => {
+  if (timeline && timeline.dataset.view === 'heat' && timelineData) {
+    requestAnimationFrame(() => {
+      renderHeatTimeline(timelineData);
+      syncScrubberToView();
+    });
+  }
 });
 
 function guessType(value) {
