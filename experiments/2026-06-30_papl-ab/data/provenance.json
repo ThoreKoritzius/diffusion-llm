@@ -1,0 +1,73 @@
+{
+  "artifact": "diffusion-sql-modernbert-papl",
+  "description": "PAPL (Planner-Aware Path Learning) finetune of the LLaDA-style SQL masked-diffusion checkpoint. Goal: align training with the confidence-based decoding planner used at inference, to cut denoising steps (faster inference) at equal accuracy.",
+  "created_utc": "2026-06-30",
+  "created_by": "PAPL A/B experiment (tau=0.3 arm)",
+
+  "base_checkpoint": {
+    "name": "diffusion-sql-modernbert",
+    "backbone": "answerdotai/ModernBERT-base",
+    "training": "10-epoch LLaDA-style absorbing-state masked diffusion, 1/t-weighted CE, continuous t~U(1e-3,1] Bernoulli masking, on-the-fly augmentation",
+    "dataset": "gretelai/synthetic_text_to_sql",
+    "layout": "[CLS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL> sql+pads </SQL> [SEP]; SQL window = 128 tokens, max_len = 512"
+  },
+
+  "finetune_recipe": {
+    "method": "PAPL confidence-reweighted ELBO",
+    "loss": "ce_papl = ce + tau * stopgrad(exp(-ce)) * ce, then standard (1/t)*sum/SQL_WINDOW; tau=0 recovers plain LLaDA loss",
+    "loss_intuition": "exp(-ce) ~1 when the model is already confident (low CE); those tokens are the ones the confidence planner commits first at inference, so PAPL trains them harder -> early commits more reliable -> trace more robust + model reaches high confidence sooner (early-stop fires earlier).",
+    "tau": 0.3,
+    "learning_rate": 2e-05,
+    "epochs": 2,
+    "train_size": 100000,
+    "per_device_batch_size": 96,
+    "max_len": 512,
+    "sql_window": 128,
+    "t_eps": 1e-3,
+    "augmentation": true,
+    "script": "src/finetune_papl.py",
+    "note": "These are the A/B experiment settings, not a tuned prod recipe. The step gain was modest at tau=0.3/2-epoch (see ab_result); a tau sweep or 1-epoch schedule may improve it before final prod selection."
+  },
+
+  "ab_result": {
+    "summary": "Same accuracy as the tau=0 control, ~5% fewer denoising steps (clean), consistent on augmented. PAPL did what it is designed to do; magnitude modest.",
+    "eval": "generation exact-match + avg steps-to-converge, confidence_stop=0.9, n=256",
+    "baseline_both_arms": { "exact_match": 0.31640625, "avg_steps": 11.71875 },
+    "tau_0_control":      { "exact_match": 0.3125, "avg_steps": 11.40234375, "exact_match_aug": 0.29296875, "avg_steps_aug": 11.82421875 },
+    "tau_0.3_papl":       { "exact_match": 0.3125, "avg_steps": 10.8515625, "exact_match_aug": 0.296875, "avg_steps_aug": 11.140625 },
+    "papl_vs_control": {
+      "delta_exact_match": 0.0,
+      "delta_avg_steps": -0.55,
+      "delta_avg_steps_aug": -0.68,
+      "interpretation": "Identical exact-match, ~0.55 fewer steps clean / ~0.68 fewer aug than control -> the predicted certainty-forcing speedup at zero accuracy cost."
+    }
+  },
+
+  "provenance": {
+    "gpu": "1x NVIDIA H100 PCIe 80GB (Lambda, x86_64)",
+    "torch": "2.7.0+cu (CUDA)",
+    "transformers": "4.49.0 (pinned <5; USE_TF=0 to skip TF/Keras-3 probe on the box)",
+    "attention": "SDPA (flash-attn not installed; fine, run is short)",
+    "remote_run_dir": "ubuntu@209.20.158.171:~/diffusion-llm/papl_ab_20260630_185110/tau_0.3",
+    "driver": "run_papl_ab.sh (TAUS=\"0 0.3\")",
+    "wandb": "project sql-diffusion, run name modernbert-papl-ft (online)"
+  },
+
+  "usage": {
+    "inference": "Architecture-identical to base: AutoModelForMaskedLM.from_pretrained('diffusion-sql-modernbert-papl') then the existing src/denoising.py denoise_steps loop. No inference-code changes; only the weights differ.",
+    "stacks_with": "DOS dependency-ordering (denoise_steps strategy='dependency') is orthogonal and can layer on top."
+  },
+
+  "related_files": {
+    "papl_results.json": "raw metrics for this arm (this dir)",
+    "bench_results.json": "DONE (in repo root). Frontier benchmark across base/tau_0/tau_0.3. Findings: (1) tau_0.3 uses ~5-7% fewer steps than base at every confidence_stop threshold (frontier shifts left), reproduced at n=512 + on augmented. (2) Zero accuracy gain - all three ~0.293 exact-match. (3) At FIXED step budgets base >= both finetuned arms, so PAPL's speedup is purely an early-stop/certainty-forcing artifact, NOT better quality-per-compute; the 2-epoch finetune slightly eroded fixed-budget quality vs base. Conclusion: PAPL is a modest latency win that ONLY materializes with adaptive confidence_stop, at no accuracy gain.",
+    "finetune_script": "src/finetune_papl.py",
+    "benchmark_script": "src/bench_papl.py"
+  },
+
+  "caveats": [
+    "tau=0.3 / lr 2e-5 / 2 epochs are A/B settings, not necessarily the optimal prod recipe.",
+    "Gain is ~5% fewer steps at equal accuracy; verify it holds / amplifies via the frontier benchmark before committing to prod.",
+    "Eval is generation exact-match on gretel synthetic SQL (string match after normalize); execution-accuracy on a real DB would be a stronger prod signal."
+  ]
+}

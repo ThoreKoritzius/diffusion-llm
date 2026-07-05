@@ -157,7 +157,8 @@ ETA_FALLBACK_SECONDS = max(5.0, env_float("ETA_FALLBACK_SECONDS", min(30, max(10
 FIRST_FRAME_FALLBACK_SECONDS = max(1.0, env_float("FIRST_FRAME_FALLBACK_SECONDS", 8.0))
 RESULT_CACHE_ENABLED = env_bool("RESULT_CACHE_ENABLED", True)
 RESULT_CACHE_TTL_SECONDS = max(60, env_int("RESULT_CACHE_TTL_SECONDS", 86400))
-RESULT_CACHE_VERSION = os.environ.get("RESULT_CACHE_VERSION", "v1")
+# v3: snapshots carry stats_delta + content_end for live heat-trace animation
+RESULT_CACHE_VERSION = os.environ.get("RESULT_CACHE_VERSION", "v3")
 CHARS_PER_TOKEN_EST = 3.0
 STRUCTURE_TOKEN_RESERVE = 32
 PROMPT_BUDGET_RATIO = 0.35
@@ -397,13 +398,14 @@ def from_redis_run(raw: Dict[str, str]) -> Dict:
             out["payload"] = {}
     else:
         out["payload"] = {}
-    if out.get("step_stats"):
-        try:
-            out["step_stats"] = json.loads(out["step_stats"])
-        except json.JSONDecodeError:
-            out["step_stats"] = []
-    else:
-        out["step_stats"] = []
+    for k in ("step_stats", "window_tokens"):
+        if out.get(k):
+            try:
+                out[k] = json.loads(out[k])
+            except json.JSONDecodeError:
+                out[k] = []
+        else:
+            out[k] = []
     for k in ("steps_used", "max_steps_cap"):
         try:
             out[k] = int(out[k]) if out.get(k) not in (None, "") else None
@@ -538,6 +540,7 @@ def create_cached_run(payload: Dict, cached: Dict) -> str:
         "payload": payload,
         "cache_hit": True,
         "step_stats": cached.get("step_stats", []),
+        "window_tokens": cached.get("window_tokens", []),
         "steps_used": cached.get("steps_used", ""),
         "max_steps_cap": cached.get("max_steps_cap", ""),
         "confidence_threshold": cached.get("confidence_threshold", ""),
@@ -1016,6 +1019,7 @@ def process_run(run_id: str) -> None:
             sql_only=final_sql,
             display=res.get("display"),
             step_stats=res.get("step_stats", []),
+            window_tokens=res.get("window_tokens", []),
             steps_used=int(res.get("steps_used", 0) or 0),
             max_steps_cap=int(payload.get("steps", 0) or 0),
             confidence_threshold=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else ""),
@@ -1046,6 +1050,7 @@ def process_run(run_id: str) -> None:
             _snap_count, cached_snaps = redis_get_snapshot_delta(run_id, 0)
             write_result_cache(payload, final_sql, res.get("display", ""), cached_snaps, extra={
                 "step_stats": res.get("step_stats", []),
+                "window_tokens": res.get("window_tokens", []),
                 "steps_used": int(res.get("steps_used", 0) or 0),
                 "max_steps_cap": int(payload.get("steps", 0) or 0),
                 "confidence_threshold": (CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else None),
@@ -1667,6 +1672,15 @@ def run_denoising_generation_callback(
     # the confidence chart in sync with the live token reveal (not just at the end).
     conf_threshold_val = float(confidence_stop) if confidence_stop else None
 
+    def window_content_end() -> int:
+        """Index one past the last committed real token (the query's current length)."""
+        window = current_ids[0, sql_open_idx + 1 : sql_close_idx].tolist()
+        end = 0
+        for i, tid in enumerate(window):
+            if tid != mask_id and tid != pad_id:
+                end = i + 1
+        return end
+
     def with_conf(snap: Dict, stat: Optional[Dict] = None) -> Dict:
         if stat is not None:
             if stat.get("min_p") is not None:
@@ -1677,9 +1691,23 @@ def run_denoising_generation_callback(
             snap["conf_threshold"] = conf_threshold_val
         return snap
 
+    # Every emitted snapshot carries the step stats produced since the previous
+    # emission (`stats_delta`) plus the query's current content length, so the
+    # frontend heat trace stays complete even across deduplicated frames.
+    step_stats: List[Dict] = []
+    stats_sent = 0
+
+    def with_step_telemetry(snap: Dict) -> Dict:
+        nonlocal stats_sent
+        snap["stats_delta"] = step_stats[stats_sent:]
+        stats_sent = len(step_stats)
+        snap["content_end"] = window_content_end()
+        return snap
+
     if animate:
         last_render = render_sql_window()
-        snapshots.append(with_conf({"text": snapshot_text(), "sql_only": last_render, "step": 0, "total_steps": total_steps}))
+        snapshots.append(with_step_telemetry(with_conf(
+            {"text": snapshot_text(), "sql_only": last_render, "step": 0, "total_steps": total_steps})))
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -1691,7 +1719,16 @@ def run_denoising_generation_callback(
     forbid_ids = [vocab[t] for t in REQUIRED_TAGS if t in vocab]
 
     steps_used = 0
-    step_stats: List[Dict] = []
+    sql_start = sql_open_idx + 1
+
+    def collect_step_stat(stat: Dict) -> None:
+        # Rebase per-position telemetry from absolute sequence indices to
+        # window-relative ones, so the frontend heatmap rows are 0..sql_len-1.
+        for k in ("pos", "commit_pos"):
+            if isinstance(stat.get(k), list):
+                stat[k] = [p - sql_start for p in stat[k]]
+        step_stats.append(stat)
+
     for step_idx, total_steps, current_ids in denoise_steps(
         model,
         current_ids,
@@ -1703,7 +1740,7 @@ def run_denoising_generation_callback(
         forbid_token_ids=forbid_ids,
         should_stop=should_stop,
         confidence_stop=confidence_stop,
-        on_step_stats=step_stats.append,
+        on_step_stats=collect_step_stat,
     ):
         steps_used = step_idx + 1  # adaptive early-stop may finish before total_steps
         if status_cb:
@@ -1714,10 +1751,10 @@ def run_denoising_generation_callback(
             # the PAD-only commit steps that previously rendered as no-ops).
             if r != last_render:
                 last_render = r
-                snapshots.append(with_conf(
+                snapshots.append(with_step_telemetry(with_conf(
                     {"text": snapshot_text(), "sql_only": r, "step": step_idx+1, "total_steps": total_steps},
                     step_stats[-1] if step_stats else None,
-                ))
+                )))
                 if on_snapshot:
                     on_snapshot(snapshots[-1])
 
@@ -1728,10 +1765,10 @@ def run_denoising_generation_callback(
     final_sql_only = strip_final_masks(decode_sql_from_token_ids(tokenizer, final_token_slice, mask_id=mask_id, pad_id=pad_id))
     if animate:
         s_clean_final = replace_sql_section(snapshot_text(), final_sql_only)
-        snapshots.append(with_conf(
+        snapshots.append(with_step_telemetry(with_conf(
             {"text": s_clean_final, "sql_only": final_sql_only, "step": steps_used, "total_steps": total_steps},
             step_stats[-1] if step_stats else None,
-        ))
+        )))
         if on_snapshot:
             on_snapshot(snapshots[-1])
 
@@ -1746,6 +1783,18 @@ def run_denoising_generation_callback(
 
     sql_only = strip_final_masks(sql_only)
 
+    # Final decoded token per window position (heatmap row labels). PAD / mask
+    # slots decode to "" and the trailing empty region is trimmed, so the row
+    # count matches the real content length of the query.
+    window_tokens: List[str] = []
+    for tid in token_slice:
+        if tid == pad_id or tid == mask_id:
+            window_tokens.append("")
+        else:
+            window_tokens.append(tokenizer.decode([tid], skip_special_tokens=False))
+    while window_tokens and not window_tokens[-1].strip():
+        window_tokens.pop()
+
     if not animate:
         snapshots = [{"text": display, "sql_only": sql_only, "step": steps_used, "total_steps": total_steps}]
 
@@ -1755,6 +1804,7 @@ def run_denoising_generation_callback(
         "display": display,
         "steps_used": steps_used,
         "step_stats": step_stats,
+        "window_tokens": window_tokens,
     }
 
 # -------------------------
@@ -2062,6 +2112,7 @@ def stream(run_id):
                 "state": run_now.get("state"),
                 "status": run_now.get("status"),
                 "step_stats": run_now.get("step_stats"),
+                "window_tokens": run_now.get("window_tokens"),
                 "steps_used": run_now.get("steps_used"),
                 "max_steps_cap": run_now.get("max_steps_cap"),
                 "confidence_threshold": run_now.get("confidence_threshold"),
@@ -2114,6 +2165,7 @@ def run_state(run_id):
         "snapshot_count": snap_count,
         "snapshots": delta,
         "step_stats": run.get("step_stats"),
+        "window_tokens": run.get("window_tokens"),
         "steps_used": run.get("steps_used"),
         "max_steps_cap": run.get("max_steps_cap"),
         "confidence_threshold": run.get("confidence_threshold"),

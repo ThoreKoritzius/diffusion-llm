@@ -1,0 +1,67 @@
+{
+  "judge_model": "gpt-5.4-mini",
+  "models": {
+    "base": {
+      "model": "base",
+      "n": 200,
+      "judge_errors": 0,
+      "exact_match_acc": 0.295,
+      "semantic_acc": 0.47,
+      "semantic_minus_exact": 0.175,
+      "judge_validation_agree_on_exact_correct": 0.9830508474576272,
+      "failure_histogram": {
+        "syntax_error": 28,
+        "wrong_or_missing_column": 22,
+        "missing_or_wrong_filter": 20,
+        "wrong_aggregate_or_groupby": 18,
+        "other": 5,
+        "wrong_table": 4,
+        "truncated_or_empty": 4,
+        "hallucinated_identifier": 3,
+        "wrong_order_or_limit": 2
+      }
+    },
+    "tau_0.3": {
+      "model": "tau_0.3",
+      "n": 200,
+      "judge_errors": 0,
+      "exact_match_acc": 0.29,
+      "semantic_acc": 0.465,
+      "semantic_minus_exact": 0.17500000000000004,
+      "judge_validation_agree_on_exact_correct": 1.0,
+      "failure_histogram": {
+        "syntax_error": 27,
+        "missing_or_wrong_filter": 23,
+        "wrong_or_missing_column": 23,
+        "wrong_aggregate_or_groupby": 17,
+        "hallucinated_identifier": 4,
+        "wrong_table": 3,
+        "truncated_or_empty": 3,
+        "other": 3,
+        "wrong_join": 2,
+        "wrong_order_or_limit": 2
+      }
+    },
+    "tau_0": {
+      "model": "tau_0",
+      "n": 200,
+      "judge_errors": 0,
+      "exact_match_acc": 0.295,
+      "semantic_acc": 0.475,
+      "semantic_minus_exact": 0.18,
+      "judge_validation_agree_on_exact_correct": 0.9830508474576272,
+      "failure_histogram": {
+        "syntax_error": 30,
+        "missing_or_wrong_filter": 20,
+        "wrong_or_missing_column": 20,
+        "wrong_aggregate_or_groupby": 18,
+        "truncated_or_empty": 5,
+        "wrong_table": 4,
+        "other": 3,
+        "wrong_join": 3,
+        "wrong_order_or_limit": 1,
+        "hallucinated_identifier": 1
+      }
+    }
+  }
+}
