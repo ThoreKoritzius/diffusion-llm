@@ -305,3 +305,7 @@ WORKER_MEM_LIMIT=4g
 Adaptive early-stopping already cuts average steps automatically; for further
 speedups lower the step cap in requests (for example `steps=8`) at a small
 quality cost.
+
+## License
+
+[MIT](LICENSE)
