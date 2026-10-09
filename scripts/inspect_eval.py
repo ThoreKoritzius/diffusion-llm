@@ -5,18 +5,18 @@ Loads a checkpoint and generates SQL for (a) held-out gretelai test examples and
 whether a low exact-match is a strict-string-metric artifact or genuinely weak
 generation. Runs on GPU if available, else CPU.
 
-Usage: python3 inspect_eval.py [CKPT_DIR] [N_DATASET] [GEN_STEPS]
+Usage: python3 scripts/inspect_eval.py [CKPT_DIR] [N_DATASET] [GEN_STEPS]
 """
 import os, re, sys
 os.environ.setdefault("USE_TF", "0"); os.environ.setdefault("USE_FLAX", "0")
 
 import torch
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from datasets import load_dataset
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 from denoising import denoise_steps
 
-CKPT = sys.argv[1] if len(sys.argv) > 1 else "diffusion-sql-modernbert"
+CKPT = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/diffusion-sql-modernbert"
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 12
 GEN_STEPS = int(sys.argv[3]) if len(sys.argv) > 3 else 24
 MAX_LEN, SQL_WINDOW = 512, 128

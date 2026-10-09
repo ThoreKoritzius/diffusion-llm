@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--public", action="store_true", help="Bind on 0.0.0.0 and disable browser auto-open")
     parser.add_argument("--prompt", type=str, default="", help="Prefill prompt (optional)")
     parser.add_argument("--context", type=str, default="", help="Prefill context (optional)")
-    parser.add_argument("--model-dir", type=str, default=os.environ.get("MODEL_DIR_IN_CONTAINER", "diffusion-sql"), help="Default model dir (optional)")
+    parser.add_argument("--model-dir", type=str, default=os.environ.get("MODEL_DIR_IN_CONTAINER", "checkpoints/diffusion-sql-modernbert"), help="Default model dir (optional)")
     parser.add_argument("--host", type=str, default=os.environ.get("INFERENCE_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=env_int("INFERENCE_PORT", 7860))
     parser.add_argument("--seed", type=int, default=env_int("INFERENCE_SEED", 42), help="Deterministic seed (default 42).")

@@ -35,8 +35,8 @@ Usage
     TAU=0.3 FT_EPOCHS=2 FT_LR=2e-5 python src/finetune_papl.py
 
 Env knobs (all optional):
-    CKPT_DIR        checkpoint to finetune (default diffusion-sql-modernbert)
-    OUTPUT_DIR      where to save (default diffusion-sql-modernbert-papl)
+    CKPT_DIR        checkpoint to finetune (default checkpoints/diffusion-sql-modernbert)
+    OUTPUT_DIR      where to save (default checkpoints/diffusion-sql-modernbert-papl)
     TAU             PAPL strength (default 0.3; 0 == plain LLaDA loss)
     FT_EPOCHS       finetune epochs (default 2)
     FT_LR           learning rate (default 2e-5)
@@ -72,8 +72,8 @@ from augment import augment_example
 from denoising import denoise_steps
 
 # 1. Config
-CKPT_DIR = os.environ.get("CKPT_DIR", "diffusion-sql-modernbert")
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "diffusion-sql-modernbert-papl")
+CKPT_DIR = os.environ.get("CKPT_DIR", "checkpoints/diffusion-sql-modernbert")
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "checkpoints/diffusion-sql-modernbert-papl")
 TAU = float(os.environ.get("TAU", "0.3"))         # PAPL strength; 0 == plain LLaDA
 NUM_EPOCHS = float(os.environ.get("FT_EPOCHS", "2"))
 LEARNING_RATE = float(os.environ.get("FT_LR", "2e-5"))  # small: continuing a converged model

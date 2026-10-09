@@ -64,7 +64,7 @@ EVAL_STEPS = int(os.environ.get("EVAL_STEPS", "500"))
 GEN_EVAL_SIZE = 32    # examples for generation-based exact-match eval
 GEN_EVAL_STEPS = 24   # denoising steps during eval
 
-OUTPUT_DIR = "diffusion-sql-modernbert"
+OUTPUT_DIR = "checkpoints/diffusion-sql-modernbert"
 
 # Hopper perf: TF32 matmuls + avoid the fast-tokenizer fork warning/deadlock
 # once dataloader workers are forking the module-level tokenizer.

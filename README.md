@@ -1,8 +1,43 @@
 # Diffusion-LLM
 
-A masked diffusion language model (LLaDA-style) for text-to-SQL generation, built on ModernBERT. This repo includes training and a web playground for iterative denoising inference.
+A masked diffusion language model (LLaDA-style) for text-to-SQL generation, built on ModernBERT. Instead of writing SQL left to right, the model starts from a fully masked SQL window and fills it in over a few parallel denoising steps. This repo includes training, evaluation experiments, and a web playground.
+
+**Live demo: [diffusion.lethonium.com](https://diffusion.lethonium.com/)**
 
 ![Diffusion Example](examples/diffusion_example.gif)
+
+## Results at a glance
+
+ModernBERT-base (150M), 10 epochs on [`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql), confidence decoding with adaptive early stop at 0.9. Evaluated on the first 256 filtered test rows:
+
+| Metric | Value |
+|---|---|
+| Semantic accuracy (LLM judge) | **0.50** |
+| Exact string match | 0.32 |
+| Avg. denoising steps (forward passes) | 11.8, vs ~30 tokens for autoregressive decoding |
+| Largest failure mode | invalid SQL (~14%) |
+
+Findings so far:
+
+- **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
+- **More steps can hurt.** Accuracy peaks around 11 steps (threshold 0.9) and falls ~10 points when decoding runs to a 0.99 threshold (~19 steps).
+- **PAPL fine-tuning only saves steps.** It gives ~7% fewer steps at equal accuracy ([PAPL A/B](experiments/2026-06-30_papl-ab/README.md)).
+- **Dependency-ordered decoding (DOS) does not beat confidence ordering** on this model (see [below](#commit-ordering-confidence-vs-dependency-dos)).
+
+## Repository layout
+
+```
+src/
+  train.py              LLaDA-style training (ModernBERT, 1/t-weighted ELBO)
+  denoising.py          confidence / dependency decoding shared by eval and UIs
+  inference.py          Flask playground + API (what the live demo runs)
+  gradio_inference.py   minimal local Gradio UI
+  finetune_papl.py, bench_papl.py, dump_predictions.py, compare_strategies.py, sql_repair.py, augment.py
+scripts/                GPU training / A/B launch scripts, qualitative eval
+experiments/            dated experiment write-ups with data, predictions and plots
+docker/, Dockerfile, docker-compose.yml   CPU deployment (web + worker + redis)
+checkpoints/            model weights (gitignored)
+```
 
 ## How It Works
 
@@ -40,7 +75,7 @@ Confidence-based iterative unmasking (MaskGIT/LLaDA decoding):
 
 Each diffusion step is one forward pass over the whole sequence but commits many
 tokens at once, whereas autoregressive decoding needs roughly one forward pass
-per output token. Measured with `inspect_eval.py` on 58 held-out examples
+per output token. Measured with `scripts/inspect_eval.py` on 58 held-out examples
 (8 sanity + 50 gretelai test), greedy decoding, 128-token SQL window:
 
 **Fixed steps** (no early stop) — accuracy plateaus around 12–16 steps; beyond
@@ -149,13 +184,15 @@ pip install -r requirements.txt
 python src/train.py
 ```
 
-Checkpoints and the final model are written to `diffusion-sql-modernbert/`.
+Checkpoints and the final model are written to `checkpoints/diffusion-sql-modernbert/`.
+For a full GPU run see `scripts/run_gh200.sh`.
 Track `eval/generation_exact_match` in wandb for actual generation quality.
 
 ### 3. Run inference UI locally
 
 ```bash
-python src/inference.py --model-dir /absolute/path/to/model
+python src/inference.py --model-dir checkpoints/diffusion-sql-modernbert      # Flask playground (as hosted)
+python src/gradio_inference.py --model-dir checkpoints/diffusion-sql-modernbert  # minimal Gradio UI
 ```
 
 Both old (roberta) and new (ModernBERT) checkpoints load via the Auto classes.
@@ -268,3 +305,7 @@ WORKER_MEM_LIMIT=4g
 Adaptive early-stopping already cuts average steps automatically; for further
 speedups lower the step cap in requests (for example `steps=8`) at a small
 quality cost.
+
+## License
+
+[MIT](LICENSE)

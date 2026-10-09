@@ -15,11 +15,14 @@ env/
 .DS_Store
 Thumbs.db
 
-# Model weights, checkpoints & training output dirs
-model/
-diffusion-sql/
-diffusion-sql-modernbert/
+# Model weights, checkpoints & training output dirs (all go in checkpoints/)
+checkpoints/
 checkpoint-*/
+papl_ab_*/
+# legacy top-level checkpoint locations
+model/
+diffusion-sql*/
+sql-diffusion-*/
 *.safetensors
 *.pt
 *.pth

@@ -34,7 +34,7 @@ MAX_LEN = 512
 SQL_WINDOW = 128
 
 AB_DIR = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "."
-BASE_DIR = os.environ.get("BASE_DIR", "diffusion-sql-modernbert")
+BASE_DIR = os.environ.get("BASE_DIR", "checkpoints/diffusion-sql-modernbert")
 
 
 def _resolve(name, *candidates):
@@ -48,8 +48,8 @@ def _resolve(name, *candidates):
 
 ALL_MODELS = {
     "base":    _resolve("base", BASE_DIR),
-    "tau_0":   _resolve("tau0", os.path.join(AB_DIR, "tau_0"), "diffusion-sql-modernbert-papl-tau0"),
-    "tau_0.3": _resolve("tau03", os.path.join(AB_DIR, "tau_0.3"), "diffusion-sql-modernbert-papl"),
+    "tau_0":   _resolve("tau0", os.path.join(AB_DIR, "tau_0"), "checkpoints/diffusion-sql-modernbert-papl-tau0"),
+    "tau_0.3": _resolve("tau03", os.path.join(AB_DIR, "tau_0.3"), "checkpoints/diffusion-sql-modernbert-papl"),
 }
 want = os.environ.get("DUMP_MODELS", "base,tau_0,tau_0.3").split(",")
 MODELS = {k: v for k, v in ALL_MODELS.items() if k in want}

@@ -12,6 +12,9 @@ generated_gifs/
 onnx_cache/
 wandb/
 examples/
-deprecated/
+experiments/
+scripts/
+checkpoints/
+.env
 *.log
 .DS_Store

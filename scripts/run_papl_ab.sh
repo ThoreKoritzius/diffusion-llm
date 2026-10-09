@@ -9,12 +9,12 @@
 #
 # Usage:
 #   export WANDB_API_KEY=...                 # optional; offline without it
-#   bash run_papl_ab.sh                      # deps check, smoke test, then A/B
-#   SKIP_SMOKE=1 bash run_papl_ab.sh         # skip the smoke test
-#   TAUS="0 0.3 0.5" bash run_papl_ab.sh     # sweep more than two taus
+#   bash scripts/run_papl_ab.sh                      # deps check, smoke test, then A/B
+#   SKIP_SMOKE=1 bash scripts/run_papl_ab.sh         # skip the smoke test
+#   TAUS="0 0.3 0.5" bash scripts/run_papl_ab.sh     # sweep more than two taus
 #
 # Knobs (env, with full-run defaults):
-#   CKPT_DIR      base checkpoint to finetune     (diffusion-sql-modernbert)
+#   CKPT_DIR      base checkpoint to finetune     (checkpoints/diffusion-sql-modernbert)
 #   TAUS          space-separated taus to run     ("0 0.3")
 #   BATCH_SIZE    per-device batch (80GB headroom)(96; try 128 if mem allows)
 #   FT_EPOCHS     epochs per run                  (2)
@@ -24,7 +24,7 @@
 #   CONF_STOP     eval early-stop threshold       (0.9)
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 export HF_HOME="${HF_HOME:-$REPO_DIR/.hf_cache}"
@@ -33,7 +33,7 @@ export USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-0}"  # inductor breaks ModernBERT
 export DATALOADER_WORKERS="${DATALOADER_WORKERS:-12}"
 mkdir -p "$HF_HOME"
 
-CKPT_DIR="${CKPT_DIR:-diffusion-sql-modernbert}"
+CKPT_DIR="${CKPT_DIR:-checkpoints/diffusion-sql-modernbert}"
 TAUS="${TAUS:-0 0.3}"
 # 80GB has less room than the GH200's 96GB, so default to 96 (the base trained
 # at 128 on 96GB). Bump to 128 if `nvidia-smi` shows headroom; drop to 64 on OOM.
