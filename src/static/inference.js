@@ -1345,7 +1345,11 @@ function renderHeatTimeline(data) {
   const gridX0 = gutterW;
   const gridW = Math.max(10, w - gutterW - rightPad);
   const colW = gridW / tokens;
-  const showAxis = !!labels && colW >= 8 && h >= 110;
+  // Reserve the label row whenever columns are wide enough to label. No live
+  // height gate here: during the tab-switch height transition a gate on `h`
+  // would flip partway and pop the labels in, reflowing every cell. The heat
+  // plot's settled height is always tall enough for the axis.
+  const showAxis = !!labels && colW >= 8;
   const axisH = showAxis ? 38 : 6;
   const gridY0 = 4;
   const gridH = Math.max(10, h - gridY0 - axisH);
@@ -1459,11 +1463,31 @@ function syncScrubberToView() {
 let tlViewPref = 'curves';
 try { if (localStorage.getItem('tlView') === 'heat') tlViewPref = 'heat'; } catch (e) { /* no-op */ }
 
+// Redraw the heatmap on every frame across the plot's height transition
+// (CSS `transition: height 180ms`). The canvas is a raster: a single draw
+// would be sized for the pre-transition height and then stretched as the plot
+// grows, which looks blurry and jerky. Repainting each frame keeps it crisp
+// and lets the grid grow smoothly. Only kicked when *entering* heat view.
+let heatResizeRaf = 0;
+function animateHeatIn() {
+  cancelAnimationFrame(heatResizeRaf);
+  const start = performance.now();
+  const step = (t) => {
+    if (!timeline || timeline.dataset.view !== 'heat' || !timelineData) return;
+    renderHeatTimeline(timelineData);
+    if (t - start < 240) heatResizeRaf = requestAnimationFrame(step); // ~180ms transition + margin
+  };
+  heatResizeRaf = requestAnimationFrame(step);
+}
+
+let tlViewCurrent = null;
 function applyTlView() {
   if (!timeline) return;
   const hasGrid = timeline.dataset.hasGrid === '1';
   const eff = tlViewPref === 'heat' && hasGrid ? 'heat' : 'curves';
+  const enteringHeat = eff === 'heat' && tlViewCurrent !== 'heat';
   timeline.dataset.view = eff;
+  tlViewCurrent = eff;
   [tlTabCurves, tlTabHeat].forEach((btn) => {
     if (!btn) return;
     const active = btn.dataset.tlview === tlViewPref;
@@ -1471,10 +1495,9 @@ function applyTlView() {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   if (eff === 'heat' && timelineData) {
-    requestAnimationFrame(() => {
-      renderHeatTimeline(timelineData);
-      syncScrubberToView();
-    });
+    if (enteringHeat) animateHeatIn();               // smooth across the height grow
+    else requestAnimationFrame(() => renderHeatTimeline(timelineData));
+    requestAnimationFrame(syncScrubberToView);
   } else if (timelineData) {
     syncScrubberToView();
   }

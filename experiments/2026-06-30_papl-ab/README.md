@@ -158,6 +158,47 @@ Repair is still worth keeping for production robustness (7.9 pts fewer hard
 failures downstream, +0.7 steps), but **accuracy gains require training-level
 levers** (RL with verifiable reward, better data) — not sampling tricks.
 
+## Follow-up 2: pass@k ceiling (2026-07-02) — closed by distribution collapse
+
+Before investing in best-of-N + reranking, we measured whether sampling can
+produce diverse candidates at all. It cannot. Evidence (probe:
+`passk_probe.py`, n=64 examples; data: `data/passk_probe.json`):
+
+**1. The predictive distribution is collapsed.** At the fully-masked *first*
+denoising step — the model's highest-entropy state — across 8,192 positions:
+median top-1 probability **0.991**, 51% of positions > 0.99, only 30% below
+0.9 (and later steps only sharpen as context fills in):
+
+![collapse](plots/collapse.png)
+
+**2. Sampled rollouts are string-identical to greedy — at every temperature.**
+k=3 seeded rollouts per example (top-k 20, Gumbel-max; RNG seeding verified):
+
+| token temp | all k identical | all == greedy | distinct/k |
+|---|---|---|---|
+| 0.7 | 100% | 100% | 1.00 |
+| 1.5 | 100% | 100% | 1.00 |
+| 3.0 | 100% | 100% | 1.00 |
+
+Identity ⇒ **oracle pass@k = pass@1 ≈ 0.50 for any grading metric** — no
+judge needed to close the question. Two mechanisms compound: (a) peakedness —
+most positions have nothing to flip; (b) the confidence-ordered committer acts
+as a *rejection filter* on the rest — a sampled deviation has low confidence,
+is deferred rather than committed, and is re-predicted with more context, where
+argmax wins. Escaping (b) means force-committing deviations in random order —
+the regime the fixed-NFE curve already showed degrades sharply. Likely root
+cause of (a): 10 epochs on templated synthetic SQL → near-deterministic
+memorization.
+
+**Complete training-free verdict:** PAPL, DOS ordering, targeted remasking,
+verify-repair, and sampling have all been measured on this checkpoint; none
+moves semantic accuracy. The ceiling is the model, not the decoding. Next
+levers are training-level (RL with verifiable reward — which would also
+restore distributional entropy and re-open best-of-N — better data, or a
+larger backbone) plus the AR baseline for the strategic comparison.
+(Token-level sampling support added to `denoise_steps`: `token_temperature`,
+`top_p`>1 as top-k; `SAMPLES`/`TOKEN_TEMP` envs in `dump_predictions.py`.)
+
 ## Reproduce
 
 ```bash
@@ -191,8 +232,10 @@ predictions_nfe/               fixed-budget preds + verdicts   (…_<model>_k<K>
 predictions_frontier/          conf_stop-sweep preds + verdicts (…_<model>_c<cs>.jsonl)
 plots/
   summary.png  quality.png  failures.png  frontier.png  nfe.png
-make_report_plots.py           builds the five figures from the judge summaries
-judge_sql.py / judge_nfe.py / judge_frontier.py   GPT-5.4-mini semantic judges
+  repair_effect.png  collapse.png
+make_report_plots.py           builds the report figures from the judge summaries
+judge_sql.py / judge_nfe.py / judge_frontier.py / judge_inference.py   GPT-5.4-mini semantic judges
+passk_probe.py                 distribution-collapse evidence (peakedness + rollout identity)
 ```
 
 Scripts also in `src/`: `finetune_papl.py` (training), `bench_papl.py` (exact-match

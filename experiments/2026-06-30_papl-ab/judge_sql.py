@@ -35,7 +35,9 @@ if AB_DIR is None:
     cands = sorted(glob.glob(os.path.join(HERE, "..", "..", "papl_ab_*")))
     AB_DIR = cands[-1] if cands else "."
 PRED_DIR = os.path.join(AB_DIR, "predictions")
-DATA_DIR = os.path.join(HERE, "data")
+# Overridable so other experiments can reuse this judge without clobbering
+# the PAPL summary (protocol identity beats copying the prompt around).
+DATA_DIR = os.environ.get("JUDGE_DATA_DIR", os.path.join(HERE, "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "gpt-5.4-mini")
