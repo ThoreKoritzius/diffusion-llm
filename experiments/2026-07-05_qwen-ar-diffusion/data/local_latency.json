@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "device": "mps",
+    "dtype": "torch.float16",
+    "attn": "eager",
+    "n": 32,
+    "warmup": 3,
+    "torch": "2.9.0"
+  },
+  "results": {
+    "AR-Qwen": {
+      "mean_ms": 897.9911315327627,
+      "p50_ms": 721.6687090112828,
+      "p90_ms": 1757.4932499992428,
+      "avg_steps_or_tokens": 29.625,
+      "n": 32,
+      "sample": "SELECT MAX(quantity) FROM sales;"
+    },
+    "Diffusion-Qwen v2": {
+      "mean_ms": 1466.8421940004919,
+      "p50_ms": 1466.40849999676,
+      "p90_ms": 1473.107624988188,
+      "avg_steps_or_tokens": 12.0,
+      "n": 32,
+      "sample": ""
+    },
+    "Diffusion-Qwen v1 ckpt-3126": {
+      "mean_ms": 2926.653880124377,
+      "p50_ms": 2924.885083004483,
+      "p90_ms": 2941.7741670040414,
+      "avg_steps_or_tokens": 24.0,
+      "n": 32,
+      "sample": "SELECT MAX(quantity) FROM sales;"
+    },
+    "Diffusion-ModernBERT": {
+      "mean_ms": 1209.029514341637,
+      "p50_ms": 907.533790988964,
+      "p90_ms": 2188.872665996314,
+      "avg_steps_or_tokens": 9.15625,
+      "n": 32,
+      "sample": "SELECT MAX(quantity) FROM sales;"
+    }
+  }
+}

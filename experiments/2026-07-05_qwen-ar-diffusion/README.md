@@ -22,17 +22,32 @@ The original target was `Qwen/Qwen3.5-0.8B-Base`, but the available Transformers
 
 ## Current Results
 
-| Model | Params | Exact | SQLite exec | SQL valid | Semantic judge | Avg steps/tokens | Latency |
-|---|---|---:|---:|---:|---:|---:|---:|
-| **AR-Qwen** (Qwen2.5-Coder-0.5B, causal SFT) | 500M | 0.355 | 0.562 | 0.754 | **0.645** | 29.86 tokens | 588.7 ms local / ~400 ms H100 |
-| **Diffusion-Qwen v2** (same base, masked-diffusion adaptation, fixed recipe, ckpt-4689) | 500M | 0.121 | 0.180 | 0.219 | **0.191** | 11.8 denoise steps | ~150–195 ms H100 |
-| **Diffusion-Qwen v1** (confounded pad=EOS recipe, ckpt-3126) | 500M | 0.102 | 0.164 | 0.254 | 0.148 | 24.00 denoise steps | 3568.0 ms local |
-| **Diffusion-ModernBERT** (ModernBERT-base, native MLM, 10 ep, [PAPL A/B](../2026-06-30_papl-ab/README.md)) | 150M | 0.320 | — | 0.859¹ | **0.500** | 11.79 denoise steps | — |
+| Model | Params | Exact | SQLite exec | SQL valid | Semantic judge | Avg steps/tokens | H100 latency | Mac latency² |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| **AR-Qwen** (Qwen2.5-Coder-0.5B, causal SFT) | 500M | 0.355 | 0.562 | 0.754 | **0.645** | 29.86 tokens | ~400 ms | **898 ms** (p50 722) |
+| **Diffusion-Qwen v2** (same base, masked-diffusion adaptation, fixed recipe, ckpt-4689) | 500M | 0.121 | 0.180 | 0.219 | **0.191** | 11.8 denoise steps | **~150–195 ms** | 1467 ms³ |
+| **Diffusion-Qwen v1** (confounded pad=EOS recipe, ckpt-3126) | 500M | 0.102 | 0.164 | 0.254 | 0.148 | 24.00 denoise steps | ~360 ms | 2927 ms |
+| **Diffusion-ModernBERT** (ModernBERT-base, native MLM, 10 ep, [PAPL A/B](../2026-06-30_papl-ab/README.md)) | 150M | 0.320 | — | 0.859¹ | **0.500** | 11.79 denoise steps | — | 1209 ms (9.2 steps) |
 
 ¹ sqlglot parse-valid, not SQLite exec-valid (different harness; the PAPL runs
 did not record SQLite execution). All rows share the same dataset, the same
 first-256 filtered gretelai test slice, and the same judge protocol
 (`judge_sql.py`, gpt-5.4-mini; judge validation 1.0 on every graded run).
+² Uniform local benchmark (`bench_local_latency.py`): same Mac, MPS, fp16,
+eager attention, batch 1, same 32 eval examples, 3 warmups, each model at its
+documented decode operating point (`data/local_latency.json`). Supersedes the
+earlier mixed-config local numbers quoted in the details sections below.
+³ Under fp16 the v2 model's calibrated confidences shift, so `confidence_stop`
+never fired and it ran the full 12-step cap (vs 11.8 avg under bf16) — its Mac
+number is a ≤2% overestimate. Quality columns are from the bf16/fp32 evals.
+
+**The latency ranking is hardware-dependent — and inverts.** On the H100,
+Diffusion-Qwen v2 is ~2.4× faster than AR-Qwen (11.8 wide parallel passes beat
+~30 sequential ones when the hardware crushes a 512-token forward). On the Mac
+(overhead/bandwidth-bound, batch 1), **AR is fastest**: ~30 tiny KV-cached
+steps cost less than 12 full-sequence passes. Diffusion's speed edge exists on
+server-class parallel hardware and disappears on local/edge inference — the
+deploy target decides which column matters.
 
 AR exact-match undercounts correctness materially: semantic accuracy is +0.289 over exact match on 256 judged samples. The Qwen diffusion arms get almost no such lift (v2 final: +0.070) — their wrong outputs are mostly *invalid SQL* (65.6% syntax_error for v2), not cosmetically-different-but-correct SQL.
 
@@ -241,6 +256,7 @@ parse-valid rather than SQLite exec-valid.
 | `predictions/graded_diffusion_qwen25_final.jsonl` | LLM-judge graded v2 final predictions |
 | `data/diffusion_final_judge_summary.json` | v2 final checkpoint judge summary + failure histogram |
 | `logs/train_ar_*.log`, `logs/train_diffusion_*.log`, `logs/v2_launch.log` | full H100 training logs (AR, diffusion v1, diffusion v2) |
+| `bench_local_latency.py` / `data/local_latency.json` | uniform Mac (MPS fp16 eager) latency benchmark of all four models |
 
 Checkpoints (repo root): `sql-diffusion-qwen2.5-coder-0.5b/` (v2 final; must be
 loaded with `make_bidirectional` + the shifted-logits adapter — see
@@ -253,7 +269,7 @@ The AR baseline is strong enough that diffusion needs to be judged primarily on 
 
 This should not be written as a clean proof that diffusion cannot work for text-to-SQL. The original pulled checkpoint has a known recipe confound around pad/EOS handling and fixed-window loss, and even the fixed v2 recipe is a *direct* SQL adaptation with no general-corpus diffusion phase — the step the Dream/DiffuLLaMA recipes consider essential. The defensible conclusions, with the completed v2 run and the judge on its final checkpoint:
 
-1. **AR wins decisively at this scale**: semantic 0.645 vs 0.191 (3.4×), exec 0.562 vs 0.180 (3.1×). Diffusion's real ~2.4× H100 latency edge (~150–195 ms vs ~400 ms, 11.8 vs ~30 forward passes) cannot compensate a gap that size for short (~30-token) outputs.
+1. **AR wins decisively at this scale**: semantic 0.645 vs 0.191 (3.4×), exec 0.562 vs 0.180 (3.1×). Diffusion's ~2.4× latency edge exists **only on server-class hardware** (H100: ~150–195 ms vs ~400 ms) and *inverts on local inference* (Mac MPS: AR 898 ms vs diffusion 1467 ms — see the uniform benchmark above). A hardware-conditional speed edge cannot compensate a 3× quality gap for short (~30-token) outputs on any target.
 2. **The v2 fixes worked as engineering** (stable training, +0.043 semantic over v1 at half the denoise steps) **but did not move the recipe's ceiling**: 65.6% of failures are still invalid SQL, i.e. the adapted causal model never acquired BERT-grade fluency under masking.
 3. **The cross-architecture comparison localizes the problem**: a 150M natively-bidirectional MLM at the same decode budget reaches 0.500 semantic — so the bottleneck is bidirectional/infilling pretraining (and convergence), not parameter count. Closing it would cost a general-corpus adaptation phase (~$1.5k+) with parity-at-best as the realistic outcome.
 4. **Next quality levers are AR-side**: data realism (Spider/BIRD, de-templated synthetic) and execution-reward RL, per the PAPL failure analysis. Diffusion remains interesting only for latency-critical or long-output regimes where parallel decode actually compounds.
