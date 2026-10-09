@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--window", type=int, default=128, help="diffusion: SQL window size")
     ap.add_argument("--window-head", action="store_true", help="diffusion/onnx: MLM head on window positions only")
     ap.add_argument("--int8", action="store_true", help="onnx: dynamic int8 weight quantization")
+    ap.add_argument("--prompt-isolation", action="store_true",
+                    help="diffusion/torch: prompt cannot attend to the SQL window (precondition for prompt caching)")
     ap.add_argument("--verify", type=int, default=0,
                     help="if greedy SQL does not compile against the schema, try up to K sampled candidates")
     ap.add_argument("--out", default="bench/results")
@@ -49,9 +51,10 @@ def main():
         from bench.backends import DiffusionBackend
 
         backend = DiffusionBackend(args.model, args.engine, args.device, args.threads, args.window, args.steps,
-                                   args.conf_stop or None, args.window_head, args.int8)
+                                   args.conf_stop or None, args.window_head, args.int8, args.prompt_isolation)
         default_name = (f"diffusion-{args.engine}-w{args.window}-s{args.steps}-c{args.conf_stop}"
-                        f"{'-whead' if args.window_head else ''}{'-int8' if args.int8 else ''}")
+                        f"{'-whead' if args.window_head else ''}{'-int8' if args.int8 else ''}"
+                        f"{'-isolated' if args.prompt_isolation else ''}")
     else:
         from bench.backends import ARBackend
 
@@ -76,7 +79,7 @@ def main():
         pred, n_forward = backend.generate(ex["prompt"], ex["context"])
         sync(device)
         dt = time.perf_counter() - t0
-        rows.append({"i": i, "pred": pred, "gold": ex["sql"], "n_forward": n_forward, "latency_ms": dt * 1000,
+        rows.append({"i": i, "prompt_tokens": getattr(backend, "prompt_tokens", None), "pred": pred, "gold": ex["sql"], "n_forward": n_forward, "latency_ms": dt * 1000,
                      **score(ex["context"], ex["sql"], pred)})
         if (i + 1) % 32 == 0:
             print(f"[{name}] {i + 1}/{len(data)}", flush=True)

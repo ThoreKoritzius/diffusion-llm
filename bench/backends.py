@@ -57,10 +57,31 @@ class _WindowHead(torch.nn.Module):
         return self.model.decoder(self.model.head(hidden[:, idx]))
 
 
+def isolate_prompt(model):
+    """Make prompt positions [0, model.model._prompt_len) unable to attend to anything after them, while the SQL
+    window still attends to everything. Prompt states then no longer change between denoising steps (the
+    precondition for caching them). Inference-only: the model was trained with full attention."""
+    enc = model.model
+    original = enc._update_attention_mask
+    enc._prompt_len = 0
+
+    def patched(attention_mask, output_attentions):
+        global_mask, sliding_mask = original(attention_mask, output_attentions)
+        lo = enc._prompt_len
+        if lo:
+            neg = torch.finfo(global_mask.dtype).min
+            global_mask, sliding_mask = global_mask.clone(), sliding_mask.clone()
+            global_mask[:, :, :lo, lo:] = neg
+            sliding_mask[:, :, :lo, lo:] = neg
+        return global_mask, sliding_mask
+
+    enc._update_attention_mask = patched
+
+
 class DiffusionBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
                  window: int = 128, steps: int = 16, conf_stop: Optional[float] = 0.9, window_head: bool = False,
-                 int8: bool = False):
+                 int8: bool = False, prompt_isolation: bool = False):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -69,6 +90,11 @@ class DiffusionBackend:
         self.window_head = window_head
         torch.set_num_threads(threads)
         model = AutoModelForMaskedLM.from_pretrained(model_dir, attn_implementation="sdpa", torch_dtype=torch.float32).eval()
+        self.prompt_isolation = prompt_isolation
+        if prompt_isolation:
+            if engine != "torch":
+                raise ValueError("prompt isolation is implemented for the torch engine only")
+            isolate_prompt(model)
         if engine == "torch":
             self.device = torch.device(device)
             self.model = model.to(self.device)
@@ -139,6 +165,9 @@ class DiffusionBackend:
     def generate(self, prompt: str, context: str, sample: bool = False) -> Tuple[str, int]:
         ids, lo = self.encode(prompt, context)
         self._lo = lo
+        self.prompt_tokens = lo
+        if self.prompt_isolation:
+            self.model.model._prompt_len = lo
         ids = torch.tensor([ids], device=self.device)
         attn = torch.ones_like(ids)
         self._calls = 0

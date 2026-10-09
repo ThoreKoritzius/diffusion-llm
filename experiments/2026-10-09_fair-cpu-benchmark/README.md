@@ -59,3 +59,19 @@ model, so it is *not* a parameter-matched baseline (see [roadmap](../../docs/roa
   diffusion), plus a parameter-matched AR model.
 - Diffusion speed on CPU needs prompt caching (train with a prompt that does not attend to the SQL window) so each
   step processes only the ~64 window tokens instead of ~200.
+
+## Follow-up: prompt isolation without retraining
+
+Prompt caching needs prompt tokens that do not attend to the SQL window (the window still attends to the prompt).
+Applying that mask to the *current* model at inference only, as a pessimistic bound
+(`--prompt-isolation`, `bench/results/prompt-isolation/`):
+
+| window | exec (full → isolated) | valid | exact |
+|---|---|---|---|
+| 64 | 0.577 → **0.448** | 0.680 → 0.633 | 0.301 → 0.199 |
+| 128 | 0.547 → **0.433** | 0.582 → 0.570 | 0.309 → 0.199 |
+
+At window 64, 35 queries flip from correct to wrong and 9 the other way. The model was trained with full attention,
+so every prompt layer now sees inputs it never saw in training; the drop measures that mismatch, not the cost of
+the architecture. Whether training *with* the mask closes the gap is the first GPU experiment. Potential payoff:
+prompts average 109 tokens, so a cached prompt cuts each step from ~175 to ~66 processed tokens.
