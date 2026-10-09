@@ -22,6 +22,7 @@ Findings so far:
 - **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
 - **More steps can hurt.** Accuracy peaks around 11 steps (threshold 0.9) and falls ~10 points when decoding runs to a 0.99 threshold (~19 steps).
 - **PAPL fine-tuning only saves steps.** It gives ~7% fewer steps at equal accuracy ([PAPL A/B](experiments/2026-06-30_papl-ab/README.md)).
+- **On CPU (the hosted setup), AR is still the better trade.** Cheap changes make diffusion 2.1× faster, but a 3.3× larger AR model matches its fp32 latency at higher accuracy ([fair CPU benchmark](experiments/2026-10-09_fair-cpu-benchmark/README.md), [roadmap](docs/roadmap.md)).
 - **Dependency-ordered decoding (DOS) does not beat confidence ordering** on this model (see [below](#commit-ordering-confidence-vs-dependency-dos)).
 
 ## Repository layout
@@ -33,6 +34,8 @@ src/
   inference.py          Flask playground + API (what the live demo runs)
   gradio_inference.py   minimal local Gradio UI
   finetune_papl.py, bench_papl.py, dump_predictions.py, compare_strategies.py, sql_repair.py, augment.py
+bench/                  fair diffusion-vs-AR benchmark (quality + latency, same engine)
+docs/roadmap.md         research roadmap
 scripts/                GPU training / A/B launch scripts, qualitative eval
 experiments/            dated experiment write-ups with data, predictions and plots
 docker/, Dockerfile, docker-compose.yml   CPU deployment (web + worker + redis)
