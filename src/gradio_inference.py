@@ -29,7 +29,7 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 from denoising import denoise_steps
 
 
-DEFAULT_MODEL_DIR = "diffusion-sql"
+DEFAULT_MODEL_DIR = "checkpoints/diffusion-sql-modernbert"
 DEFAULT_SEED = 42
 GIF_DIR = os.path.join(os.path.abspath("."), "generated_gifs")
 MODEL_CACHE = {"dir": None, "tokenizer": None, "model": None}

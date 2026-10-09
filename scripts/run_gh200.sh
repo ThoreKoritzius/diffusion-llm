@@ -3,16 +3,16 @@
 #
 # Usage:
 #   export WANDB_API_KEY=...        # optional; without it, logs go offline
-#   bash run_gh200.sh               # full run (smoke test first, then real train)
-#   SKIP_SMOKE=1 bash run_gh200.sh  # skip the smoke test
-#   USE_TORCH_COMPILE=0 bash run_gh200.sh   # disable torch.compile if it errors
+#   bash scripts/run_gh200.sh               # full run (smoke test first, then real train)
+#   SKIP_SMOKE=1 bash scripts/run_gh200.sh  # skip the smoke test
+#   USE_TORCH_COMPILE=0 bash scripts/run_gh200.sh   # disable torch.compile if it errors
 #
 # Assumes: an NVIDIA CUDA box with internet and python3. Best on the NGC
 # PyTorch container (nvcr.io/nvidia/pytorch:24.10-py3) which already ships an
 # aarch64 CUDA torch + flash-attn; on a bare box this installs them itself.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 # Keep HF + datasets cache on local disk so re-runs don't re-download.
@@ -72,5 +72,5 @@ fi
 echo "=== Starting full training ==="
 python3 src/train.py 2>&1 | tee "train_$(date +%Y%m%d_%H%M%S).log"
 
-echo "=== Done. Model in $REPO_DIR/diffusion-sql-modernbert ==="
+echo "=== Done. Model in $REPO_DIR/checkpoints/diffusion-sql-modernbert ==="
 echo "scp that dir back, plus the wandb/ run if you logged offline (wandb sync)."

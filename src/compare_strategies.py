@@ -11,7 +11,7 @@ attention matrices (sdpa/flash kernels do not expose them).
 
 Usage:
   python3 compare_strategies.py --n 64 --steps 24 \
-      --model-dir diffusion-sql-modernbert
+      --model-dir checkpoints/diffusion-sql-modernbert
 """
 import argparse
 import random
@@ -107,7 +107,7 @@ def evaluate(model, tok, ids_map, examples, *, strategy, dep_alpha, dep_layers,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default="diffusion-sql-modernbert")
+    ap.add_argument("--model-dir", default="checkpoints/diffusion-sql-modernbert")
     ap.add_argument("--n", type=int, default=64, help="num test examples")
     ap.add_argument("--offset", type=int, default=0, help="start index into test split")
     ap.add_argument("--steps", type=int, default=24, help="denoising steps")

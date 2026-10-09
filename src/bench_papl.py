@@ -40,7 +40,7 @@ MAX_LEN = 512
 SQL_WINDOW = 128
 
 AB_DIR = sys.argv[1] if len(sys.argv) > 1 else "."
-BASE_DIR = os.environ.get("BASE_DIR", "diffusion-sql-modernbert")
+BASE_DIR = os.environ.get("BASE_DIR", "checkpoints/diffusion-sql-modernbert")
 MODELS = {
     "base":    BASE_DIR,
     "tau_0":   os.path.join(AB_DIR, "tau_0"),
