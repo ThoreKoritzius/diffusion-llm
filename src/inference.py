@@ -2070,7 +2070,7 @@ def stream(run_id):
         while True:
             _, snaps = redis_get_snapshot_delta(run_id, cursor)
             for snap in snaps:
-                yield f"event: snapshot\\ndata: {json.dumps(snap)}\\n\\n"
+                yield f"event: snapshot\ndata: {json.dumps(snap)}\n\n"
                 cursor += 1
 
             run_now = redis_get_run(run_id)
@@ -2103,7 +2103,7 @@ def stream(run_id):
                     status_payload["demand"] = adaptive_start_profile().get("demand")
                 elif state in {"running", "stopping"}:
                     status_payload.update(running_timing_payload(run_now))
-                yield f"event: status\\ndata: {json.dumps(status_payload)}\\n\\n"
+                yield f"event: status\ndata: {json.dumps(status_payload)}\n\n"
 
             is_done = run_now.get("done")
             payload = {
@@ -2118,14 +2118,14 @@ def stream(run_id):
                 "confidence_threshold": run_now.get("confidence_threshold"),
             }
             if is_done and not done_sent:
-                yield f"event: done\\ndata: {json.dumps(payload)}\\n\\n"
+                yield f"event: done\ndata: {json.dumps(payload)}\n\n"
                 done_sent = True
                 break
 
             time.sleep(0.08)
             now = time.time()
             if now - last_heartbeat >= 10:
-                yield ": keepalive\\n\\n"
+                yield ": keepalive\n\n"
                 last_heartbeat = now
 
     resp = Response(stream_with_context(event_stream()), mimetype="text/event-stream")

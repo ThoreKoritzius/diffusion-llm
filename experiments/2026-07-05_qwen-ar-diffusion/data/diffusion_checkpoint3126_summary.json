@@ -1,0 +1,10 @@
+{
+  "model": "diffusion_qwen25",
+  "n": 256,
+  "exact_match_acc": 0.1015625,
+  "execution_match_acc": 0.1640625,
+  "execution_valid_acc": 0.25390625,
+  "avg_steps": 24.0,
+  "avg_latency_ms": 3567.9909318163823,
+  "predictions": "benchmarks/diffusion_qwen25_256/pred_diffusion_qwen25.jsonl"
+}

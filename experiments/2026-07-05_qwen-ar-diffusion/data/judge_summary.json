@@ -1,0 +1,24 @@
+{
+  "judge_model": "gpt-5.4-mini",
+  "models": {
+    "ar_qwen25": {
+      "model": "ar_qwen25",
+      "n": 256,
+      "judge_errors": 0,
+      "exact_match_acc": 0.35546875,
+      "semantic_acc": 0.64453125,
+      "semantic_minus_exact": 0.2890625,
+      "judge_validation_agree_on_exact_correct": 1.0,
+      "failure_histogram": {
+        "wrong_or_missing_column": 29,
+        "wrong_aggregate_or_groupby": 28,
+        "missing_or_wrong_filter": 18,
+        "wrong_table": 5,
+        "wrong_join": 4,
+        "hallucinated_identifier": 3,
+        "wrong_order_or_limit": 3,
+        "other": 1
+      }
+    }
+  }
+}
