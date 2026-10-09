@@ -1,0 +1,24 @@
+{
+  "judge_model": "gpt-5.4-mini",
+  "models": {
+    "diffusion_qwen25_final": {
+      "model": "diffusion_qwen25_final",
+      "n": 256,
+      "judge_errors": 0,
+      "exact_match_acc": 0.12109375,
+      "semantic_acc": 0.19140625,
+      "semantic_minus_exact": 0.0703125,
+      "judge_validation_agree_on_exact_correct": 1.0,
+      "failure_histogram": {
+        "syntax_error": 168,
+        "missing_or_wrong_filter": 15,
+        "wrong_aggregate_or_groupby": 7,
+        "hallucinated_identifier": 7,
+        "wrong_or_missing_column": 7,
+        "truncated_or_empty": 1,
+        "wrong_table": 1,
+        "other": 1
+      }
+    }
+  }
+}

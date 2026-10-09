@@ -1,10 +1,10 @@
 Flask
-Pillow
-numpy
+Pillow>=10
+numpy<2
 torch
 onnx
 onnxruntime
-transformers>=4.48.0
+transformers>=4.57.0,<5
 sentencepiece
 tiktoken
 redis

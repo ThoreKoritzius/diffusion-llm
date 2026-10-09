@@ -1,0 +1,10 @@
+{
+  "model": "ar_qwen25",
+  "n": 256,
+  "exact_match_acc": 0.35546875,
+  "execution_match_acc": 0.5625,
+  "execution_valid_acc": 0.75390625,
+  "avg_new_tokens": 29.85546875,
+  "avg_latency_ms": 588.6599577385141,
+  "predictions": "benchmarks/ar_qwen25_256/pred_ar_qwen25.jsonl"
+}

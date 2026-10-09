@@ -17,6 +17,14 @@ ModernBERT-base (150M), 10 epochs on [`gretelai/synthetic_text_to_sql`](https://
 | Avg. denoising steps (forward passes) | 11.8, vs ~30 tokens for autoregressive decoding |
 | Largest failure mode | invalid SQL (~14%) |
 
+Compared with an autoregressive (AR) model fine-tuned on the same data ([Qwen experiment](experiments/2026-07-05_qwen-ar-diffusion/README.md), same 256 rows, same LLM judge):
+
+| Model | Params | Semantic accuracy | Forward passes |
+|---|---:|---:|---:|
+| AR: Qwen2.5-Coder-0.5B SFT | 500M | **0.645** | ~30 (one per token) |
+| Diffusion: ModernBERT-base (this repo's main model) | 150M | 0.500 | 11.8 |
+| Diffusion: Qwen2.5-Coder-0.5B adapted to masked diffusion | 500M | 0.191 | 11.8 |
+
 Findings so far:
 
 - **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
