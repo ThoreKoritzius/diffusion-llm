@@ -44,6 +44,8 @@ def main():
                     help="diffusion/torch: prompt cannot attend to the SQL window (precondition for prompt caching)")
     ap.add_argument("--verify", type=int, default=0,
                     help="if greedy SQL does not compile against the schema, try up to K sampled candidates")
+    ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"], help="torch engines")
+    ap.add_argument("--ar-compile", action="store_true", help="ar/torch: static KV cache + torch.compile (GPU)")
     ap.add_argument("--out", default="bench/results")
     args = ap.parse_args()
 
@@ -51,15 +53,19 @@ def main():
         from bench.backends import DiffusionBackend
 
         backend = DiffusionBackend(args.model, args.engine, args.device, args.threads, args.window, args.steps,
-                                   args.conf_stop or None, args.window_head, args.int8, args.prompt_isolation)
+                                   args.conf_stop or None, args.window_head, args.int8, args.prompt_isolation,
+                                   args.dtype)
         default_name = (f"diffusion-{args.engine}-w{args.window}-s{args.steps}-c{args.conf_stop}"
                         f"{'-whead' if args.window_head else ''}{'-int8' if args.int8 else ''}"
-                        f"{'-isolated' if args.prompt_isolation else ''}")
+                        f"{'-isolated' if backend.prompt_isolation else ''}")
     else:
         from bench.backends import ARBackend
 
-        backend = ARBackend(args.model, args.engine, args.device, args.threads, int8=args.int8)
-        default_name = f"ar-{args.engine}{'-int8' if args.int8 else ''}"
+        backend = ARBackend(args.model, args.engine, args.device, args.threads, int8=args.int8, dtype=args.dtype,
+                            compile=args.ar_compile)
+        default_name = f"ar-{args.engine}{'-int8' if args.int8 else ''}{'-compiled' if args.ar_compile else ''}"
+    if args.dtype != "float32" and args.engine == "torch":
+        default_name += f"-{args.dtype}"
     if args.verify:
         from bench.backends import VerifiedBackend
 

@@ -22,10 +22,13 @@ pass over prompt + output window per denoising step. So diffusion only wins when
 - [x] Fair CPU benchmark, same engine for both arms (`bench/`)
 - [x] Schema-compile verification + resampling (`--verify K`), applied to both arms
 - [x] MLM head on the SQL window only, smaller window, int8 weights
-- [ ] Prompt caching: train with a mask where prompt tokens do not attend to the SQL window, so prompt keys/values
-      are computed once and every denoising step only processes the window
+- [x] Prompt isolation (prompt cannot attend to the SQL window) in training, benchmark and playground
+      (`src/prompt_isolation.py`). Inference-only it costs −13 points exec; trained, unknown → first GPU job
+- [ ] Prompt caching itself: cached prompt keys/values + window-only forward (and ONNX graphs), if the GPU job is a go
 - [ ] Few-step distillation (dParallel-style certainty forcing) to reach ~4 steps
 - [ ] Grammar-constrained decoding for diffusion (Mündler et al., ICLR 2026; LAVE, 2026)
+
+GPU experiments for Tracks A and B are scripted in [`gpu-session.md`](gpu-session.md).
 
 ## Track B: diffusion vs. AR on the same modern base model
 
@@ -35,7 +38,7 @@ Fine-tune both arms from the *same* pretrained weights so the decoding paradigm 
 |---|---|---|---|
 | B1 | Qwen3-1.7B-Base, SFT | SDAR-1.7B (block diffusion continued-pretrained from Qwen3-1.7B), SFT | Cleanest pair available today: same base, open weights, block diffusion gives a real KV cache |
 | B2 | Qwen3.5-0.8B-Base / 2B-Base, SFT | own block-diffusion conversion (Fast-dLLM v2 / Efficient-DLM recipe) | Newest small Qwen (hybrid linear attention); conversion is a research problem in itself (see dQwen3.5) |
-| B3 | ~150M AR (param-matched to ModernBERT) | current ModernBERT diffusion | Isolates paradigm at the current model size |
+| B3 | Ettin decoder 150M / 400M, SFT | Ettin encoder 150M / 400M (ModernBERT architecture), masked diffusion | Encoder and decoder trained on identical data with the same recipe: isolates the paradigm at matched size |
 
 Then add execution-reward RL to both arms (GRPO for AR, as in Arctic-Text2SQL-R1; TraceRL for diffusion, which also
 targets the loss/generation decoupling found in the PAPL experiment).

@@ -18,6 +18,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from denoising import denoise_steps  # noqa: E402
+from prompt_isolation import is_isolated_checkpoint, isolate_prompt, set_prompt_len  # noqa: E402
 
 from bench.common import TAGS  # noqa: E402
 
@@ -57,31 +58,10 @@ class _WindowHead(torch.nn.Module):
         return self.model.decoder(self.model.head(hidden[:, idx]))
 
 
-def isolate_prompt(model):
-    """Make prompt positions [0, model.model._prompt_len) unable to attend to anything after them, while the SQL
-    window still attends to everything. Prompt states then no longer change between denoising steps (the
-    precondition for caching them). Inference-only: the model was trained with full attention."""
-    enc = model.model
-    original = enc._update_attention_mask
-    enc._prompt_len = 0
-
-    def patched(attention_mask, output_attentions):
-        global_mask, sliding_mask = original(attention_mask, output_attentions)
-        lo = enc._prompt_len
-        if lo:
-            neg = torch.finfo(global_mask.dtype).min
-            global_mask, sliding_mask = global_mask.clone(), sliding_mask.clone()
-            global_mask[:, :, :lo, lo:] = neg
-            sliding_mask[:, :, :lo, lo:] = neg
-        return global_mask, sliding_mask
-
-    enc._update_attention_mask = patched
-
-
 class DiffusionBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
                  window: int = 128, steps: int = 16, conf_stop: Optional[float] = 0.9, window_head: bool = False,
-                 int8: bool = False, prompt_isolation: bool = False):
+                 int8: bool = False, prompt_isolation: bool = False, dtype: str = "float32"):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -90,14 +70,15 @@ class DiffusionBackend:
         self.window_head = window_head
         torch.set_num_threads(threads)
         model = AutoModelForMaskedLM.from_pretrained(model_dir, attn_implementation="sdpa", torch_dtype=torch.float32).eval()
-        self.prompt_isolation = prompt_isolation
-        if prompt_isolation:
+        # checkpoints trained with prompt isolation must be run with it
+        self.prompt_isolation = prompt_isolation or is_isolated_checkpoint(model.config)
+        if self.prompt_isolation:
             if engine != "torch":
                 raise ValueError("prompt isolation is implemented for the torch engine only")
             isolate_prompt(model)
         if engine == "torch":
             self.device = torch.device(device)
-            self.model = model.to(self.device)
+            self.model = model.to(self.device, dtype=getattr(torch, dtype))
             self._forward = self._torch_forward
         elif engine == "onnx":
             self.device = torch.device("cpu")
@@ -167,7 +148,7 @@ class DiffusionBackend:
         self._lo = lo
         self.prompt_tokens = lo
         if self.prompt_isolation:
-            self.model.model._prompt_len = lo
+            set_prompt_len(self.model, lo)
         ids = torch.tensor([ids], device=self.device)
         attn = torch.ones_like(ids)
         self._calls = 0
@@ -188,7 +169,7 @@ class DiffusionBackend:
 
 class ARBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
-                 max_new_tokens: int = 130, int8: bool = False):
+                 max_new_tokens: int = 130, int8: bool = False, dtype: str = "float32", compile: bool = False):
         from transformers import AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -201,7 +182,10 @@ class ARBackend:
             from transformers import AutoModelForCausalLM
 
             self.device = torch.device(device)
-            self.model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float32).eval().to(self.device)
+            self.model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=getattr(torch, dtype)).eval().to(self.device)
+            if compile:  # static KV cache + compiled decode step: HF's fastest generate path on GPU
+                self.model.generation_config.cache_implementation = "static"
+                self.model.forward = torch.compile(self.model.forward, mode="reduce-overhead", fullgraph=False)
         elif engine == "onnx":
             from optimum.onnxruntime import ORTModelForCausalLM
 
