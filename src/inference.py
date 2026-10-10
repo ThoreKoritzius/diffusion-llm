@@ -41,13 +41,14 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 import torch
 import redis
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoConfig, AutoTokenizer, AutoModelForMaskedLM
 try:
     import onnxruntime as ort
 except Exception:
     ort = None
 
 from denoising import denoise_steps
+from prompt_isolation import is_isolated_checkpoint, isolate_prompt, set_prompt_len
 
 # -------------------------
 def env_int(name: str, default: int) -> int:
@@ -1300,15 +1301,27 @@ def load_tokenizer(model_dir: str, max_len: int):
     return tokenizer
 
 
+def checkpoint_is_prompt_isolated(model_dir: str) -> bool:
+    try:
+        return is_isolated_checkpoint(AutoConfig.from_pretrained(model_dir))
+    except Exception:
+        return False
+
+
 def load_torch_masked_lm(model_dir: str, device: torch.device | None = None, dtype: torch.dtype | None = None):
     device = device or get_inference_device()
     if dtype is None:
         dtype, _dtype_label = resolve_model_dtype(device)
+    # Checkpoints trained with prompt isolation must run with the same one-way mask (sdpa supports it).
+    isolated = checkpoint_is_prompt_isolated(model_dir)
+    extra = {"attn_implementation": "sdpa"} if isolated else {}
     try:
-        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype)
+        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=dtype, **extra)
     except Exception:
-        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32)
+        model = AutoModelForMaskedLM.from_pretrained(model_dir, torch_dtype=torch.float32, **extra)
         dtype = torch.float32
+    if isolated:
+        isolate_prompt(model)
     model.to(device)
     model.eval()
     return model
@@ -1453,6 +1466,10 @@ def load_model_and_tokenizer(model_dir: str, max_len: int = 512):
 
     tokenizer = load_tokenizer(model_dir, max_len)
     backend = INFERENCE_BACKEND
+    if backend in {"onnx", "auto"} and checkpoint_is_prompt_isolated(model_dir):
+        # The ONNX export would bake in one fixed prompt length; isolated checkpoints run on PyTorch for now.
+        print("[WARN] prompt-isolated checkpoint: ONNX backend not supported yet, using PyTorch", flush=True)
+        backend = "torch"
     if backend in {"onnx", "auto"}:
         try:
             model = load_onnx_masked_lm(model_dir, tokenizer, max_len)
@@ -1729,6 +1746,8 @@ def run_denoising_generation_callback(
                 stat[k] = [p - sql_start for p in stat[k]]
         step_stats.append(stat)
 
+    if getattr(getattr(model, "config", None), "prompt_isolation", False):
+        set_prompt_len(model, sql_start)
     for step_idx, total_steps, current_ids in denoise_steps(
         model,
         current_ids,
