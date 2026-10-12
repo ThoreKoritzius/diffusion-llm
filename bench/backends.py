@@ -304,7 +304,8 @@ class ARBackend:
         elif engine == "vllm":  # GPU only
             from vllm import LLM, SamplingParams
 
-            self.model = LLM(model=model_dir, dtype="bfloat16", enforce_eager=False)
+            self.model = LLM(model=model_dir, dtype="bfloat16", enforce_eager=False,
+                             gpu_memory_utilization=float(os.environ.get("VLLM_GPU_UTIL", "0.9")))
             self.params = SamplingParams(temperature=0.0, max_tokens=max_new_tokens, stop_token_ids=self.stop_ids)
         else:
             raise ValueError(engine)
