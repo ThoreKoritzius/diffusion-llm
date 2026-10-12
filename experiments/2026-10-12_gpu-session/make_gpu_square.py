@@ -18,10 +18,13 @@ from make_headline_chart import COLOR, GRID, HERE, INK, INK_2, MUTED, SURFACE, l
 HERO_AR, HERO_DIFF = "ettin150-ar-10ep-vllm", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs"
 # (label, arm, gpu summary): the matched Ettin-150M pair, emphasised
 HERO = [("Autoregressive", "ar", HERO_AR), ("Diffusion", "diffusion", HERO_DIFF)]
-# (label, arm, gpu summary): larger models, for context
+# (label, arm, gpu summary, label offset (dx, dy, ha, va)): other models, for context
 CONTEXT = [
-    ("Qwen2.5-0.5B AR · 3× larger", "ar", "sql-ar-qwen25-coder-0.5b-ar-vllm"),
-    ("Ettin-400M diffusion", "diffusion", "ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs"),
+    ("Qwen2.5-0.5B AR · 3× larger", "ar", "sql-ar-qwen25-coder-0.5b-ar-vllm", (0, 12, "center", "bottom")),
+    ("Ettin-400M diffusion", "diffusion", "ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs",
+     (-12, 0, "right", "center")),
+    ("ModernBERT-150M diffusion", "diffusion", "modernbert-isolated-distilled-bf16-cudagraphs",
+     (0, 12, "center", "bottom")),
 ]
 REPO = "github.com/ThoreKoritzius/diffusion-llm"
 LEFT_X = 0.06  # shared left edge of title, subtitle and footer
@@ -42,11 +45,11 @@ def main():
 
     (xa, ya), (xd, yd) = point(HERO_AR), point(HERO_DIFF)
 
-    for label, arm, name in CONTEXT:
+    for label, arm, name, (dx, dy, ha, va) in CONTEXT:
         x, y = point(name)
         ax.scatter(x, y, s=140, color=COLOR[arm], edgecolor=SURFACE, linewidth=2, zorder=3)
-        ax.annotate(f"{label}\n{x:.0f} ms · {y:.0f}%", (x, y), xytext=(0, 12), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=9, color=INK_2, linespacing=1.4)
+        ax.annotate(f"{label}\n{x:.0f} ms · {y:.0f}%", (x, y), xytext=(dx, dy), textcoords="offset points",
+                    ha=ha, va=va, fontsize=9, color=INK_2, linespacing=1.4)
 
     ax.annotate("", xy=(xd, yd), xytext=(xa, ya), zorder=2,
                 arrowprops=dict(arrowstyle="-|>", color=INK, lw=2, shrinkA=16, shrinkB=16, mutation_scale=18))
