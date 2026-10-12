@@ -46,3 +46,4 @@ onnx_cache/
 # benchmark local artifacts
 bench/.onnx_cache/
 ckpt-*
+bench/.gguf/
