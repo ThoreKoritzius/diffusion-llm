@@ -5,9 +5,10 @@ same 256 gretelai test rows (`bench/`, exec accuracy over the 201 rows whose gol
 
 ## TL;DR
 
-1. **At matched size, diffusion now matches or beats AR on quality.** Ettin-150M encoder (diffusion) vs. Ettin-150M
-   decoder (AR), same pretraining data, same SQL data, 10 epochs each: exec **0.562 vs 0.527**, exact **0.324 vs
-   0.250**. AR still produces valid SQL more often (0.73 vs 0.64).
+1. **At matched size, diffusion is on par with AR, with different strengths.** Ettin-150M encoder (diffusion) vs.
+   Ettin-150M decoder (AR), same pretraining data, same SQL data, 10 epochs each: exact match **0.324 vs 0.250**
+   (about 2.6 standard errors, likely real), exec **0.562 vs 0.527** (about 1 standard error, a tie), and AR produces
+   valid SQL more often (**0.73 vs 0.64**). Single seed per arm; see caveats.
 2. **Diffusion needs more epochs; AR doesn't benefit.** 3 → 10 epochs: diffusion exec +8.9 points, exact +7.4;
    AR +1.0 / +0.8. At 3 epochs AR was ahead.
 3. **Prompt caching is nearly free once trained for.** The one-way prompt mask costs ~3 points exec (within one
@@ -84,7 +85,15 @@ Prompt isolation (trained, GPU eval): control 0.582 exec / isolated 0.552 exec (
 ## Caveats
 
 - **Statistics.** n=256 (201 for exec): one standard error is ~3.5 points exec and ~2.8 points exact. The matched-size
-  exec gap (+3.5) is about one standard error; the exact-match gap (+7.4) is about 2.6.
+  exec gap (+3.5) is about one standard error; the exact-match gap (+7.4) is about 2.6. One seed per arm, so
+  seed-to-seed variance is not measured.
+- **Is the AR plateau real?** Yes, as far as these runs show: AR keeps training (eval loss 0.319 → 0.30, outputs and
+  exec change between evals) but its train loss stays at ~0.32 from epoch 3 to 10. Both arms used the same
+  augmentation, cosine schedule and learning rate per batch size (AR 5e-5 @ 64, diffusion 1e-4 @ 128, both halved
+  for the continuation). AR hyperparameters were not tuned; a higher AR learning rate was not tested.
+- **Why diffusion keeps improving.** Each epoch shows a diffusion model every example under a new random mask and mask
+  ratio, so repeated data keeps yielding new prediction tasks; AR sees each example in the same left-to-right order.
+  This matches published findings that masked diffusion benefits from many more epochs on limited data.
 - **No optimized matched-size AR engine.** vLLM and llama.cpp don't support the Ettin decoder
   (`modernbert-decoder`), so on GPU and CPU the fastest AR numbers come from the 3.3× larger Qwen2.5-0.5B. A
   150M AR model in vLLM / llama.cpp would very likely be faster than these Qwen numbers; it was not measured.
