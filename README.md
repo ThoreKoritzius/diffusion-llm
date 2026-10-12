@@ -27,6 +27,8 @@ Compared with an autoregressive (AR) model fine-tuned on the same data ([Qwen ex
 
 Findings so far:
 
+- **Matched size, diffusion is on par or ahead.** Ettin-150M encoder (diffusion) vs. decoder (AR), same data, 10 epochs: exec 0.562 vs 0.527, exact 0.324 vs 0.250. Diffusion keeps improving with epochs, AR doesn't. Batch-1 latency: 23 ms on H100 with CUDA graphs (vLLM AR: 63 ms, for a 3.3× larger model) and 216 ms on CPU (llama.cpp AR: 304 ms). See the [GPU session](experiments/2026-10-12_gpu-session/README.md).
+
 - **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
 - **More steps can hurt.** Accuracy peaks around 11 steps (threshold 0.9) and falls ~10 points when decoding runs to a 0.99 threshold (~19 steps).
 - **PAPL fine-tuning only saves steps.** It gives ~7% fewer steps at equal accuracy ([PAPL A/B](experiments/2026-06-30_papl-ab/README.md)).
