@@ -130,3 +130,44 @@ class ARGraphDecoder:
                 torch.compiler.cudagraph_mark_step_begin()
             tok = self.step(self.tok, self.pos).clone().argmax(-1)
         return out
+
+
+class ARManualGraphDecoder(ARGraphDecoder):
+    """Like ARGraphDecoder, but the single-token decode step is captured manually with torch.cuda.graph (exactly the
+    technique GraphRunner uses for diffusion), instead of torch.compile."""
+
+    def __init__(self, model, max_len: int = 700):
+        super().__init__(model, max_len=max_len, graphs=False)
+        self.graph = None
+
+    def _capture(self):
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), torch.no_grad():
+            for _ in range(3):
+                self._step(self.tok, self.pos)
+        torch.cuda.current_stream().wait_stream(stream)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph), torch.no_grad():
+            self.out = self._step(self.tok, self.pos)
+
+    @torch.no_grad()
+    def generate(self, ids, max_new_tokens: int, stop_ids):
+        self.cache.reset()
+        P = len(ids)
+        x = torch.tensor([ids], device=self.dev)
+        logits = self.model(input_ids=x, past_key_values=self.cache, cache_position=torch.arange(P, device=self.dev),
+                            use_cache=True).logits[:, -1]
+        out, tok = [], logits.argmax(-1)
+        for i in range(max_new_tokens):
+            t = int(tok)
+            out.append(t)
+            if t in stop_ids:
+                break
+            self.tok.copy_(tok.view(1, 1))
+            self.pos.fill_(P + i)
+            if self.graph is None:  # first decode step: capture (writes this position's KV, replay rewrites it)
+                self._capture()
+            self.graph.replay()
+            tok = self.out.argmax(-1)
+        return out

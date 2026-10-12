@@ -253,9 +253,12 @@ class ARBackend:
                 self.model.generation_config.cache_implementation = "static"
             self.graph_decoder = None
             if cuda_graphs or eager_static:  # same-effort harness as diffusion's CUDA graphs
-                from bench.cuda_graphs import ARGraphDecoder
+                from bench.cuda_graphs import ARGraphDecoder, ARManualGraphDecoder
 
-                self.graph_decoder = ARGraphDecoder(self.model, graphs=cuda_graphs)
+                if cuda_graphs and os.environ.get("AR_GRAPHS") == "manual":
+                    self.graph_decoder = ARManualGraphDecoder(self.model)
+                else:
+                    self.graph_decoder = ARGraphDecoder(self.model, graphs=cuda_graphs)
         elif engine == "onnx":
             from optimum.onnxruntime import ORTModelForCausalLM
 
