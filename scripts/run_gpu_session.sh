@@ -30,6 +30,7 @@ mkdir -p "$SESSION_DIR/logs" checkpoints
 
 export HF_HOME="${HF_HOME:-$REPO_DIR/.hf_cache}"
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export DATALOADER_WORKERS="${DATALOADER_WORKERS:-12}"
 if [ -z "${WANDB_API_KEY:-}" ] && [ -z "${WANDB_MODE:-}" ]; then export WANDB_MODE=offline; fi
 
@@ -101,7 +102,9 @@ fi
 if has_job isolation; then
   [ -f checkpoints/diffusion-sql-modernbert/model.safetensors ] || {
     log "!! checkpoints/diffusion-sql-modernbert missing: upload it first (docs/gpu-session.md)"; exit 1; }
-  common=(INIT_CHECKPOINT="$REPO_DIR/checkpoints/diffusion-sql-modernbert" NUM_EPOCHS=2 LEARNING_RATE=2e-5)
+  # effective batch 128 like the original run; 64x2 fits 80 GB without flash-attn unpadding
+  common=(INIT_CHECKPOINT="$REPO_DIR/checkpoints/diffusion-sql-modernbert" NUM_EPOCHS=2 LEARNING_RATE=2e-5
+          BATCH_SIZE=64 GRAD_ACCUM=2)
   train modernbert-isolated "$PY" train.py "${common[@]}" PROMPT_ISOLATION=1
   train modernbert-ft-control "$PY" train.py "${common[@]}" PROMPT_ISOLATION=0
 fi
@@ -127,9 +130,10 @@ if [[ "$JOBS" == *ettin* ]]; then
 fi
 for size in $ETTIN_SIZES; do
   has_job "ettin$size" || continue
-  bs=128; [ "$size" = 400 ] && bs="${ETTIN400_BATCH:-64}"   # no unpadding with sdpa -> halve batch at 400M
+  # effective batch 128 for both sizes; per-device batch limited by 80 GB without flash-attn unpadding
+  bs=64; acc=2; [ "$size" = 400 ] && { bs="${ETTIN400_BATCH:-32}"; acc=$((128 / bs)); }
   train "ettin$size-diffusion" "$PY" train.py MODEL_NAME="jhu-clsp/ettin-encoder-${size}m" \
-    NUM_EPOCHS="$EPOCHS" PROMPT_ISOLATION="$ETTIN_ISO" BATCH_SIZE="$bs"
+    NUM_EPOCHS="$EPOCHS" PROMPT_ISOLATION="$ETTIN_ISO" BATCH_SIZE="$bs" GRAD_ACCUM="$acc"
   train "ettin$size-ar" "$PY" train_ar.py MODEL_NAME="jhu-clsp/ettin-decoder-${size}m" \
     NUM_EPOCHS="$EPOCHS" LEARNING_RATE=5e-5
 done

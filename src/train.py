@@ -45,7 +45,8 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "answerdotai/ModernBERT-base")
 # Continue training an existing diffusion checkpoint (already has the SQL tags) instead of MODEL_NAME.
 INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT", "")
 NUM_EPOCHS = float(os.environ.get("NUM_EPOCHS", "10"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "128"))    # safe on a 96 GB GH200 for ModernBERT-base @ seq 512
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "128"))
+GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", "1"))  # per-device batch x accum = effective batch    # safe on a 96 GB GH200 for ModernBERT-base @ seq 512
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "1e-4"))  # ~sqrt-scaled from 3e-5@bs32 for the 4x larger batch
 MAX_LEN = 512
 SQL_WINDOW = 128
@@ -307,6 +308,7 @@ training_args = TrainingArguments(
     num_train_epochs=NUM_EPOCHS,
     max_steps=MAX_TRAIN_STEPS if MAX_TRAIN_STEPS > 0 else -1,
     per_device_train_batch_size=BATCH_SIZE,
+    gradient_accumulation_steps=GRAD_ACCUM,
     per_device_eval_batch_size=BATCH_SIZE,
     learning_rate=LEARNING_RATE,
     **WARMUP_5PCT,
