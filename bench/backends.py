@@ -275,7 +275,24 @@ class ARBackend:
             opts.inter_op_num_threads = 1
             self.model = ORTModelForCausalLM.from_pretrained(export_dir, use_cache=True, session_options=opts,
                                                              provider="CPUExecutionProvider")
-        elif engine == "vllm":  # GPU only; untested on this machine
+        elif engine == "llamacpp":  # CPU-only llama-server on a GGUF export (pass the .gguf via LLAMACPP_GGUF)
+            import atexit
+            import subprocess
+            import urllib.request
+
+            gguf = os.environ["LLAMACPP_GGUF"]
+            self.port = int(os.environ.get("LLAMACPP_PORT", "8091"))
+            self.server = subprocess.Popen(
+                ["llama-server", "-m", gguf, "-t", str(threads), "-tb", str(threads), "-ngl", "0", "-c", "1024",
+                 "--port", str(self.port), "-np", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            atexit.register(self.server.terminate)
+            for _ in range(240):
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=1)
+                    break
+                except Exception:
+                    __import__("time").sleep(0.5)
+        elif engine == "vllm":  # GPU only
             from vllm import LLM, SamplingParams
 
             self.model = LLM(model=model_dir, dtype="bfloat16", enforce_eager=False)
@@ -298,6 +315,17 @@ class ARBackend:
     @torch.no_grad()
     def generate(self, prompt: str, context: str, sample: bool = False) -> Tuple[str, int]:
         ids = self.prompt_ids(prompt, context)
+        if self.engine == "llamacpp":
+            import json as _json
+            import urllib.request
+
+            body = {"prompt": ids, "n_predict": self.max_new_tokens, "temperature": 0.7 if sample else 0.0,
+                    "top_k": 20 if sample else 1, "cache_prompt": False, "stop": ["</SQL>"]}
+            req = urllib.request.Request(f"http://127.0.0.1:{self.port}/completion", _json.dumps(body).encode(),
+                                         {"Content-Type": "application/json"})
+            res = _json.loads(urllib.request.urlopen(req, timeout=120).read())
+            text = res["content"].split("</SQL>")[0]
+            return text.replace(self.tok.eos_token or "", "").strip(), res.get("tokens_predicted", 0)
         if self.engine == "vllm":
             params = self.params.clone() if sample else self.params
             if sample:

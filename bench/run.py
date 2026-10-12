@@ -28,7 +28,7 @@ def sync(device: torch.device):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--arm", choices=["diffusion", "ar"], required=True)
-    ap.add_argument("--engine", choices=["torch", "onnx", "vllm"], default="torch")
+    ap.add_argument("--engine", choices=["torch", "onnx", "vllm", "llamacpp"], default="torch")
     ap.add_argument("--model", required=True)
     ap.add_argument("--name", help="Run name (default: derived from arm/engine/settings)")
     ap.add_argument("--device", default="cpu")
