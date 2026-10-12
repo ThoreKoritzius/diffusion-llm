@@ -59,16 +59,47 @@ class _WindowHead(torch.nn.Module):
         return self.model.decoder(self.model.head(hidden[:, idx]))
 
 
+CORE_VOCAB_MIN_COUNT = 20
+
+
+def sql_core_vocab(tok) -> torch.Tensor:
+    """Tokens that occur at least CORE_VOCAB_MIN_COUNT times in the training split's SQL (keywords, operators,
+    digits, common words), as a bool mask; cached per tokenizer. Combined per query with the prompt/schema tokens,
+    it keeps the decoder from inventing identifiers."""
+    import collections
+    import json
+
+    path = os.path.join(ONNX_CACHE, f"core_vocab-{tok.name_or_path.replace('/', '_')}-{len(tok)}.json")
+    if os.path.exists(path):
+        ids = json.load(open(path))
+    else:
+        from datasets import load_dataset
+
+        sql = list(load_dataset("gretelai/synthetic_text_to_sql", split="train").select(range(100_000))["sql"])
+        counts = collections.Counter(t for ids in tok(sql, add_special_tokens=False)["input_ids"] for t in ids)
+        ids = sorted(t for t, c in counts.items() if c >= CORE_VOCAB_MIN_COUNT)
+        os.makedirs(ONNX_CACHE, exist_ok=True)
+        json.dump(ids, open(path, "w"))
+    mask = torch.zeros(len(tok), dtype=torch.bool)
+    mask[ids] = True
+    mask[tok.pad_token_id] = True
+    return mask
+
+
 class DiffusionBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
                  window: int = 128, steps: int = 16, conf_stop: Optional[float] = 0.9, window_head: bool = False,
                  int8: bool = False, prompt_isolation: bool = False, dtype: str = "float32",
-                 prompt_cache: bool = False, cuda_graphs: bool = False):
+                 prompt_cache: bool = False, cuda_graphs: bool = False, refine: float = 0.0,
+                 schema_vocab: bool = False, grow_window: int = 0, repair: bool = False):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tid = {t: self.tok.convert_tokens_to_ids(t) for t in TAGS}
         self.window, self.steps, self.conf_stop = window, steps, conf_stop
+        self.refine, self.grow_window, self.repair = refine, grow_window, repair
+        self.auto_window = os.environ.get("DIFF_AUTO_WINDOW") == "1"  # 2x window when the schema has several tables
+        self.core_vocab = sql_core_vocab(self.tok) if schema_vocab else None
         self.window_head = window_head
         torch.set_num_threads(threads)
         model = AutoModelForMaskedLM.from_pretrained(model_dir, attn_implementation="sdpa", torch_dtype=torch.float32).eval()
@@ -190,6 +221,34 @@ class DiffusionBackend:
 
     @torch.no_grad()
     def generate(self, prompt: str, context: str, sample: bool = False) -> Tuple[str, int]:
+        from bench.common import compiles
+
+        allowed = None
+        if self.core_vocab is not None:  # SQL vocabulary + every token of the prompt and schema
+            allowed = self.core_vocab.clone()
+            allowed[self.tok(prompt + " " + context, add_special_tokens=False)["input_ids"]] = True
+        base_window = self.window
+        if self.auto_window and context.upper().count("CREATE TABLE") >= 2:
+            self.window = 2 * base_window
+        try:
+            sql, calls, full = self._decode(prompt, context, sample, self.refine, allowed)
+        finally:
+            self.window = base_window
+        if full and self.grow_window:  # SQL ran to the end of the window: decode again with more room
+            self.window += self.grow_window
+            try:
+                sql, more, _ = self._decode(prompt, context, sample, self.refine, allowed)
+            finally:
+                self.window -= self.grow_window
+            calls += more
+        if self.repair and not sample and not compiles(context, sql):  # re-mask the shakiest tokens and redo
+            fixed, more, _ = self._decode(prompt, context, False, 0.3, allowed)
+            calls += more
+            if compiles(context, fixed):
+                sql = fixed
+        return sql, calls
+
+    def _decode(self, prompt: str, context: str, sample: bool, refine: float, allowed) -> Tuple[str, int, bool]:
         ids, lo = self.encode(prompt, context)
         self._lo = lo
         self.prompt_tokens = lo
@@ -212,10 +271,13 @@ class DiffusionBackend:
             n_steps=self.steps, forbid_token_ids=list(self.tid.values()),
             confidence_stop=None if sample else self.conf_stop,
             temperature=1.0 if sample else 0.0, token_temperature=0.7 if sample else 0.0,
+            refine_frac=refine, allowed_tokens=allowed,
         ):
             pass
-        out = [x for x in ids[0, lo:lo + self.window].tolist() if x not in (self.tok.pad_token_id, self.tok.mask_token_id)]
-        return self.tok.decode(out, skip_special_tokens=True).strip(), self._calls
+        window = ids[0, lo:lo + self.window].tolist()
+        out = [x for x in window if x not in (self.tok.pad_token_id, self.tok.mask_token_id)]
+        full = window[-1] not in (self.tok.pad_token_id, self.tok.mask_token_id)
+        return self.tok.decode(out, skip_special_tokens=True).strip(), self._calls, full
 
     def _counted_forward(self, input_ids, attention_mask):
         self._calls += 1

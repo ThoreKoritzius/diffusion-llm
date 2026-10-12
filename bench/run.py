@@ -50,6 +50,14 @@ def main():
                     help="ar/torch: same static-cache decode loop as --cuda-graphs but eager (CPU correctness check)")
     ap.add_argument("--verify", type=int, default=0,
                     help="if greedy SQL does not compile against the schema, try up to K sampled candidates")
+    ap.add_argument("--refine", type=float, default=0.0,
+                    help="diffusion: re-mask this fraction of least-confident tokens once the window fills (ReMDM)")
+    ap.add_argument("--schema-vocab", action="store_true",
+                    help="diffusion: only allow SQL vocabulary plus tokens of the prompt and schema")
+    ap.add_argument("--grow-window", type=int, default=0,
+                    help="diffusion: if the SQL fills the window, decode again with this many more positions")
+    ap.add_argument("--repair", action="store_true",
+                    help="diffusion: if the SQL does not compile, redo greedily with re-masking (refine 0.3)")
     ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"], help="torch engines")
     ap.add_argument("--ar-compile", action="store_true", help="ar/torch: static KV cache + torch.compile (GPU)")
     ap.add_argument("--out", default="bench/results")
@@ -60,7 +68,8 @@ def main():
 
         backend = DiffusionBackend(args.model, args.engine, args.device, args.threads, args.window, args.steps,
                                    args.conf_stop or None, args.window_head, args.int8, args.prompt_isolation,
-                                   args.dtype, args.prompt_cache, args.cuda_graphs)
+                                   args.dtype, args.prompt_cache, args.cuda_graphs, args.refine, args.schema_vocab,
+                                   args.grow_window, args.repair)
         default_name = (f"diffusion-{args.engine}-w{args.window}-s{args.steps}-c{args.conf_stop}"
                         f"{'-whead' if args.window_head else ''}{'-int8' if args.int8 else ''}"
                         f"{'-isolated' if backend.prompt_isolation else ''}{'-cached' if args.prompt_cache else ''}")
