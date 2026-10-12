@@ -47,7 +47,8 @@ Training curves: W&B project `sql-diffusion`.
 
 ## Results
 
-![GPU](plots/gpu_frontier.png)
+![GPU](plots/gpu_square.png)
+![GPU frontier](plots/gpu_frontier.png)
 ![CPU](plots/cpu_frontier.png)
 
 ### GPU (NVIDIA H100 PCIe, batch 1, n=256)
@@ -69,6 +70,31 @@ Training curves: W&B project `sql-diffusion`.
 | **Diffusion** Ettin-150M, 10 ep · CUDA graphs, bf16 | 150M | 0.547 | 0.629 | 0.320 | 9.6 | 28 | 49 | 30 |
 | **Diffusion** ModernBERT, production model · CUDA graphs, bf16 | 150M | 0.592 | 0.688 | 0.312 | 9.4 | 29 | 49 | 29 |
 | **Diffusion** ModernBERT, production model · PyTorch eager, bf16 | 150M | 0.577 | 0.668 | 0.305 | 9.4 | 160 | 266 | 154 |
+
+### Accuracy on 1,000 queries (CPU fp32, same queries for every model)
+
+The n=256 accuracies above have a standard error of about 3.5 points. These runs use 1,000 test rows (777 with
+executable gold SQL); "vs Ettin AR" is the paired difference on the same queries, ± one standard error.
+
+| model | exec | exact | valid SQL | exec when valid | exec vs Ettin AR | forward passes |
+|---|---:|---:|---:|---:|---:|---:|
+| **AR** Qwen2.5-0.5B (494M) | 0.730 | 0.336 | 0.956 | 0.763 | +15.6 ± 1.7 | 30.8 |
+| **AR** Ettin-150M, 10 ep | 0.574 | 0.238 | 0.856 | 0.671 | – | 34.4 |
+| **AR** Ettin-150M, 10 ep + verify 4 | 0.616 | 0.238 | 0.951 | 0.648 | +4.2 ± 0.7 | 72.4 |
+| **Diffusion** Ettin-150M, 10 ep, distilled, window 64 | 0.559 | 0.279 | 0.750 | 0.744 | −1.5 ± 1.8 | 8.5 |
+| **Diffusion** same, window 128 | 0.538 | 0.268 | 0.707 | 0.761 | −3.6 ± 1.8 | 8.6 |
+| **Diffusion** same, window 64 + verify 4 | 0.611 | 0.281 | 0.879 | 0.695 | +3.7 ± 1.7 | 27.2 |
+| **Diffusion** ModernBERT-150M, distilled, window 64 | 0.573 | 0.279 | 0.771 | 0.743 | −0.1 ± 1.8 | 8.2 |
+| **Diffusion** Ettin-400M, 10 ep, distilled, window 64 | 0.609 | 0.300 | 0.797 | 0.764 | +3.5 ± 1.8 | 7.9 |
+
+- At matched size, diffusion ties AR on exec (−1.5 ± 1.8) and leads on exact match (+4.1 ± 1.2). The n=256 "+2
+  points exec" did not hold up.
+- Diffusion's gap is validity (75% vs 86% valid SQL); when its SQL is valid it is correct more often (74% vs 67%).
+  Invalid outputs are mostly garbled identifiers and literals from parallel unmasking.
+- Verify-and-resample (`--verify 4`) adds about 4–5 points to both arms, so they still tie on exec (−0.5 ± 1.7);
+  it costs diffusion 3.2× forward passes vs 2.1× for AR, which shrinks the speed lead.
+- Ettin-400M beats Ettin-150M diffusion by +5.0 ± 1.5 exec on these queries: scale helps, modestly.
+- A 128-token window is worse than 64: more padding positions to fill, more invalid SQL.
 
 ### CPU (Apple Silicon, 3 threads, batch 1, n=256)
 

@@ -27,13 +27,20 @@ CONTEXT = [
     ("ModernBERT-150M diffusion", "diffusion", "modernbert-isolated-distilled-bf16-cudagraphs",
      (0, 12, "center", "bottom")),
 ]
+# accuracy from the 1,000-query CPU fp32 runs (same queries for every model); latency from the H100 runs
+ACCURACY = {
+    HERO_AR: "ettin150-ar-10ep",
+    HERO_DIFF: "ettin150-diffusion-10ep-distilled-w64",
+    "sql-ar-qwen25-coder-0.5b-ar-vllm": "qwen25-0.5b-ar",
+    "ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs": "ettin400-diffusion-10ep-distilled-w64",
+    "modernbert-isolated-distilled-bf16-cudagraphs": "modernbert-distilled-w64",
+}
 REPO = "github.com/ThoreKoritzius/diffusion-llm"
 LEFT_X = 0.06  # shared left edge of title, subtitle and footer
 
 
 def point(name):
-    s = load("gpu", name)
-    return s["lat_mean_ms"], s["exec"] * 100
+    return load("gpu", name)["lat_mean_ms"], load("n1000", ACCURACY[name])["exec"] * 100
 
 
 def main():
@@ -57,7 +64,7 @@ def main():
     mid = ((xa * xd) ** 0.5, (ya + yd) / 2)
     ax.annotate(f"{xa / xd:.1f}× faster", mid, xytext=(0, -16), textcoords="offset points", ha="center",
                 va="top", fontsize=19, fontweight="bold", color=INK)
-    ax.annotate(f"{yd - ya:+.0f} pts accuracy", mid, xytext=(0, -44), textcoords="offset points", ha="center",
+    ax.annotate("at similar accuracy", mid, xytext=(0, -44), textcoords="offset points", ha="center",
                 va="top", fontsize=11, color=INK_2)
 
     for label, model, arm, name in HERO:
@@ -88,10 +95,11 @@ def main():
              fontweight="bold", color=INK, va="top")
     fig.text(LEFT_X, 0.902, "Same 150M model family, same training data  ·  text-to-SQL  ·  H100", fontsize=11,
              color=INK_2, va="top")
-    fig.text(LEFT_X, 0.045, "Ettin-150M encoder (diffusion) vs. decoder (AR)  ·  AR on vLLM, diffusion on CUDA graphs  ·  "
-             "batch 1  ·  256 queries", fontsize=7.8, color=MUTED, va="bottom")
-    fig.text(LEFT_X, 0.02, REPO, fontsize=7.8, color=INK_2, va="bottom")
-    fig.subplots_adjust(left=0.13, right=0.96, bottom=0.16, top=0.85)
+    fig.text(LEFT_X, 0.05, "Ettin-150M encoder (diffusion) vs. decoder (AR)  ·  AR on vLLM, diffusion on CUDA graphs\n"
+             "Latency: H100, batch 1  ·  accuracy: 1,000 test queries", fontsize=7.8, color=MUTED, va="bottom",
+             linespacing=1.5)
+    fig.text(LEFT_X, 0.018, REPO, fontsize=7.8, color=INK_2, va="bottom")
+    fig.subplots_adjust(left=0.13, right=0.96, bottom=0.18, top=0.85)
     out = os.path.join(HERE, "plots", "gpu_square.png")
     fig.savefig(out, dpi=200, facecolor=SURFACE)
     print(out)
