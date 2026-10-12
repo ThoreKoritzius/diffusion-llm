@@ -85,11 +85,6 @@ class DiffusionBackend:
             self.model = model.to(self.device, dtype=getattr(torch, dtype))
             if prompt_cache:
                 self.cache = PromptCache(self.model)
-        self.graphs = None
-        if cuda_graphs:
-            from bench.cuda_graphs import GraphRunner
-
-            self.graphs = GraphRunner(self.model, self.prompt_isolation, compiled=os.environ.get("DIFF_COMPILE") == "1")
             self._forward = self._torch_forward
         elif engine == "onnx" and prompt_cache:
             self.device = torch.device("cpu")
@@ -102,6 +97,11 @@ class DiffusionBackend:
             self._forward = self._onnx_forward
         else:
             raise ValueError(engine)
+        self.graphs = None
+        if cuda_graphs:
+            from bench.cuda_graphs import GraphRunner
+
+            self.graphs = GraphRunner(self.model, self.prompt_isolation, compiled=os.environ.get("DIFF_COMPILE") == "1")
 
     # ---- ONNX export (same graph as src/inference.py, optionally window-only head / int8) ----
     def _export(self, model, model_dir: str, int8: bool) -> str:
