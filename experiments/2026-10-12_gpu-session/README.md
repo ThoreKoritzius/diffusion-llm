@@ -96,6 +96,29 @@ executable gold SQL); "vs Ettin AR" is the paired difference on the same queries
 - Ettin-400M beats Ettin-150M diffusion by +5.0 ± 1.5 exec on these queries: scale helps, modestly.
 - A 128-token window is worse than 64: more padding positions to fill, more invalid SQL.
 
+### Decoding fixes for validity (1,000 queries, Ettin-150M diffusion unless noted)
+
+| decoding | exec | valid SQL | vs plain | forward passes |
+|---|---:|---:|---:|---:|
+| plain (distilled, window 64) | 0.559 | 0.750 | – | 8.5 |
+| re-mask least-confident 20% (`--refine 0.2`) | 0.566 | 0.755 | +0.8 ± 0.4 | 9.4 |
+| redo with re-masking if it does not compile (`--repair`) | 0.565 | 0.761 | +0.6 ± 0.3 | 13.4 |
+| SQL + schema vocabulary only (`--schema-vocab`) | 0.556 | 0.745 | −0.3 ± 0.3 | 8.5 |
+| grow window when full (`--grow-window 64`) | 0.556 | 0.746 | −0.3 ± 0.3 | 8.7 |
+| window 128 for multi-table schemas | 0.550 | 0.732 | −0.9 ± 0.6 | 8.6 |
+| stricter early stop (`--conf-stop 0.95`) | 0.557 | 0.749 | −0.1 ± 0.9 | 9.8 |
+| **one resample if it does not compile (`--verify 1`)** | **0.598** | **0.829** | **+4.0 ± 0.7** | 14.3 |
+| four resamples (`--verify 4`) | 0.611 | 0.879 | +5.3 ± 0.8 | 27.2 |
+| AR, `--verify 1` (for comparison) | 0.588 | 0.892 | AR +1.4 | 46.9 |
+| **Ettin-400M diffusion, `--verify 1`** | **0.647** | **0.870** | 400M +3.9 ± 0.7 | 13.0 |
+
+- Greedy decoding tricks don't help: broken SQL is confidently broken, so re-predicting it reproduces the error;
+  only sampling a different candidate escapes it. For long queries the model writes a shorter (wrong) query that fits
+  the window rather than running out of room, so growing the window rarely triggers.
+- With verify-1 on both arms, Ettin-150M diffusion and AR still tie on exec (+1.0 ± 1.7); verify costs diffusion
+  +68% forward passes vs +36% for AR.
+- Best diffusion result: Ettin-400M + verify-1, exec 0.647 (−8.2 ± 1.6 vs Qwen2.5-0.5B AR without verify).
+
 ### CPU (Apple Silicon, 3 threads, batch 1, n=256)
 
 | configuration | params | exec | valid | exact | forward passes | p50 ms | p95 ms | mean ms |
