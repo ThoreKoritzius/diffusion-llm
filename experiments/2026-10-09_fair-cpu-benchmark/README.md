@@ -75,3 +75,28 @@ At window 64, 35 queries flip from correct to wrong and 9 the other way. The mod
 so every prompt layer now sees inputs it never saw in training; the drop measures that mismatch, not the cost of
 the architecture. Whether training *with* the mask closes the gap is the first GPU experiment. Potential payoff:
 prompts average 109 tokens, so a cached prompt cuts each step from ~175 to ~66 processed tokens.
+
+## Follow-up 2: trained prompt isolation + prompt cache (H100 session, 2026-10-12)
+
+ModernBERT fine-tuned +2 epochs from the main checkpoint, with and without the one-way prompt mask (same data, LR
+2e-5, effective batch 128). GPU eval, n=256, window 64:
+
+| model | exec | valid | exact |
+|---|---:|---:|---:|
+| control (+2 epochs, full attention) | 0.582 | 0.660 | 0.301 |
+| isolated (+2 epochs, one-way mask) | 0.552 | 0.625 | 0.293 |
+
+Training recovers most of the inference-only drop (−13 → −3 points exec; one standard error ≈ 3.5 points).
+With the mask, the prompt's keys/values are cached (`src/prompt_cache.py`, exact to 1e-4 vs. the full masked
+forward; ONNX: one prefill graph + one window-only step graph). CPU, ONNX Runtime, 3 threads, n=256:
+
+| run | exec | valid | exact | p50 ms | p95 ms | mean ms |
+|---|---:|---:|---:|---:|---:|---:|
+| control, full forward, fp32 | 0.582 | 0.660 | 0.301 | 633 | 1479 | 667 |
+| isolated, **prompt cache**, fp32 | 0.552 | 0.625 | 0.293 | 431 | 842 | 472 |
+| control, full forward, int8 | 0.567 | 0.664 | 0.301 | 376 | 968 | 450 |
+| isolated, **prompt cache**, int8 | **0.577** | 0.641 | 0.289 | **256** | 703 | **283** |
+
+Prompt caching cuts CPU latency by 29% (fp32) / 37% (int8). Versus the production configuration at the start of
+this experiment (window 128, full forward, fp32: 863 ms, exec 0.547) the cached int8 model is **3.0× faster at
+equal or better accuracy**.

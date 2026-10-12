@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--int8", action="store_true", help="onnx: dynamic int8 weight quantization")
     ap.add_argument("--prompt-isolation", action="store_true",
                     help="diffusion/torch: prompt cannot attend to the SQL window (precondition for prompt caching)")
+    ap.add_argument("--prompt-cache", action="store_true",
+                    help="diffusion/torch, isolated checkpoint: compute the prompt once, run only the window per step")
     ap.add_argument("--verify", type=int, default=0,
                     help="if greedy SQL does not compile against the schema, try up to K sampled candidates")
     ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"], help="torch engines")
@@ -54,10 +56,10 @@ def main():
 
         backend = DiffusionBackend(args.model, args.engine, args.device, args.threads, args.window, args.steps,
                                    args.conf_stop or None, args.window_head, args.int8, args.prompt_isolation,
-                                   args.dtype)
+                                   args.dtype, args.prompt_cache)
         default_name = (f"diffusion-{args.engine}-w{args.window}-s{args.steps}-c{args.conf_stop}"
                         f"{'-whead' if args.window_head else ''}{'-int8' if args.int8 else ''}"
-                        f"{'-isolated' if backend.prompt_isolation else ''}")
+                        f"{'-isolated' if backend.prompt_isolation else ''}{'-cached' if args.prompt_cache else ''}")
     else:
         from bench.backends import ARBackend
 

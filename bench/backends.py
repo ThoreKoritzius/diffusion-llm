@@ -18,6 +18,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from denoising import denoise_steps  # noqa: E402
+from prompt_cache import PrefillGraph, PromptCache, StepGraph  # noqa: E402
 from prompt_isolation import is_isolated_checkpoint, isolate_prompt, set_prompt_len  # noqa: E402
 
 from bench.common import TAGS  # noqa: E402
@@ -61,7 +62,8 @@ class _WindowHead(torch.nn.Module):
 class DiffusionBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
                  window: int = 128, steps: int = 16, conf_stop: Optional[float] = 0.9, window_head: bool = False,
-                 int8: bool = False, prompt_isolation: bool = False, dtype: str = "float32"):
+                 int8: bool = False, prompt_isolation: bool = False, dtype: str = "float32",
+                 prompt_cache: bool = False):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -73,14 +75,23 @@ class DiffusionBackend:
         # checkpoints trained with prompt isolation must be run with it
         self.prompt_isolation = prompt_isolation or is_isolated_checkpoint(model.config)
         if self.prompt_isolation:
-            if engine != "torch":
-                raise ValueError("prompt isolation is implemented for the torch engine only")
-            isolate_prompt(model)
+            isolate_prompt(model)  # ONNX: only via the cached graphs (checked below)
+        if prompt_cache and not self.prompt_isolation:
+            raise ValueError("--prompt-cache needs a prompt-isolated checkpoint")
+        self.cache = None
+        self.onnx_cache = None
         if engine == "torch":
             self.device = torch.device(device)
             self.model = model.to(self.device, dtype=getattr(torch, dtype))
+            if prompt_cache:
+                self.cache = PromptCache(self.model)
             self._forward = self._torch_forward
+        elif engine == "onnx" and prompt_cache:
+            self.device = torch.device("cpu")
+            self.onnx_cache = self._export_cached(model, model_dir, int8, threads)
         elif engine == "onnx":
+            if self.prompt_isolation:
+                raise ValueError("isolated checkpoints on ONNX need --prompt-cache (full graph would bake the mask)")
             self.device = torch.device("cpu")
             self.session = ort_session(self._export(model, model_dir, int8), threads)
             self._forward = self._onnx_forward
@@ -115,6 +126,36 @@ class DiffusionBackend:
             path = qpath
         return path
 
+    def _export_cached(self, model, model_dir: str, int8: bool, threads: int):
+        """Two ONNX graphs: prompt -> per-layer k/v, and window + k/v -> window logits."""
+        tag = os.path.basename(os.path.normpath(model_dir))
+        paths = [os.path.join(ONNX_CACHE, f"{tag}-prefill.onnx"), os.path.join(ONNX_CACHE, f"{tag}-step.onnx")]
+        cache = PromptCache(model)
+        names = [f"{t}{i}" for i in range(len(model.model.layers)) for t in ("k", "v")]
+        if not all(os.path.exists(p) for p in paths):
+            os.makedirs(ONNX_CACHE, exist_ok=True)
+            ids, lo = self.encode("How many rows are there?", "CREATE TABLE t (id INT);")
+            x = torch.tensor([ids])
+            dyn = {n: {2: "prompt"} for n in names}
+            with torch.inference_mode():
+                torch.onnx.export(PrefillGraph(cache), (x[:, :lo],), paths[0], input_names=["prompt_ids"],
+                                  output_names=names, dynamic_axes={"prompt_ids": {1: "prompt"}, **dyn},
+                                  opset_version=17, dynamo=False)
+                flat = tuple(t for kv in cache.prefill_kv(x[:, :lo]) for t in kv)
+                torch.onnx.export(StepGraph(cache), (x[:, lo:], *flat), paths[1], input_names=["window_ids", *names],
+                                  output_names=["logits"], dynamic_axes={"window_ids": {1: "window"}, **dyn,
+                                                                         "logits": {1: "window"}},
+                                  opset_version=17, dynamo=False)
+        if int8:
+            from onnxruntime.quantization import QuantType, quantize_dynamic
+
+            qpaths = [os.path.splitext(p)[0] + ".int8.onnx" for p in paths]
+            for src, dst in zip(paths, qpaths):
+                if not os.path.exists(dst):
+                    quantize_dynamic(src, dst, weight_type=QuantType.QInt8)
+            paths = qpaths
+        return {"prefill": ort_session(paths[0], threads), "step": ort_session(paths[1], threads), "names": names}
+
     def _torch_forward(self, input_ids, attention_mask):
         return self.model(input_ids=input_ids, attention_mask=attention_mask)
 
@@ -147,9 +188,16 @@ class DiffusionBackend:
         ids, lo = self.encode(prompt, context)
         self._lo = lo
         self.prompt_tokens = lo
-        if self.prompt_isolation:
+        if self.prompt_isolation and self.onnx_cache is None:
             set_prompt_len(self.model, lo)
         ids = torch.tensor([ids], device=self.device)
+        if self.cache is not None:  # prompt runs once; each step only processes the window (+ closing tags)
+            self.cache.prefill(ids[:, :lo])
+            self._full = torch.zeros(1, ids.shape[1], self.model.config.vocab_size, device=self.device)
+        if self.onnx_cache is not None:
+            kv = self.onnx_cache["prefill"].run(None, {"prompt_ids": ids[:, :lo].numpy()})
+            self._onnx_kv = dict(zip(self.onnx_cache["names"], kv))
+            self._full = torch.zeros(1, ids.shape[1], len(self.tok))
         attn = torch.ones_like(ids)
         self._calls = 0
         for _ in denoise_steps(
@@ -164,6 +212,14 @@ class DiffusionBackend:
 
     def _counted_forward(self, input_ids, attention_mask):
         self._calls += 1
+        if self.cache is not None:
+            self._full[:, self._lo:] = self.cache.step(input_ids[:, self._lo:])
+            return SimpleNamespace(logits=self._full)
+        if self.onnx_cache is not None:
+            window = input_ids[:, self._lo:].numpy()
+            logits = self.onnx_cache["step"].run(None, {"window_ids": window, **self._onnx_kv})[0]
+            self._full[:, self._lo:, : logits.shape[-1]] = torch.from_numpy(logits)
+            return SimpleNamespace(logits=self._full)
         return self._forward(input_ids, attention_mask)
 
 
