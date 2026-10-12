@@ -239,9 +239,8 @@ class ARBackend:
 
             self.device = torch.device(device)
             self.model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=getattr(torch, dtype)).eval().to(self.device)
-            if compile:  # static KV cache + compiled decode step: HF's fastest generate path on GPU
+            if compile:  # static KV cache; transformers then compiles the decode step itself (CUDA graphs)
                 self.model.generation_config.cache_implementation = "static"
-                self.model.forward = torch.compile(self.model.forward, mode="reduce-overhead", fullgraph=False)
         elif engine == "onnx":
             from optimum.onnxruntime import ORTModelForCausalLM
 
