@@ -17,7 +17,8 @@ from make_headline_chart import COLOR, GRID, HERE, INK, INK_2, MUTED, SURFACE, l
 
 HERO_AR, HERO_DIFF = "ettin150-ar-10ep-vllm", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs"
 # (label, arm, gpu summary): the matched Ettin-150M pair, emphasised
-HERO = [("Autoregressive", "ar", HERO_AR), ("Diffusion", "diffusion", HERO_DIFF)]
+HERO = [("Autoregressive", "Ettin-150M decoder", "ar", HERO_AR),
+        ("Diffusion", "Ettin-150M encoder", "diffusion", HERO_DIFF)]
 # (label, arm, gpu summary, label offset (dx, dy, ha, va)): other models, for context
 CONTEXT = [
     ("Qwen2.5-0.5B AR · 3× larger", "ar", "sql-ar-qwen25-coder-0.5b-ar-vllm", (0, 12, "center", "bottom")),
@@ -41,7 +42,7 @@ def main():
     ax.set_facecolor(SURFACE)
     ax.set_xscale("log")
     ax.set_xlim(110, 17)  # reversed: faster to the right, so up-and-right is better
-    ax.set_ylim(46, 77)
+    ax.set_ylim(44, 77)
 
     (xa, ya), (xd, yd) = point(HERO_AR), point(HERO_DIFF)
 
@@ -59,13 +60,13 @@ def main():
     ax.annotate(f"{yd - ya:+.0f} pts accuracy", mid, xytext=(0, -44), textcoords="offset points", ha="center",
                 va="top", fontsize=11, color=INK_2)
 
-    for label, arm, name in HERO:
+    for label, model, arm, name in HERO:
         x, y = point(name)
         ax.scatter(x, y, s=380, color=COLOR[arm], edgecolor=SURFACE, linewidth=3, zorder=4)
         ax.annotate(label, (x, y), xytext=(0, -20), textcoords="offset points", ha="center", va="top",
                     fontsize=12, fontweight="bold", color=INK)
-        ax.annotate(f"{x:.0f} ms · {y:.0f}%", (x, y), xytext=(0, -38), textcoords="offset points", ha="center",
-                    va="top", fontsize=10.5, color=INK_2)
+        ax.annotate(f"{model}\n{x:.0f} ms · {y:.0f}%", (x, y), xytext=(0, -38), textcoords="offset points",
+                    ha="center", va="top", fontsize=10, color=INK_2, linespacing=1.4)
 
     ax.set_xticks([100, 70, 50, 30, 20])
     ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g} ms"))
