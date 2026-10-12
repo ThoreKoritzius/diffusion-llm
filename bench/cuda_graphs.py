@@ -27,12 +27,30 @@ def device_masks(enc):
 
 
 class GraphRunner:
-    def __init__(self, model, isolated: bool, bucket: int = 64):
-        self.model, self.isolated, self.bucket = model, isolated, bucket
+    """compiled=False: manually captured CUDA graph per padded length. compiled=True: torch.compile "reduce-overhead"
+    (inductor kernel fusion + CUDA graphs), the same tooling ARGraphDecoder uses; all lengths are pre-compiled."""
+
+    def __init__(self, model, isolated: bool, bucket: int = 64, compiled: bool = False, max_len: int = 512):
+        self.model, self.isolated, self.bucket, self.compiled = model, isolated, bucket, compiled
         self.enc = model.model
         model.config.reference_compile = False
         device_masks(self.enc)
         self.graphs = {}
+        if compiled:
+            dev = next(model.parameters()).device
+            self.fn = torch.compile(self._fwd, mode="reduce-overhead", dynamic=False)
+            for L in range(bucket, max_len + 1, bucket):  # compile every padded length up front (not timed)
+                ids = torch.zeros(1, L, dtype=torch.long, device=dev)
+                attn = torch.ones(1, L, dtype=torch.long, device=dev)
+                lens = torch.full((1,), 8, dtype=torch.long, device=dev)
+                for _ in range(3):
+                    torch.compiler.cudagraph_mark_step_begin()
+                    self.fn(ids, attn, lens)
+                self.graphs[L] = (None, ids, attn, lens, None)
+
+    def _fwd(self, ids, attn, lens):
+        self.enc._prompt_len_t = lens if self.isolated else None
+        return self.model(input_ids=ids, attention_mask=attn).logits
 
     def _capture(self, L):
         dev = next(self.model.parameters()).device
@@ -65,5 +83,50 @@ class GraphRunner:
     def __call__(self, input_ids, attention_mask=None):
         graph, ids, out, n = self._active
         ids[:, :n].copy_(input_ids)
+        if self.compiled:
+            torch.compiler.cudagraph_mark_step_begin()
+            _, _, attn, lens, _ = self.graphs[ids.shape[1]]
+            return self.fn(ids, attn, lens)[:, :n].clone()
         graph.replay()
         return out[:, :n]
+
+
+class ARGraphDecoder:
+    """Greedy AR decoding at batch 1 with a static KV cache; each single-token decode step runs as a captured CUDA
+    graph (torch.compile "reduce-overhead" with fixed shapes). Same tooling as GraphRunner for diffusion, so the
+    two arms are compared at equal implementation effort. With graphs=False it runs eagerly (CPU correctness check)."""
+
+    def __init__(self, model, max_len: int = 700, graphs: bool = True):
+        from transformers import StaticCache
+
+        self.model, self.graphs = model, graphs
+        self.dev = next(model.parameters()).device
+        self.cache = StaticCache(config=model.config, max_batch_size=1, max_cache_len=max_len, device=self.dev,
+                                 dtype=model.dtype)
+        self.tok = torch.zeros(1, 1, dtype=torch.long, device=self.dev)
+        self.pos = torch.zeros(1, dtype=torch.long, device=self.dev)
+        self.step = torch.compile(self._step, mode="reduce-overhead", fullgraph=False) if graphs else self._step
+
+    def _step(self, tok, pos):
+        return self.model(input_ids=tok, past_key_values=self.cache, cache_position=pos, use_cache=True).logits[:, -1]
+
+    @torch.no_grad()
+    def generate(self, ids, max_new_tokens: int, stop_ids):
+        self.cache.reset()
+        P = len(ids)
+        x = torch.tensor([ids], device=self.dev)
+        logits = self.model(input_ids=x, past_key_values=self.cache, cache_position=torch.arange(P, device=self.dev),
+                            use_cache=True).logits[:, -1]
+        out = []
+        tok = logits.argmax(-1)
+        for i in range(max_new_tokens):
+            t = int(tok)
+            out.append(t)
+            if t in stop_ids:
+                break
+            self.tok.copy_(tok.view(1, 1))
+            self.pos.fill_(P + i)
+            if self.graphs:
+                torch.compiler.cudagraph_mark_step_begin()
+            tok = self.step(self.tok, self.pos).clone().argmax(-1)
+        return out

@@ -45,7 +45,9 @@ def main():
     ap.add_argument("--prompt-cache", action="store_true",
                     help="diffusion/torch, isolated checkpoint: compute the prompt once, run only the window per step")
     ap.add_argument("--cuda-graphs", action="store_true",
-                    help="diffusion/torch on CUDA: replay a captured CUDA graph per denoising step")
+                    help="torch on CUDA: replay a captured CUDA graph per denoising step (diffusion) or decode step (AR)")
+    ap.add_argument("--ar-static-eager", action="store_true",
+                    help="ar/torch: same static-cache decode loop as --cuda-graphs but eager (CPU correctness check)")
     ap.add_argument("--verify", type=int, default=0,
                     help="if greedy SQL does not compile against the schema, try up to K sampled candidates")
     ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"], help="torch engines")
@@ -66,7 +68,8 @@ def main():
         from bench.backends import ARBackend
 
         backend = ARBackend(args.model, args.engine, args.device, args.threads, int8=args.int8, dtype=args.dtype,
-                            compile=args.ar_compile)
+                            compile=args.ar_compile, cuda_graphs=args.cuda_graphs,
+                            eager_static=args.ar_static_eager)
         default_name = f"ar-{args.engine}{'-int8' if args.int8 else ''}{'-compiled' if args.ar_compile else ''}"
     if args.dtype != "float32" and args.engine == "torch":
         default_name += f"-{args.dtype}"

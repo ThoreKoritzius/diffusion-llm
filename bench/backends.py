@@ -89,7 +89,7 @@ class DiffusionBackend:
         if cuda_graphs:
             from bench.cuda_graphs import GraphRunner
 
-            self.graphs = GraphRunner(self.model, self.prompt_isolation)
+            self.graphs = GraphRunner(self.model, self.prompt_isolation, compiled=os.environ.get("DIFF_COMPILE") == "1")
             self._forward = self._torch_forward
         elif engine == "onnx" and prompt_cache:
             self.device = torch.device("cpu")
@@ -234,7 +234,8 @@ class DiffusionBackend:
 
 class ARBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
-                 max_new_tokens: int = 130, int8: bool = False, dtype: str = "float32", compile: bool = False):
+                 max_new_tokens: int = 130, int8: bool = False, dtype: str = "float32", compile: bool = False,
+                 cuda_graphs: bool = False, eager_static: bool = False):
         from transformers import AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -250,6 +251,11 @@ class ARBackend:
             self.model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=getattr(torch, dtype)).eval().to(self.device)
             if compile:  # static KV cache; transformers then compiles the decode step itself (CUDA graphs)
                 self.model.generation_config.cache_implementation = "static"
+            self.graph_decoder = None
+            if cuda_graphs or eager_static:  # same-effort harness as diffusion's CUDA graphs
+                from bench.cuda_graphs import ARGraphDecoder
+
+                self.graph_decoder = ARGraphDecoder(self.model, graphs=cuda_graphs)
         elif engine == "onnx":
             from optimum.onnxruntime import ORTModelForCausalLM
 
@@ -332,6 +338,8 @@ class ARBackend:
                 params.temperature = 0.7
             out = self.model.generate([{"prompt_token_ids": ids}], params, use_tqdm=False)[0].outputs[0]
             gen = list(out.token_ids)
+        elif getattr(self, "graph_decoder", None) is not None and not sample:
+            gen = self.graph_decoder.generate(ids, self.max_new_tokens, self.stop_ids)
         else:
             x = torch.tensor([ids], device=self.device)
             out = self.model.generate(x, attention_mask=torch.ones_like(x), max_new_tokens=self.max_new_tokens,
