@@ -53,6 +53,13 @@ SQL_WINDOW = 128
 TRAIN_SIZE = int(os.environ.get("TRAIN_SIZE", "100000"))
 # Prompt tokens cannot attend to the SQL window (the window still sees the prompt): makes prompt states cacheable.
 PROMPT_ISOLATION = os.environ.get("PROMPT_ISOLATION", "0") == "1"
+# Fewer-steps training (dParallel-style, simplified):
+# - TRAJECTORY_MASKING: mask the SQL positions the model itself is least confident about (one no-grad pass on the
+#   fully masked window) instead of random ones, so training inputs look like confidence-decoding states.
+# - CERTAINTY_WEIGHT > 0: entropy penalty on masked positions already predicted correctly, pushing them over the
+#   early-stop threshold sooner (more tokens committed per step -> fewer steps).
+TRAJECTORY_MASKING = os.environ.get("TRAJECTORY_MASKING", "0") == "1"
+CERTAINTY_WEIGHT = float(os.environ.get("CERTAINTY_WEIGHT", "0"))
 VAL_SIZE = int(os.environ.get("VAL_SIZE", "500"))
 T_EPS = 1e-3          # lower bound for mask ratio t
 FILTER_JOINS = False
@@ -90,6 +97,8 @@ wandb.init(project="sql-diffusion", name=RUN_NAME, config={
     "model": MODEL_NAME,
     "init_checkpoint": INIT_CHECKPOINT,
     "prompt_isolation": PROMPT_ISOLATION,
+    "trajectory_masking": TRAJECTORY_MASKING,
+    "certainty_weight": CERTAINTY_WEIGHT,
     "epochs": NUM_EPOCHS,
     "batch_size": BATCH_SIZE,
     "max_len": MAX_LEN,
@@ -185,6 +194,7 @@ def make_collator(augment: bool):
 
         input_ids = torch.tensor([r["input_ids"] for r in rows], dtype=torch.long)
         attention = torch.tensor([r["attention_mask"] for r in rows], dtype=torch.long)
+        clean_ids = input_ids.clone()
         labels = torch.full_like(input_ids, -100)
         B = input_ids.shape[0]
 
@@ -205,6 +215,7 @@ def make_collator(augment: bool):
             "labels": labels,
             "loss_weights": 1.0 / t,
             "prompt_len": torch.tensor([r["sql_start"] for r in rows], dtype=torch.long),
+            "clean_ids": clean_ids,
         }
     return collate
 
@@ -219,8 +230,12 @@ class DiffusionTrainer(Trainer):
         weights = inputs.pop("loss_weights")
         labels = inputs.pop("labels")
         prompt_len = inputs.pop("prompt_len")
+        clean_ids = inputs.pop("clean_ids")
         if PROMPT_ISOLATION:
             set_prompt_len(model, prompt_len)
+        if TRAJECTORY_MASKING and model.training:
+            inputs["input_ids"], labels = self._trajectory_mask(model, clean_ids, inputs["attention_mask"],
+                                                                prompt_len, 1.0 / weights)
         outputs = model(**inputs)
         logits = outputs.logits
         B, L, V = logits.shape
@@ -231,7 +246,34 @@ class DiffusionTrainer(Trainer):
         # LLaDA objective: (1/t) * sum of masked-token CE, normalized by span length
         per_example = ce.sum(dim=1) * weights / SQL_WINDOW
         loss = per_example.mean()
+        if CERTAINTY_WEIGHT > 0 and model.training:
+            masked = labels != -100
+            lg = logits[masked].float()
+            correct = lg.argmax(-1) == labels[masked]
+            if correct.any():
+                logp = lg[correct].log_softmax(-1)
+                entropy = -(logp.exp() * logp).sum(-1)
+                loss = loss + CERTAINTY_WEIGHT * entropy.mean()
         return (loss, outputs) if return_outputs else loss
+
+    @torch.no_grad()
+    def _trajectory_mask(self, model, clean_ids, attention, starts, t):
+        """Mask the round(t * window) SQL positions with the lowest model confidence on the fully masked window."""
+        full = clean_ids.clone()
+        B = full.shape[0]
+        win = starts[:, None] + torch.arange(SQL_WINDOW, device=full.device)[None, :]  # [B, W]
+        rows = torch.arange(B, device=full.device)[:, None]
+        full[rows, win] = MASK_ID
+        logits = model(input_ids=full, attention_mask=attention).logits[rows, win].float()  # [B, W, V]
+        conf = logits.max(-1).values - logits.logsumexp(-1)                                  # log p(top token)
+        k = (t.to(conf.device) * SQL_WINDOW).round().clamp(1, SQL_WINDOW).long()             # [B]
+        rank = conf.argsort(dim=1).argsort(dim=1)                                           # 0 = least confident
+        to_mask = rank < k[:, None]
+        input_ids, labels = clean_ids.clone(), torch.full_like(clean_ids, -100)
+        sel_rows, sel_win = rows.expand_as(win)[to_mask], win[to_mask]
+        labels[sel_rows, sel_win] = clean_ids[sel_rows, sel_win]
+        input_ids[sel_rows, sel_win] = MASK_ID
+        return input_ids, labels
 
     def get_eval_dataloader(self, eval_dataset=None):
         original = self.data_collator

@@ -11,22 +11,18 @@ B() { local py=$1 name=$2; shift 2
 P=.venv-gpu/bin/python; V=.venv-vllm/bin/python
 have() { [ -f "checkpoints/$1/model.safetensors" ]; }
 
-# diffusion: fp32 + bf16, full forward; prompt-isolated checkpoints additionally with the prompt cache
+# Trimmed to what matters (GPU time is billed): bf16 throughout; diffusion full vs. prompt cache; AR compiled + vLLM.
 for c in diffusion-sql-modernbert modernbert-ft-control ettin150-diffusion; do
-  have $c || continue
-  B $P "$c-fp32" --arm diffusion --model checkpoints/$c --window 64
-  B $P "$c-bf16" --arm diffusion --model checkpoints/$c --window 64 --dtype bfloat16
+  have $c && B $P "$c-bf16" --arm diffusion --model checkpoints/$c --window 64 --dtype bfloat16
 done
-for c in modernbert-isolated ettin150-diffusion-iso-10ep; do
+for c in modernbert-isolated modernbert-isolated-distilled ettin150-diffusion-iso-10ep ettin150-diffusion-iso-10ep-distilled; do
   have $c || continue
-  B $P "$c-fp32" --arm diffusion --model checkpoints/$c --window 64
-  B $P "$c-fp32-cached" --arm diffusion --model checkpoints/$c --window 64 --prompt-cache
+  B $P "$c-bf16" --arm diffusion --model checkpoints/$c --window 64 --dtype bfloat16
   B $P "$c-bf16-cached" --arm diffusion --model checkpoints/$c --window 64 --prompt-cache --dtype bfloat16
 done
-# AR: HF eager fp32, bf16 + static-cache torch.compile, vLLM (best-in-class serving)
+have sql-ar-qwen25-coder-0.5b-ar && B $P "sql-ar-qwen25-coder-0.5b-ar-fp32-eager" --arm ar --model checkpoints/sql-ar-qwen25-coder-0.5b-ar
 for c in ettin150-ar ettin150-ar-10ep sql-ar-qwen25-coder-0.5b-ar; do
   have $c || continue
-  B $P "$c-fp32" --arm ar --model checkpoints/$c
   B $P "$c-bf16-compiled" --arm ar --model checkpoints/$c --dtype bfloat16 --ar-compile
   B $V "$c-vllm" --arm ar --engine vllm --model checkpoints/$c
 done
