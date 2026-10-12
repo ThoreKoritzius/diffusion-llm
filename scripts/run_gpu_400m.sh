@@ -8,6 +8,7 @@ export HF_HOME="${HF_HOME:-$REPO_DIR/.hf_cache}" TOKENIZERS_PARALLELISM=false PY
 export DATALOADER_WORKERS="${DATALOADER_WORKERS:-8}"
 log() { echo "[$(date +%H:%M:%S)] $*" >> "$L"; }
 [ -n "${WAIT_FOR:-}" ] && while tmux has-session -t "$WAIT_FOR" 2>/dev/null; do sleep 20; done
+while [ -f "$HOME/hold_400m" ]; do sleep 15; done   # manual hold: rm ~/hold_400m to start
 P="$REPO_DIR/.venv-gpu/bin/python"
 train() { local out=$1; shift
   [ -f "checkpoints/$out/model.safetensors" ] && return 0
