@@ -15,10 +15,13 @@ same 256 gretelai test rows (`bench/`, exec accuracy over the 201 rows whose gol
    standard error) after 2 epochs; the cache then cuts CPU latency by 29–37% with identical outputs.
 4. **Step distillation** (trajectory masking + certainty forcing, `src/train.py`) cuts denoising steps 18–23%
    (9.5 → 7.4) at equal or better quality.
-5. **GPU (batch 1):** diffusion with CUDA graphs runs in **23–30 ms** per query. The best AR setup, Qwen2.5-0.5B in
-   **vLLM, takes 63 ms**; it is 3.3× larger and 13 points more accurate. The matched-size Ettin AR model has no vLLM
-   support, so there is no optimized matched-size AR GPU number (Hugging Face compiled: 261 ms).
-6. **CPU (3 threads):** distilled, cached, int8 diffusion runs in **216 ms**, vs. **304 ms** for Qwen2.5-0.5B AR in
+5. **GPU (batch 1), matched size, both optimized:** Ettin-150M AR in **vLLM takes 67 ms** per query (exec 0.537);
+   Ettin-150M diffusion with CUDA graphs takes **25 ms** (exec 0.557): **2.7× faster, +2 points exec, +5 points
+   exact**. vLLM runs the Ettin decoder through `vllm_plugin/` (upstreamed as vllm-project/vllm#61246). The 3.3×
+   larger Qwen2.5-0.5B AR in vLLM takes 63 ms at exec 0.721.
+6. **Ettin-400M diffusion** (10 epochs + distillation): exec **0.592** (+3.5 over 150M, about one standard error),
+   exact 0.316, at **31 ms** on the GPU: 2.7× the parameters for about 25% more latency.
+7. **CPU (3 threads):** distilled, cached, int8 diffusion runs in **216 ms**, vs. **304 ms** for Qwen2.5-0.5B AR in
    llama.cpp Q8_0, again at −13 points exec. Versus the playground's configuration at the start of this work
    (863 ms, exec 0.547) it is **4.0× faster and 3.5 points more accurate**.
 
@@ -54,8 +57,12 @@ Training curves: W&B project `sql-diffusion`.
 | **AR** Qwen2.5-0.5B · vLLM | 494M | 0.721 | 0.805 | 0.363 | 30.1 | 50 | 146 | 63 |
 | **AR** Qwen2.5-0.5B · HF static cache + compile, bf16 | 494M | 0.726 | 0.809 | 0.359 | 30.1 | 152 | 409 | 285 |
 | **AR** Qwen2.5-0.5B · HF eager, fp32 | 494M | 0.716 | 0.805 | 0.355 | 29.9 | 264 | 717 | 320 |
+| **AR** Ettin-150M, 10 ep · vLLM (`vllm_plugin/`) | 150M | 0.537 | 0.738 | 0.254 | 32.5 | 56 | 145 | 67 |
+| **AR** SmolLM2-135M · vLLM | 135M | 0.418 | 0.711 | 0.191 | 38.1 | 60 | 177 | 74 |
 | **AR** Ettin-150M, 10 ep · HF static cache + compile, bf16 | 150M | 0.542 | 0.742 | 0.254 | 33.3 | 197 | 517 | 261 |
 | **AR** Ettin-150M, 3 ep · HF static cache + compile, bf16 | 150M | 0.517 | 0.730 | 0.246 | 32.6 | 192 | 501 | 343 |
+| **Diffusion** Ettin-400M, 10 ep, distilled · CUDA graphs, bf16 | 396M | 0.592 | 0.680 | 0.316 | 7.3 | 22 | 68 | 31 |
+| **Diffusion** Ettin-400M, 10 ep · CUDA graphs, bf16 | 396M | 0.597 | 0.660 | 0.324 | 8.9 | 30 | 68 | 38 |
 | **Diffusion** ModernBERT, distilled · CUDA graphs, bf16 | 150M | 0.592 | 0.688 | 0.297 | 7.4 | 17 | 49 | 23 |
 | **Diffusion** ModernBERT, distilled · PyTorch eager + prompt cache, bf16 | 150M | 0.592 | 0.691 | 0.301 | 7.4 | 98 | 245 | 122 |
 | **Diffusion** Ettin-150M, 10 ep, distilled · CUDA graphs, bf16 | 150M | 0.557 | 0.648 | 0.305 | 7.8 | 17 | 49 | 25 |
@@ -94,9 +101,10 @@ Prompt isolation (trained, GPU eval): control 0.582 exec / isolated 0.552 exec (
 - **Why diffusion keeps improving.** Each epoch shows a diffusion model every example under a new random mask and mask
   ratio, so repeated data keeps yielding new prediction tasks; AR sees each example in the same left-to-right order.
   This matches published findings that masked diffusion benefits from many more epochs on limited data.
-- **No optimized matched-size AR engine.** vLLM and llama.cpp don't support the Ettin decoder
-  (`modernbert-decoder`), so on GPU and CPU the fastest AR numbers come from the 3.3× larger Qwen2.5-0.5B. A
-  150M AR model in vLLM / llama.cpp would very likely be faster than these Qwen numbers; it was not measured.
+- **Matched-size AR engines.** On GPU, Ettin AR runs in vLLM through `vllm_plugin/` (outputs match Hugging Face;
+  exec 0.537 vs 0.542). On CPU, llama.cpp does not support the Ettin decoder, so the fastest CPU AR number is still
+  the 3.3× larger Qwen2.5-0.5B. Diffusion runs on hand-written CUDA graphs: no serving engine exists for masked
+  diffusion, so the GPU comparison still favours AR's tooling.
 - **CUDA-graph p95 (49 ms)** is dominated by the first query of each new padded length, which captures a graph;
   p50 is representative of steady state.
 - **Distillation confound:** the distilled models also got one more epoch, which may explain part of the
