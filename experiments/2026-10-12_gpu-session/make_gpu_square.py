@@ -16,17 +16,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from make_headline_chart import COLOR, GRID, HERE, INK, INK_2, MUTED, SURFACE, load  # noqa: E402
 
-# (label, arm, square marker = larger reference model, gpu summary, label offset (dx, dy, ha))
+# (label, arm, marker, gpu summary, label offset (dx, dy, ha)); marker: "o" model on its best engine,
+# "s" larger reference model, "hollow" not on an optimized engine (no vLLM support)
 POINTS = [
-    ("Qwen2.5-0.5B AR · vLLM\n3.3× larger", "ar", True, "sql-ar-qwen25-coder-0.5b-ar-vllm", (14, 0, "left")),
-    ("SmolLM2-135M AR · vLLM", "ar", False, "smollm135-ar-vllm", (0, 14, "center")),
-    ("ModernBERT-150M diffusion", "diffusion", False, "modernbert-isolated-distilled-bf16-cudagraphs", (0, 14, "center")),
-    ("Ettin-150M diffusion", "diffusion", False, "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs",
-     (0, -16, "center")),
+    ("Qwen2.5-0.5B AR · vLLM\n3.3× larger", "ar", "s", "sql-ar-qwen25-coder-0.5b-ar-vllm", (14, 0, "left")),
+    ("SmolLM2-135M AR · vLLM", "ar", "o", "smollm135-ar-vllm", (0, -16, "center")),
+    ("Ettin-150M AR · torch.compile\n(no vLLM support)", "ar", "hollow", "ettin150-ar-10ep-bf16-compiled-graphs",
+     (0, 16, "center")),
+    ("ModernBERT-150M diffusion", "diffusion", "o", "modernbert-isolated-distilled-bf16-cudagraphs", (0, 14, "center")),
+    ("Ettin-150M diffusion", "diffusion", "o", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs",
+     (14, -2, "left")),
 ]
-SPEED_PAIR = ("smollm135-ar-vllm", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs")
-AR_REFERENCE = ("ettin150-ar-10ep-bf16-compiled", "Ettin-150M AR accuracy (same pretraining and data\n"
-                "as Ettin diffusion; no vLLM support, so no fair speed)")
+# (AR, diffusion, label, label offset (dx, dy, ha))
+ARROWS = [
+    ("ettin150-ar-10ep-bf16-compiled-graphs", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs",
+     "same size, same pretraining\n{speed:.0f}× faster* · {acc:+.1f} pts", (0, 10, "center")),
+    ("smollm135-ar-vllm", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs",
+     "same size, both on best engine\n{speed:.0f}× faster", (16, -4, "left")),
+]
 
 
 def main():
@@ -34,34 +41,32 @@ def main():
     fig, ax = plt.subplots(figsize=(7.2, 7.2), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
     ax.set_xscale("log")
-    ax.set_xlim(160, 12)  # reversed: faster to the right, so up-and-right is better
-    ax.set_ylim(30, 80)
+    ax.set_xlim(260, 12)  # reversed: faster to the right, so up-and-right is better
+    ax.set_ylim(34, 80)
 
-    ref = load("gpu", AR_REFERENCE[0])
-    ax.axhline(ref["exec"] * 100, color=COLOR["ar"], linewidth=1.4, linestyle=(0, (4, 3)), zorder=2)
-    ax.text(150, ref["exec"] * 100 + 0.8, AR_REFERENCE[1] + f": {ref['exec'] * 100:.0f}%", fontsize=8.3,
-            color=INK_2, va="bottom", linespacing=1.3)
+    for ar_name, diff_name, text, (ldx, ldy, lha) in ARROWS:
+        a, d = load("gpu", ar_name), load("gpu", diff_name)
+        (xa, ya), (xd, yd) = (a["lat_mean_ms"], a["exec"] * 100), (d["lat_mean_ms"], d["exec"] * 100)
+        ax.annotate("", xy=(xd, yd), xytext=(xa, ya), zorder=2,
+                    arrowprops=dict(arrowstyle="-|>", color=INK_2, lw=1.5, shrinkA=11, shrinkB=11, mutation_scale=14))
+        ax.annotate(text.format(speed=xa / xd, acc=yd - ya), ((xa * xd) ** 0.5, (ya + yd) / 2), xytext=(ldx, ldy),
+                    textcoords="offset points", ha=lha, va="bottom" if ldy > 0 else "top", fontsize=9.5, color=INK,
+                    fontweight="bold", linespacing=1.35,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor=SURFACE, edgecolor="none"))
 
-    for label, arm, big, name, (dx, dy, ha) in POINTS:
+    for label, arm, marker, name, (dx, dy, ha) in POINTS:
         s = load("gpu", name)
         x, y = s["lat_mean_ms"], s["exec"] * 100
-        ax.scatter(x, y, s=260 if big else 200, marker="s" if big else "o", color=COLOR[arm], edgecolor=SURFACE,
-                   linewidth=2.5, zorder=4)
+        if marker == "hollow":
+            ax.scatter(x, y, s=200, marker="o", facecolor=SURFACE, edgecolor=COLOR[arm], linewidth=2.5, zorder=4)
+        else:
+            ax.scatter(x, y, s=260 if marker == "s" else 200, marker=marker, color=COLOR[arm], edgecolor=SURFACE,
+                       linewidth=2.5, zorder=4)
         ax.annotate(f"{label}\n{x:.0f} ms · {y:.0f}%", (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
                     va="center" if dy == 0 else ("bottom" if dy > 0 else "top"), fontsize=9.5, color=INK_2,
                     linespacing=1.3)
 
-    a, d = (load("gpu", n) for n in SPEED_PAIR)
-    yb = 33.5
-    ax.annotate("", xy=(d["lat_mean_ms"], yb), xytext=(a["lat_mean_ms"], yb),
-                arrowprops=dict(arrowstyle="-|>", color=INK, lw=1.5, mutation_scale=14, shrinkA=0, shrinkB=0))
-    for x in (a["lat_mean_ms"], d["lat_mean_ms"]):
-        ax.plot([x, x], [yb - 0.9, yb + 0.9], color=INK, lw=1.5)
-    ax.text((a["lat_mean_ms"] * d["lat_mean_ms"]) ** 0.5, yb + 1.3,
-            f"{a['lat_mean_ms'] / d['lat_mean_ms']:.0f}× faster at ~150M parameters",
-            ha="center", va="bottom", fontsize=11, color=INK, fontweight="bold")
-
-    ax.set_xticks([150, 100, 50, 30, 20])
+    ax.set_xticks([200, 100, 50, 30, 20])
     ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g} ms"))
     ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
@@ -77,13 +82,16 @@ def main():
     handles = [plt.Line2D([], [], marker="o", linestyle="", markersize=10, color=COLOR["diffusion"],
                           label="diffusion · hand-written CUDA graphs"),
                plt.Line2D([], [], marker="o", linestyle="", markersize=10, color=COLOR["ar"],
-                          label="autoregressive (AR) · vLLM")]
+                          label="autoregressive (AR) · vLLM"),
+               plt.Line2D([], [], marker="o", linestyle="", markersize=10, markerfacecolor=SURFACE,
+                          markeredgecolor=COLOR["ar"], markeredgewidth=2, label="AR · no vLLM support (torch.compile)")]
     ax.legend(handles=handles, loc="upper left", frameon=False, fontsize=9.5, labelcolor=INK_2)
 
-    fig.suptitle("Diffusion is ~3× faster than\nvLLM-served AR models", x=0.04, y=0.975, ha="left", va="top",
+    fig.suptitle("Diffusion vs. autoregressive (AR)\nat ~150M parameters", x=0.04, y=0.975, ha="left", va="top",
                  fontsize=17, fontweight="bold", color=INK, linespacing=1.15)
-    fig.text(0.04, 0.855, "Text-to-SQL · same 256 test queries · each model on its best available engine.\n"
-             "AR gets a production engine (vLLM); diffusion has none yet, so it is the underdog here.",
+    fig.text(0.04, 0.855, "Text-to-SQL · same 256 test queries · H100, batch 1 · AR on vLLM where supported;\n"
+             "diffusion on hand-written CUDA graphs. *Ettin AR has no vLLM support, so its speed is not\n"
+             "fully optimized; the SmolLM2 arrow is the fair speed comparison.",
              fontsize=9, color=MUTED, va="top", linespacing=1.4)
     fig.subplots_adjust(left=0.11, right=0.97, bottom=0.1, top=0.765)
     out = os.path.join(HERE, "plots", "gpu_square.png")
