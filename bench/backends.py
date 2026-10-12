@@ -63,7 +63,7 @@ class DiffusionBackend:
     def __init__(self, model_dir: str, engine: str = "torch", device: str = "cpu", threads: int = 4,
                  window: int = 128, steps: int = 16, conf_stop: Optional[float] = 0.9, window_head: bool = False,
                  int8: bool = False, prompt_isolation: bool = False, dtype: str = "float32",
-                 prompt_cache: bool = False):
+                 prompt_cache: bool = False, cuda_graphs: bool = False):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -85,6 +85,11 @@ class DiffusionBackend:
             self.model = model.to(self.device, dtype=getattr(torch, dtype))
             if prompt_cache:
                 self.cache = PromptCache(self.model)
+        self.graphs = None
+        if cuda_graphs:
+            from bench.cuda_graphs import GraphRunner
+
+            self.graphs = GraphRunner(self.model, self.prompt_isolation)
             self._forward = self._torch_forward
         elif engine == "onnx" and prompt_cache:
             self.device = torch.device("cpu")
@@ -191,6 +196,8 @@ class DiffusionBackend:
         if self.prompt_isolation and self.onnx_cache is None:
             set_prompt_len(self.model, lo)
         ids = torch.tensor([ids], device=self.device)
+        if self.graphs is not None:
+            self.graphs.prepare(ids.shape[1], lo)
         if self.cache is not None:  # prompt runs once; each step only processes the window (+ closing tags)
             self.cache.prefill(ids[:, :lo])
             self._full = torch.zeros(1, ids.shape[1], self.model.config.vocab_size, device=self.device)
@@ -212,6 +219,8 @@ class DiffusionBackend:
 
     def _counted_forward(self, input_ids, attention_mask):
         self._calls += 1
+        if self.graphs is not None:
+            return SimpleNamespace(logits=self.graphs(input_ids))
         if self.cache is not None:
             self._full[:, self._lo:] = self.cache.step(input_ids[:, self._lo:])
             return SimpleNamespace(logits=self._full)
