@@ -100,6 +100,7 @@ def denoise_steps(
     token_temperature: float = 0.0,
     top_p: float = 1.0,
     allowed_tokens: Optional[torch.Tensor] = None,
+    constrain=None,
 ) -> Iterator[Tuple[int, int, torch.Tensor]]:
     """Iteratively fill mask tokens at `fill_positions` in `current_ids` (shape (1, L)).
 
@@ -139,6 +140,9 @@ def denoise_steps(
 
     `allowed_tokens` (bool tensor over the vocabulary) restricts predictions to the
     marked tokens, e.g. SQL vocabulary plus the tokens of the prompt and schema.
+
+    `constrain(masked_pos, logits)` (greedy only) replaces the per-position argmax: it returns one token per
+    masked position, e.g. the most probable completion of the whole window that a grammar accepts.
     """
     conf_stop_logp = None
     if confidence_stop is not None and temperature == 0.0:
@@ -208,6 +212,8 @@ def denoise_steps(
                 torch.rand_like(vals).clamp_min(1e-9)).clamp_min(1e-9))
             choice = (vals + g).argmax(dim=-1)
             pred = idx.gather(-1, choice.unsqueeze(-1)).squeeze(-1)
+        elif constrain is not None:
+            pred = constrain(masked_pos, logits)
         else:
             pred = logits.argmax(dim=-1)
         chosen_logits = logits.gather(-1, pred.unsqueeze(-1)).squeeze(-1)

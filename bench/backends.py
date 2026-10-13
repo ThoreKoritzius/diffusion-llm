@@ -8,6 +8,7 @@ Engines:
   ar / vllm           causal LM in vLLM (CUDA graphs, paged KV cache) -- GPU only
 """
 
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -91,7 +92,8 @@ class DiffusionBackend:
                  window: int = 128, steps: int = 16, conf_stop: Optional[float] = 0.9, window_head: bool = False,
                  int8: bool = False, prompt_isolation: bool = False, dtype: str = "float32",
                  prompt_cache: bool = False, cuda_graphs: bool = False, refine: float = 0.0,
-                 schema_vocab: bool = False, grow_window: int = 0, repair: bool = False):
+                 schema_vocab: bool = False, grow_window: int = 0, repair: bool = False,
+                 grammar: bool = False):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -101,6 +103,11 @@ class DiffusionBackend:
         self.auto_window = os.environ.get("DIFF_AUTO_WINDOW") == "1"  # 2x window when the schema has several tables
         self.core_vocab = sql_core_vocab(self.tok) if schema_vocab else None
         self.window_head = window_head
+        self.grammar = None
+        if grammar:
+            from bench.grammar import SqlGrammar, train_sql_words
+
+            self.grammar = SqlGrammar(self.tok, len(self.tok), train_sql_words())
         torch.set_num_threads(threads)
         model = AutoModelForMaskedLM.from_pretrained(model_dir, attn_implementation="sdpa", torch_dtype=torch.float32).eval()
         # checkpoints trained with prompt isolation must be run with it
@@ -266,18 +273,40 @@ class DiffusionBackend:
             self._full = torch.zeros(1, ids.shape[1], len(self.tok))
         attn = torch.ones_like(ids)
         self._calls = 0
+        constrain = self._grammar_constraint(ids, lo, prompt, context) if self.grammar is not None else None
         for _ in denoise_steps(
             self._counted_forward, ids, attn, list(range(lo, lo + self.window)), self.tok.mask_token_id,
             n_steps=self.steps, forbid_token_ids=list(self.tid.values()),
             confidence_stop=None if sample else self.conf_stop,
             temperature=1.0 if sample else 0.0, token_temperature=0.7 if sample else 0.0,
-            refine_frac=refine, allowed_tokens=allowed,
+            refine_frac=refine, allowed_tokens=allowed, constrain=constrain,
         ):
             pass
         window = ids[0, lo:lo + self.window].tolist()
         out = [x for x in window if x not in (self.tok.pad_token_id, self.tok.mask_token_id)]
         full = window[-1] not in (self.tok.pad_token_id, self.tok.mask_token_id)
         return self.tok.decode(out, skip_special_tokens=True).strip(), self._calls, full
+
+    def _grammar_constraint(self, ids, lo: int, prompt: str, context: str):
+        """Per step: most probable window completion that the lexical SQL grammar accepts (bench/grammar.py)."""
+        from bench.grammar import NEG, as_aliases
+
+        q = self.grammar.for_query(prompt, context)
+        mask, pad, W = self.tok.mask_token_id, self.tok.pad_token_id, self.window
+
+        def constrain(masked_pos, logits):
+            window = ids[0, lo:lo + W].tolist()
+            q.add_words(as_aliases(self.tok.decode([t for t in window if t not in (mask, pad)])))
+            V = len(self.tok)
+            lp = np.full((W, V), NEG, dtype=np.float32)
+            rows = (masked_pos - lo).cpu().numpy()
+            lp[rows, : logits.shape[-1]] = torch.log_softmax(logits, -1).cpu().numpy()
+            out = q.decode([None if t == mask else t for t in window], lp)
+            if out is None:
+                return logits.argmax(dim=-1)
+            return torch.tensor([out[r] for r in rows], device=logits.device)
+
+        return constrain
 
     def _counted_forward(self, input_ids, attention_mask):
         self._calls += 1
@@ -366,8 +395,12 @@ class ARBackend:
         elif engine == "vllm":  # GPU only
             from vllm import LLM, SamplingParams
 
+            # VLLM_SPEC: speculative-decoding config as JSON, e.g. '{"method": "ngram", "num_speculative_tokens": 8,
+            # "prompt_lookup_max": 4}' or '{"method": "dflash", "model": "<drafter dir>", "num_speculative_tokens": 15}'
+            spec = os.environ.get("VLLM_SPEC")
             self.model = LLM(model=model_dir, dtype="bfloat16", enforce_eager=False,
-                             gpu_memory_utilization=float(os.environ.get("VLLM_GPU_UTIL", "0.9")))
+                             gpu_memory_utilization=float(os.environ.get("VLLM_GPU_UTIL", "0.9")),
+                             **({"speculative_config": json.loads(spec)} if spec else {}))
             self.params = SamplingParams(temperature=0.0, max_tokens=max_new_tokens, stop_token_ids=self.stop_ids)
         else:
             raise ValueError(engine)
