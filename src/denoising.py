@@ -99,6 +99,7 @@ def denoise_steps(
     refine_rounds: int = 1,
     token_temperature: float = 0.0,
     top_p: float = 1.0,
+    allowed_tokens: Optional[torch.Tensor] = None,
 ) -> Iterator[Tuple[int, int, torch.Tensor]]:
     """Iteratively fill mask tokens at `fill_positions` in `current_ids` (shape (1, L)).
 
@@ -135,6 +136,9 @@ def denoise_steps(
     (`refine_rounds` times, each position at most once). Costs a few extra
     steps within the same `n_steps` budget; lets early low-context commits be
     revised instead of frozen.
+
+    `allowed_tokens` (bool tensor over the vocabulary) restricts predictions to the
+    marked tokens, e.g. SQL vocabulary plus the tokens of the prompt and schema.
     """
     conf_stop_logp = None
     if confidence_stop is not None and temperature == 0.0:
@@ -189,6 +193,8 @@ def denoise_steps(
         logits = full_logits[0, masked_pos, :].float()
         for tok_id in forbid:
             logits[:, tok_id] = -float("inf")
+        if allowed_tokens is not None:
+            logits[:, ~allowed_tokens[: logits.shape[-1]]] = -float("inf")
 
         if token_temperature > 0:
             # Token-level sampling (for best-of-N diversity): temperature +

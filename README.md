@@ -8,6 +8,8 @@ A masked diffusion language model (LLaDA-style) for text-to-SQL generation, buil
 
 ## Results at a glance
 
+![Diffusion vs autoregressive on H100](experiments/2026-10-12_gpu-session/plots/gpu_square.png)
+
 ModernBERT-base (150M), 10 epochs on [`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql), confidence decoding with adaptive early stop at 0.9. Evaluated on the first 256 filtered test rows:
 
 | Metric | Value |
@@ -27,9 +29,12 @@ Compared with an autoregressive (AR) model fine-tuned on the same data ([Qwen ex
 
 Findings so far:
 
+- **Matched size, diffusion is 2.7× faster at similar accuracy.** Ettin-150M encoder (diffusion) vs. decoder (AR), same data, 10 epochs, 1,000 test queries: exec 0.559 vs 0.574 (−1.5 ± 1.8, a tie), exact match 0.279 vs 0.238 (+4.1 ± 1.2). Batch-1 latency on H100: 25 ms (CUDA graphs) vs 67 ms (vLLM). The 3× larger Qwen2.5-0.5B AR is still more accurate (0.730, 63 ms); diffusion's gap is invalid SQL, not wrong logic. See the [GPU session](experiments/2026-10-12_gpu-session/README.md).
+
 - **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
 - **More steps can hurt.** Accuracy peaks around 11 steps (threshold 0.9) and falls ~10 points when decoding runs to a 0.99 threshold (~19 steps).
 - **PAPL fine-tuning only saves steps.** It gives ~7% fewer steps at equal accuracy ([PAPL A/B](experiments/2026-06-30_papl-ab/README.md)).
+- **On CPU (the hosted setup), AR is still the better trade.** Cheap changes make diffusion 2.1× faster, but a 3.3× larger AR model matches its fp32 latency at higher accuracy ([fair CPU benchmark](experiments/2026-10-09_fair-cpu-benchmark/README.md), [roadmap](docs/roadmap.md)).
 - **Dependency-ordered decoding (DOS) does not beat confidence ordering** on this model (see [below](#commit-ordering-confidence-vs-dependency-dos)).
 
 ## Repository layout
@@ -41,6 +46,8 @@ src/
   inference.py          Flask playground + API (what the live demo runs)
   gradio_inference.py   minimal local Gradio UI
   finetune_papl.py, bench_papl.py, dump_predictions.py, compare_strategies.py, sql_repair.py, augment.py
+bench/                  fair diffusion-vs-AR benchmark (quality + latency, same engine)
+docs/roadmap.md         research roadmap
 scripts/                GPU training / A/B launch scripts, qualitative eval
 experiments/            dated experiment write-ups with data, predictions and plots
 docker/, Dockerfile, docker-compose.yml   CPU deployment (web + worker + redis)

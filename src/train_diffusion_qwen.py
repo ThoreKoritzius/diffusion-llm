@@ -453,7 +453,6 @@ class GenerationEvalCallback(TrainerCallback):
 # 8. Train
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    overwrite_output_dir=True,
     num_train_epochs=NUM_EPOCHS,
     max_steps=MAX_TRAIN_STEPS if MAX_TRAIN_STEPS > 0 else -1,
     per_device_train_batch_size=BATCH_SIZE,

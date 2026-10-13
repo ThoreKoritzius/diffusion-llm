@@ -38,16 +38,29 @@ import wandb
 
 from augment import augment_example
 from denoising import denoise_steps
+from prompt_isolation import isolate_prompt, set_prompt_len
 
-# 1. Hyperparameters and Config
-MODEL_NAME = "answerdotai/ModernBERT-base"
-NUM_EPOCHS = 10
-BATCH_SIZE = 128             # safe on a 96 GB GH200 for ModernBERT-base @ seq 512
-LEARNING_RATE = 1e-4         # ~sqrt-scaled from 3e-5@bs32 for the 4x larger batch
+# 1. Hyperparameters and Config (env overrides; defaults reproduce the main checkpoint)
+MODEL_NAME = os.environ.get("MODEL_NAME", "answerdotai/ModernBERT-base")
+# Continue training an existing diffusion checkpoint (already has the SQL tags) instead of MODEL_NAME.
+INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT", "")
+NUM_EPOCHS = float(os.environ.get("NUM_EPOCHS", "10"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "128"))
+GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", "1"))  # per-device batch x accum = effective batch    # safe on a 96 GB GH200 for ModernBERT-base @ seq 512
+LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "1e-4"))  # ~sqrt-scaled from 3e-5@bs32 for the 4x larger batch
 MAX_LEN = 512
 SQL_WINDOW = 128
-TRAIN_SIZE = 100_000
-VAL_SIZE = 500
+TRAIN_SIZE = int(os.environ.get("TRAIN_SIZE", "100000"))
+# Prompt tokens cannot attend to the SQL window (the window still sees the prompt): makes prompt states cacheable.
+PROMPT_ISOLATION = os.environ.get("PROMPT_ISOLATION", "0") == "1"
+# Fewer-steps training (dParallel-style, simplified):
+# - TRAJECTORY_MASKING: mask the SQL positions the model itself is least confident about (one no-grad pass on the
+#   fully masked window) instead of random ones, so training inputs look like confidence-decoding states.
+# - CERTAINTY_WEIGHT > 0: entropy penalty on masked positions already predicted correctly, pushing them over the
+#   early-stop threshold sooner (more tokens committed per step -> fewer steps).
+TRAJECTORY_MASKING = os.environ.get("TRAJECTORY_MASKING", "0") == "1"
+CERTAINTY_WEIGHT = float(os.environ.get("CERTAINTY_WEIGHT", "0"))
+VAL_SIZE = int(os.environ.get("VAL_SIZE", "500"))
 T_EPS = 1e-3          # lower bound for mask ratio t
 FILTER_JOINS = False
 
@@ -61,10 +74,11 @@ USE_TORCH_COMPILE = os.environ.get("USE_TORCH_COMPILE", "0") == "1"
 MAX_TRAIN_STEPS = int(os.environ.get("MAX_TRAIN_STEPS", "0"))
 EVAL_STEPS = int(os.environ.get("EVAL_STEPS", "500"))
 
-GEN_EVAL_SIZE = 32    # examples for generation-based exact-match eval
+GEN_EVAL_SIZE = int(os.environ.get("GEN_EVAL_SIZE", "32"))  # examples for generation-based exact-match eval
 GEN_EVAL_STEPS = 24   # denoising steps during eval
 
-OUTPUT_DIR = "checkpoints/diffusion-sql-modernbert"
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "checkpoints/diffusion-sql-modernbert")
+RUN_NAME = os.environ.get("RUN_NAME", "modernbert-llada-aug")
 
 # Hopper perf: TF32 matmuls + avoid the fast-tokenizer fork warning/deadlock
 # once dataloader workers are forking the module-level tokenizer.
@@ -79,8 +93,12 @@ os.environ["WANDB_PROJECT"] = "sql-diffusion"
 if not os.environ.get("WANDB_API_KEY") and not os.environ.get("WANDB_MODE"):
     os.environ["WANDB_MODE"] = "offline"
     print("[wandb] no WANDB_API_KEY found -> logging offline")
-wandb.init(project="sql-diffusion", name="modernbert-llada-aug", config={
+wandb.init(project="sql-diffusion", name=RUN_NAME, config={
     "model": MODEL_NAME,
+    "init_checkpoint": INIT_CHECKPOINT,
+    "prompt_isolation": PROMPT_ISOLATION,
+    "trajectory_masking": TRAJECTORY_MASKING,
+    "certainty_weight": CERTAINTY_WEIGHT,
     "epochs": NUM_EPOCHS,
     "batch_size": BATCH_SIZE,
     "max_len": MAX_LEN,
@@ -106,7 +124,7 @@ if FILTER_JOINS:
 
 
 # 3. Tokenizer Setup
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+tokenizer = AutoTokenizer.from_pretrained(INIT_CHECKPOINT or MODEL_NAME)
 tokenizer.model_max_length = MAX_LEN
 TAGS = ['<PROMPT>', '</PROMPT>', '<CONTEXT>', '</CONTEXT>', '<SQL>', '</SQL>']
 tokenizer.add_special_tokens({'additional_special_tokens': TAGS})
@@ -156,8 +174,12 @@ def encode_text(prompt: str, context: str, sql: str):
 
 
 # 5. Model Setup
-model = AutoModelForMaskedLM.from_pretrained(MODEL_NAME)
+# Prompt isolation needs a custom 4D mask, which flash-attention's unpadding path ignores -> force sdpa.
+_attn_kwargs = {"attn_implementation": "sdpa"} if PROMPT_ISOLATION else {}
+model = AutoModelForMaskedLM.from_pretrained(INIT_CHECKPOINT or MODEL_NAME, **_attn_kwargs)
 model.resize_token_embeddings(len(tokenizer))
+if PROMPT_ISOLATION:
+    isolate_prompt(model)
 
 
 # 6. Collator: Augment + Encode + Continuous-t Bernoulli Masking
@@ -172,6 +194,7 @@ def make_collator(augment: bool):
 
         input_ids = torch.tensor([r["input_ids"] for r in rows], dtype=torch.long)
         attention = torch.tensor([r["attention_mask"] for r in rows], dtype=torch.long)
+        clean_ids = input_ids.clone()
         labels = torch.full_like(input_ids, -100)
         B = input_ids.shape[0]
 
@@ -191,6 +214,8 @@ def make_collator(augment: bool):
             "attention_mask": attention,
             "labels": labels,
             "loss_weights": 1.0 / t,
+            "prompt_len": torch.tensor([r["sql_start"] for r in rows], dtype=torch.long),
+            "clean_ids": clean_ids,
         }
     return collate
 
@@ -204,6 +229,13 @@ class DiffusionTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         weights = inputs.pop("loss_weights")
         labels = inputs.pop("labels")
+        prompt_len = inputs.pop("prompt_len")
+        clean_ids = inputs.pop("clean_ids")
+        if PROMPT_ISOLATION:
+            set_prompt_len(model, prompt_len)
+        if TRAJECTORY_MASKING and model.training:
+            inputs["input_ids"], labels = self._trajectory_mask(model, clean_ids, inputs["attention_mask"],
+                                                                prompt_len, 1.0 / weights)
         outputs = model(**inputs)
         logits = outputs.logits
         B, L, V = logits.shape
@@ -214,7 +246,34 @@ class DiffusionTrainer(Trainer):
         # LLaDA objective: (1/t) * sum of masked-token CE, normalized by span length
         per_example = ce.sum(dim=1) * weights / SQL_WINDOW
         loss = per_example.mean()
+        if CERTAINTY_WEIGHT > 0 and model.training:
+            masked = labels != -100
+            lg = logits[masked].float()
+            correct = lg.argmax(-1) == labels[masked]
+            if correct.any():
+                logp = lg[correct].log_softmax(-1)
+                entropy = -(logp.exp() * logp).sum(-1)
+                loss = loss + CERTAINTY_WEIGHT * entropy.mean()
         return (loss, outputs) if return_outputs else loss
+
+    @torch.no_grad()
+    def _trajectory_mask(self, model, clean_ids, attention, starts, t):
+        """Mask the round(t * window) SQL positions with the lowest model confidence on the fully masked window."""
+        full = clean_ids.clone()
+        B = full.shape[0]
+        win = starts[:, None] + torch.arange(SQL_WINDOW, device=full.device)[None, :]  # [B, W]
+        rows = torch.arange(B, device=full.device)[:, None]
+        full[rows, win] = MASK_ID
+        logits = model(input_ids=full, attention_mask=attention).logits[rows, win].float()  # [B, W, V]
+        conf = logits.max(-1).values - logits.logsumexp(-1)                                  # log p(top token)
+        k = (t.to(conf.device) * SQL_WINDOW).round().clamp(1, SQL_WINDOW).long()             # [B]
+        rank = conf.argsort(dim=1).argsort(dim=1)                                           # 0 = least confident
+        to_mask = rank < k[:, None]
+        input_ids, labels = clean_ids.clone(), torch.full_like(clean_ids, -100)
+        sel_rows, sel_win = rows.expand_as(win)[to_mask], win[to_mask]
+        labels[sel_rows, sel_win] = clean_ids[sel_rows, sel_win]
+        input_ids[sel_rows, sel_win] = MASK_ID
+        return input_ids, labels
 
     def get_eval_dataloader(self, eval_dataset=None):
         original = self.data_collator
@@ -251,6 +310,8 @@ def generation_exact_match(model, raw_examples, transform=None, n_steps=GEN_EVAL
         attn = torch.tensor([enc["attention_mask"]], dtype=torch.long, device=device)
         lo, hi = enc["sql_start"], enc["sql_end"]
         ids[0, lo:hi] = MASK_ID
+        if PROMPT_ISOLATION:
+            set_prompt_len(model, lo)
         with autocast_ctx:
             for _ in denoise_steps(
                 model, ids, attn, list(range(lo, hi)), MASK_ID,
@@ -280,15 +341,19 @@ class GenerationEvalCallback(TrainerCallback):
 
 
 # 9. Training Arguments
+# transformers 5 removed warmup_ratio; its warmup_steps takes a float ratio instead (4.x would read it as steps)
+import transformers as _tf
+WARMUP_5PCT = {"warmup_steps": 0.05} if int(_tf.__version__.split(".")[0]) >= 5 else {"warmup_ratio": 0.05}
+
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    overwrite_output_dir=True,
     num_train_epochs=NUM_EPOCHS,
     max_steps=MAX_TRAIN_STEPS if MAX_TRAIN_STEPS > 0 else -1,
     per_device_train_batch_size=BATCH_SIZE,
+    gradient_accumulation_steps=GRAD_ACCUM,
     per_device_eval_batch_size=BATCH_SIZE,
     learning_rate=LEARNING_RATE,
-    warmup_ratio=0.05,
+    **WARMUP_5PCT,
     lr_scheduler_type="cosine",
     bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
     # Keep the GH200 fed: parallel collation + pinned, prefetched, fixed-shape batches.

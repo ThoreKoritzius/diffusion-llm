@@ -237,16 +237,19 @@ class GenerationEvalCallback(TrainerCallback):
 
 
 # 7. Train
+# transformers 5 removed warmup_ratio; its warmup_steps takes a float ratio instead (4.x would read it as steps)
+import transformers as _tf
+WARMUP_5PCT = {"warmup_steps": 0.05} if int(_tf.__version__.split(".")[0]) >= 5 else {"warmup_ratio": 0.05}
+
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    overwrite_output_dir=True,
     num_train_epochs=NUM_EPOCHS,
     max_steps=MAX_TRAIN_STEPS if MAX_TRAIN_STEPS > 0 else -1,
     per_device_train_batch_size=BATCH_SIZE,
     per_device_eval_batch_size=BATCH_SIZE,
     gradient_accumulation_steps=GRAD_ACCUM,
     learning_rate=LEARNING_RATE,
-    warmup_ratio=0.05,
+    **WARMUP_5PCT,
     lr_scheduler_type="cosine",
     bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
     dataloader_num_workers=DATALOADER_WORKERS,
