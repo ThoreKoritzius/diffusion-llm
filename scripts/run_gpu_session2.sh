@@ -229,7 +229,8 @@ track_spec() {
   if [ ! -f "$dir/hidden_states.done" ]; then
     log "hidden states for $v"
     # own process group, so stopping it also stops vLLM's engine processes (and frees their GPU memory)
-    setsid "$PYS" .speculators/scripts/launch_vllm.py "checkpoints/$v" -- --port 8011 --gpu-memory-utilization 0.25 \
+    # vLLM's hidden-states KV connector refuses expandable_segments (set above for training)
+    env -u PYTORCH_CUDA_ALLOC_CONF setsid "$PYS" .speculators/scripts/launch_vllm.py "checkpoints/$v" -- --port 8011 --gpu-memory-utilization 0.25 \
       > "$SESSION_DIR/logs/spec_vllm.log" 2>&1 &
     local vpid=$!
     until curl -sf http://localhost:8011/health > /dev/null 2>&1; do
