@@ -117,7 +117,7 @@ mkvenv() {  # mkvenv <dir> <install command run with $V as the venv's python>
 }
 mkvenv .venv-gpu 'uv pip install -q -p $V --torch-backend auto -r requirements.txt -r bench/requirements.txt' &
 mkvenv .venv-vllm 'uv pip install -q -p $V vllm "datasets>=4"' &
-has spec && { mkvenv .venv-spec 'uv pip install -q -p $V speculators vllm "datasets>=4"' &
+has spec && { mkvenv .venv-spec 'uv pip install -q -p $V speculators vllm wandb "datasets>=4"' &
   [ -d .speculators ] || git clone -q https://github.com/vllm-project/speculators.git .speculators; }  # launch_vllm.py
 if has_pre vllmpr; then  # vllm-project/vllm#61276 (python only -> precompiled kernels, no build)
   { { [ -d .vllm-pr ] || git clone -q --filter=blob:none https://github.com/vllm-project/vllm.git .vllm-pr; } &&
