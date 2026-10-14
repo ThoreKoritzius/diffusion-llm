@@ -11,7 +11,7 @@ Env vars (defaults in brackets):
   INIT_CHECKPOINT  diffusion checkpoint to start from (required)      OUTPUT_DIR  where to save [checkpoints/rl]
   STEPS [300]  PROMPTS_PER_STEP [8]  GROUP [8]  LR [1e-6]  WINDOW [64]  SAMPLE_STEPS [8]  TEMPERATURE [1.0]
   VALID_BONUS [0.2]  EVAL_EVERY [50]  EVAL_SIZE [200]  KL_BETA [0.0] (k3 KL to the initial model on scored tokens)
-  TRAIN_ROWS [100000] (prompts come from these train rows; eval uses the next EVAL_SIZE rows, never the test split)
+  TRAIN_ROWS [100000] (prompts come from the first train rows; eval uses the last EVAL_SIZE, never the test split)
   DEVICE [cuda if available]  DTYPE [bfloat16 on cuda, float32 on cpu] (autocast; weights stay fp32)  SEED [0]
 """
 
@@ -155,9 +155,12 @@ def reward(context: str, gold_res, pred: str) -> float:
 def load_rows():
     ds = load_dataset("gretelai/synthetic_text_to_sql", split="train")
     ds = ds.filter(lambda ex: ex["sql_prompt"].strip() != "")
-    rows = [{"prompt": e["sql_prompt"], "context": e["sql_context"] or "", "sql": e["sql"]}
-            for e in ds.select(range(min(len(ds), TRAIN_ROWS + EVAL_SIZE)))]
-    return rows[:TRAIN_ROWS], rows[TRAIN_ROWS:TRAIN_ROWS + EVAL_SIZE]
+
+    def rows(idx):
+        return [{"prompt": e["sql_prompt"], "context": e["sql_context"] or "", "sql": e["sql"]} for e in ds.select(idx)]
+
+    n_eval = min(EVAL_SIZE, len(ds) // 10)  # the last train rows; the train split has exactly 100k rows
+    return rows(range(min(TRAIN_ROWS, len(ds) - n_eval))), rows(range(len(ds) - n_eval, len(ds)))
 
 
 def with_gold(row):
