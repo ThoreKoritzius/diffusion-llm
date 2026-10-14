@@ -21,7 +21,7 @@ for Qwen3-8B; a 0.5B target is untested upstream.
 ## On the box
 
 ```bash
-git clone https://github.com/ThoreKoritzius/diffusion-llm.git && cd diffusion-llm && mkdir -p checkpoints
+git clone -b feat/gpu-session-2 https://github.com/ThoreKoritzius/diffusion-llm.git && cd diffusion-llm && mkdir -p checkpoints
 ```
 
 From your machine (~4 GB):
