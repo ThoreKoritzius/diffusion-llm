@@ -39,6 +39,8 @@ NGRAM='{"method": "ngram", "num_speculative_tokens": 8, "prompt_lookup_max": 4, 
 mkdir -p "$SESSION_DIR/logs" "$SESSION_DIR/bench" checkpoints
 export HF_HOME="${HF_HOME:-$REPO_DIR/.hf_cache}" TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True DATALOADER_WORKERS="${DATALOADER_WORKERS:-6}"
+[ -f "$HOME/.wandb_env" ] && . "$HOME/.wandb_env"  # export WANDB_API_KEY=... (chmod 600, never in the repo)
+export WANDB_PROJECT="${WANDB_PROJECT:-sql-diffusion}"
 [ -z "${WANDB_API_KEY:-}" ] && [ -z "${WANDB_MODE:-}" ] && export WANDB_MODE=offline
 PY=.venv-gpu/bin/python; PYV=.venv-vllm/bin/python; PYS=.venv-spec/bin/python
 L="$SESSION_DIR/session.log"
@@ -192,6 +194,7 @@ drafter() {  # drafter <verifier> <eagle3|dflash>
   [ -f "$out/done" ] && return 0
   local args=(--speculator-type "$kind")
   [ "$kind" = dflash ] && args+=(--num-layers "$DFLASH_LAYERS" --block-size "$DFLASH_BLOCK" --lr 3e-4)
+  [ -n "${WANDB_API_KEY:-}" ] && args+=(--logger wandb --run-name "spec-$kind-$v")
   log "drafter $kind for $v"
   .venv-spec/bin/torchrun --standalone --nproc_per_node 1 -m speculators.train \
     --verifier-name-or-path "checkpoints/$v" --data-path "$dir/prepared" --hidden-states-path "$dir/hidden_states" \
