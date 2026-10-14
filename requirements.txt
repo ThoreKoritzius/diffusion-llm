@@ -1,6 +1,7 @@
 Flask
 Pillow>=10
 numpy<2
+pyarrow<20
 torch
 onnx
 onnxruntime

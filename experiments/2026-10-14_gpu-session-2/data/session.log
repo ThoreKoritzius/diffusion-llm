@@ -1,0 +1,61 @@
+[09:29:07] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+[09:29:22] venv .venv-gpu ready (15s)
+[09:29:25] venv .venv-vllm ready (18s)
+[09:29:25] venv .venv-spec ready (18s)
+[09:29:57] venv .venv-vllmpr ready (31s)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[09:30:00] vLLM #61276 checks
+[09:31:29] vLLM #61276 pytest: 15 passed, 38 deselected, 15 warnings in 69.64s (0:01:09)
+[09:32:22] !! ettin-decoder-17m float32 transformers failed (vllm-pr/check.log)
+[09:49:17] vLLM #61276 checks done
+[09:49:17] baseline speed
+[09:49:28] !! bench ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs failed
+[09:49:34] !! bench ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs-verify1 failed
+[09:51:13] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[09:51:19] baseline speed
+[09:52:03] bench ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs
+[09:53:06] bench ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs-verify1
+[09:56:16] bench sql-ar-qwen25-coder-0.5b-ar-vllm
+[10:00:02] bench sql-ar-qwen25-coder-0.5b-ar-vllm-ngram
+[10:00:02] baseline done: results/gpu-session-2/summary.md
+[10:00:50] rl ettin400-diffusion-iso-10ep-distilled-rl from ettin400-diffusion-iso-10ep-distilled
+[10:01:14] train ettin400-diffusion-iso-20ep
+[10:01:27] train qwen3-0.6b-ar
+[10:02:21] !! rl ettin400-diffusion-iso-10ep-distilled-rl failed
+[11:22:06] stopped rl / epochs / qwen3 (no gain so far; GPU to the drafters)
+[11:22:08] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[11:24:43] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[11:26:27] hidden states for sql-ar-qwen25-coder-0.5b-ar
+[11:26:52] !! hidden-state server died (logs/spec_vllm.log)
+[11:26:52] tracks finished
+[11:26:52] session 2: ALL DONE
+[11:27:50] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[11:27:54] hidden states for sql-ar-qwen25-coder-0.5b-ar
+[11:31:54] drafter eagle3 for sql-ar-qwen25-coder-0.5b-ar
+[11:32:13] !! drafter eagle3 failed (logs/drafter_sql-ar-qwen25-coder-0.5b-ar_eagle3.log)
+[11:32:13] drafter dflash for sql-ar-qwen25-coder-0.5b-ar
+[11:32:28] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[11:32:32] drafter eagle3 for sql-ar-qwen25-coder-0.5b-ar
+[11:46:33] done drafter eagle3
+[11:46:33] drafter dflash for sql-ar-qwen25-coder-0.5b-ar
+[11:46:52] !! drafter dflash failed (logs/drafter_sql-ar-qwen25-coder-0.5b-ar_dflash.log)
+[11:46:52] tracks finished
+[11:50:47] bench sql-ar-qwen25-coder-0.5b-ar-vllm-eagle3
+[11:50:47] session 2: ALL DONE
+[11:50:55] hero pair (150M) benches
+[11:51:32] bench ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs
+[11:52:24] bench ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs-verify1
+[11:55:30] bench ettin150-ar-10ep-vllm-pr61276
+[11:55:30] hero done
+[11:55:33] === NVIDIA H100 PCIe, 81559 MiB, 580.105.08 (x86_64)
+torch 2.14.1+cu132 NVIDIA H100 PCIe
+[11:55:37] drafter dflash for sql-ar-qwen25-coder-0.5b-ar
+[12:09:29] done drafter dflash
+[12:09:29] tracks finished
+[12:13:00] bench sql-ar-qwen25-coder-0.5b-ar-vllm-dflash
+[12:13:01] session 2: ALL DONE
