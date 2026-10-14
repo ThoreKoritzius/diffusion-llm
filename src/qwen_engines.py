@@ -110,22 +110,50 @@ class DFlashDrafter(nn.Module):
         return emb.cos()[None].to(dtype), emb.sin()[None].to(dtype)
 
     @torch.no_grad()
-    def draft(self, aux_hidden: torch.Tensor, anchor_token: int, n: int) -> List[int]:
-        """aux_hidden: [1, p, len(layer_ids) * hidden] for positions 0..p-1; the anchor sits at position p."""
+    def logits(self, aux_hidden: torch.Tensor, blocks: torch.Tensor) -> torch.Tensor:
+        """aux_hidden: [1, p, len(layer_ids) * hidden] for positions 0..p-1; blocks: [b, size] token ids for positions
+        p.. (the anchor, then masks or fixed tokens). Returns draft-vocab logits [b, size - 1, draft_vocab]; row i
+        predicts the token at anchor + 1 + i."""
         p = aux_hidden.shape[1]
-        size = min(self.block_size, n + 1)
-        ctx = self.hidden_norm(self.fc(aux_hidden))
-        ids = torch.full((1, size), self.mask_token_id, dtype=torch.long)
-        ids[0, 0] = anchor_token
-        x = self.embed_tokens(ids).to(ctx.dtype)
+        b, size = blocks.shape
+        ctx = self.hidden_norm(self.fc(aux_hidden)).expand(b, -1, -1)
+        x = self.embed_tokens(blocks).to(ctx.dtype)
         cos, sin = self.rope(torch.arange(p + size), ctx.dtype)
         # every block slot sees the whole context; within the block, causal (sliding_window_non_causal=False)
         mask = torch.ones(size, p + size, dtype=torch.bool)
         mask[:, p:] = torch.tril(torch.ones(size, size, dtype=torch.bool))
         for layer in self.layers:
             x = layer(x, ctx, cos, sin, mask)
-        draft_ids = self.lm_head(self.norm(x[:, 1:])).argmax(-1)[0]
-        return (draft_ids + self.d2t[draft_ids]).tolist()
+        return self.lm_head(self.norm(x[:, 1:]))
+
+    def to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids + self.d2t[draft_ids]
+
+    def block(self, anchor_token: int, n: int, fixed: Optional[List[int]] = None) -> torch.Tensor:
+        ids = torch.full((1, min(self.block_size, n + 1)), self.mask_token_id, dtype=torch.long)
+        ids[0, 0] = anchor_token
+        for i, t in enumerate(fixed or []):
+            ids[0, 1 + i] = t
+        return ids
+
+    @torch.no_grad()
+    def draft(self, aux_hidden: torch.Tensor, anchor_token: int, n: int) -> List[int]:
+        """Greedy block: one forward pass, the anchor followed by masks."""
+        out = self.logits(aux_hidden, self.block(anchor_token, n))
+        return self.to_target(out.argmax(-1)[0]).tolist()
+
+    @torch.no_grad()
+    def draft_candidates(self, aux_hidden: torch.Tensor, anchor_token: int, n: int, k: int) -> List[List[int]]:
+        """k blocks that differ in the first drafted token: the greedy block, plus blocks starting with the drafter's
+        2nd..k-th choice for that token, each re-drafted with that token fixed so the rest of the block follows it."""
+        out = self.logits(aux_hidden, self.block(anchor_token, n))
+        greedy = self.to_target(out.argmax(-1)[0]).tolist()
+        if k <= 1 or n <= 1:
+            return [greedy]
+        firsts = self.to_target(out[0, 0].topk(k).indices).tolist()[1:]
+        blocks = torch.cat([self.block(anchor_token, n, fixed=[t]) for t in firsts])
+        rest = self.to_target(self.logits(aux_hidden, blocks)[:, 1:].argmax(-1)).tolist()
+        return [greedy] + [[t] + r for t, r in zip(firsts, rest)]
 
 
 class QwenEngine:
@@ -167,12 +195,14 @@ class QwenEngine:
 
     @torch.no_grad()
     def generate(self, prompt: str, context: str, speculative: bool = False, max_new_tokens: int = 128,
-                 num_speculative_tokens: int = 15, should_stop: Optional[Callable[[], bool]] = None
+                 num_speculative_tokens: int = 15, candidates: int = 1, should_stop: Optional[Callable[[], bool]] = None
                  ) -> Iterator[Dict]:
         """Yield one event per verifier forward pass:
         {"tokens": all generated ids, "new": ids added this step, "drafted": ids proposed (speculative only),
          "accepted": how many drafted ids were kept, "p_slots": the verifier's top probability at each position it
-         checked this pass (len(drafted) + 1), "forward": verifier passes so far, "elapsed": seconds}."""
+         checked this pass (len(drafted) + 1), "forward": verifier passes so far, "elapsed": seconds}.
+        candidates > 1 drafts that many blocks per pass (different first tokens, see DFlashDrafter.draft_candidates)
+        and verifies them as one batch, keeping the block with the longest accepted prefix; still lossless."""
         if speculative and self.drafter is None:
             raise ValueError("no drafter loaded")
         t0 = time.perf_counter()
@@ -195,16 +225,29 @@ class QwenEngine:
                 new, drafted, accepted = [int(probs.indices[-1])], [], 0
             else:
                 n = min(num_speculative_tokens, max_new_tokens - len(gen))
-                drafted = self.drafter.draft(aux, gen[-1], n)[:n]
-                out = self._forward([gen[-1]] + drafted, cache, pos, hidden=True)
-                probs = out.logits[0].float().softmax(-1).max(-1)
+                blocks = [d[:n] for d in self.drafter.draft_candidates(aux, gen[-1], n, candidates)]
+                if len(blocks) > 1:
+                    cache.batch_repeat_interleave(len(blocks))
+                pos_ids = torch.arange(pos, pos + 1 + n)[None].expand(len(blocks), -1)
+                out = self.model(torch.tensor([[gen[-1]] + d for d in blocks]), past_key_values=cache,
+                                 position_ids=pos_ids, use_cache=True, output_hidden_states=True)
+                top = out.logits.float().softmax(-1).max(-1)
+                best, accepted = 0, -1
+                for r, d in enumerate(blocks):  # longest prefix the verifier agrees with; ties keep the greedy block
+                    a = 0
+                    while a < len(d) and d[a] == int(top.indices[r, a]):
+                        a += 1
+                    if a > accepted:
+                        best, accepted = r, a
+                if len(blocks) > 1:
+                    cache.batch_select_indices(torch.tensor([best]))
+                drafted = blocks[best]
+                probs = torch.return_types.max((top.values[best], top.indices[best]))
                 greedy = probs.indices.tolist()  # greedy[i] = verifier's token after block slot i
-                accepted = 0
-                while accepted < len(drafted) and drafted[accepted] == greedy[accepted]:
-                    accepted += 1
                 new = drafted[:accepted] + [greedy[accepted]]
                 cache.crop(pos + 1 + accepted)  # keep the anchor and the accepted drafts
-                aux = torch.cat([aux, self._aux(out)[:, : 1 + accepted]], dim=1)
+                hs = [h[best: best + 1] for h in out.hidden_states]
+                aux = torch.cat([aux, torch.cat([hs[i] for i in self.drafter.layer_ids], -1)[:, : 1 + accepted]], 1)
             forward += 1
             for i, t in enumerate(new):  # stop at the first end token inside an accepted run
                 if t in self.stop_ids:
