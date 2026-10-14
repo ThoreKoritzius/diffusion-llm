@@ -8,8 +8,9 @@
 #   sweep   acceptance + draft length for the session-2 drafters on Qwen2.5-0.5B: DFlash k in DFLASH_KS,
 #           EAGLE-3 k in EAGLE_KS, SWEEP_N queries each (latency only picks k; quality is identical by design)
 #   train   in parallel (GPU shared):
-#             big   drafters for Qwen2.5-0.5B on all train prompts (SPEC_N_BIG), EAGLE-3 + DFlash
-#             q15   Qwen2.5-Coder-1.5B SFT (QWEN15_EPOCHS), then its EAGLE-3 + DFlash drafters
+#             big   VAGUE_N vague rewrites of train questions (scripts/vague_prompts.py, VAGUE_MODEL), then drafters
+#                   for Qwen2.5-0.5B on all train prompts (SPEC_N_BIG) + the vague ones, EAGLE-3 + DFlash
+#             q15   Qwen2.5-Coder-1.5B SFT (QWEN15_EPOCHS), then its EAGLE-3 + DFlash drafters (+ the vague prompts)
 #   bench   n=BENCH_N, every model at its best k: Qwen2.5-0.5B (session-2 and big drafters), Qwen2.5-1.5B plain /
 #           EAGLE-3 / DFlash (DFlash k re-swept for 1.5B)
 #
@@ -27,6 +28,9 @@ EAGLE_KS="${EAGLE_KS:-2 4 6 8}"
 SPEC_N_BIG="${SPEC_N_BIG:-99800}"   # all train prompts except the last 200 (RL's eval rows)
 SPEC_N_15="${SPEC_N_15:-50000}"  # the 1.5B drafters start late (after the SFT), so less data keeps them short
 DRAFT_EPOCHS="${DRAFT_EPOCHS:-3}"
+VAGUE_N="${VAGUE_N:-40000}"  # 0 = drafters on train prompts only
+VAGUE_MODEL="${VAGUE_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+VAGUE=checkpoints/vague_prompts.jsonl
 QWEN15_EPOCHS="${QWEN15_EPOCHS:-1}" # 0.5B had 3; session 1: AR barely gains from epochs, so 1 keeps this ~1.5 h
 DFLASH_LAYERS="${DFLASH_LAYERS:-3}"
 DFLASH_BLOCK="${DFLASH_BLOCK:-16}"
@@ -91,7 +95,8 @@ mkvenv .venv-vllm 'uv pip install -q -p $V vllm "datasets>=4"' &
 mkvenv .venv-spec 'uv pip install -q -p $V speculators vllm wandb "datasets>=4"' &
 [ -d .speculators ] || git clone -q https://github.com/vllm-project/speculators.git .speculators &  # launch_vllm.py
 { uvx -q --from 'huggingface_hub[hf_xet]' hf download --repo-type dataset gretelai/synthetic_text_to_sql
-  uvx -q --from 'huggingface_hub[hf_xet]' hf download Qwen/Qwen2.5-Coder-1.5B; } > "$SESSION_DIR/logs/prefetch.log" 2>&1 &
+  uvx -q --from 'huggingface_hub[hf_xet]' hf download Qwen/Qwen2.5-Coder-1.5B
+  [ "$VAGUE_N" -gt 0 ] && uvx -q --from 'huggingface_hub[hf_xet]' hf download "$VAGUE_MODEL"; } > "$SESSION_DIR/logs/prefetch.log" 2>&1 &
 wait
 for d in .venv-gpu .venv-vllm .venv-spec; do [ -f "$d/.ok" ] || { log "!! $d missing, stopping"; exit 1; }; done
 # FlashInfer (vLLM's sampler) JIT-compiles kernels on first use and needs ninja on PATH, not just in the venv
@@ -136,8 +141,9 @@ train() {  # train <name> <python> <script> [ENV=VAL ...]: 20-step smoke run, th
 drafters() {
   local v=$1 n=$2 tag=$3 port=$4 dir="checkpoints/spec-$1-$3"
   mkdir -p "$dir"
+  local extra=(); [ -s "$VAGUE" ] && extra=(--extra "$VAGUE")
   [ -s "$dir/data.jsonl" ] || VLLM_GPU_UTIL=0.25 "$PYS" scripts/spec_data.py --model "checkpoints/$v" --n "$n" \
-    --out "$dir/data.jsonl" > "$SESSION_DIR/logs/spec_data_$tag.log" 2>&1 || { log "!! spec data $tag failed"; return 1; }
+    "${extra[@]}" --out "$dir/data.jsonl" > "$SESSION_DIR/logs/spec_data_$tag.log" 2>&1 || { log "!! spec data $tag failed"; return 1; }
   [ -d "$dir/prepared" ] || .venv-spec/bin/speculators prepare-data --model "checkpoints/$v" --data "$dir/data.jsonl" \
     --output "$dir/prepared" --seq-length 2048 >> "$SESSION_DIR/logs/spec_data_$tag.log" 2>&1 \
     || { log "!! prepare-data $tag failed"; return 1; }
@@ -175,7 +181,13 @@ drafters() {
 
 if has train; then
   pids=()
-  drafters "$Q05" "$SPEC_N_BIG" big 8011 & pids+=($!)
+  { if [ "$VAGUE_N" -gt 0 ] && [ ! -s "$VAGUE" ]; then
+      log "vague prompts ($VAGUE_N, $VAGUE_MODEL)"
+      VLLM_GPU_UTIL=0.3 "$PYS" scripts/vague_prompts.py --model "$VAGUE_MODEL" --n "$VAGUE_N" --out "$VAGUE.tmp" \
+        > "$SESSION_DIR/logs/vague_prompts.log" 2>&1 && mv "$VAGUE.tmp" "$VAGUE" && log "$(wc -l < "$VAGUE") vague prompts" \
+        || log "!! vague prompts failed, drafters use train prompts only"
+    fi
+    drafters "$Q05" "$SPEC_N_BIG" big 8011; } & pids+=($!)
   { train "$Q15" "$PY" train_ar.py MODEL_NAME=Qwen/Qwen2.5-Coder-1.5B NUM_EPOCHS="$QWEN15_EPOCHS" \
       && drafters "$Q15" "$SPEC_N_15" s3 8012; } & pids+=($!)
   for p in "${pids[@]}"; do wait "$p"; done

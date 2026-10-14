@@ -5,6 +5,8 @@ in the serving layout (bench/backends.py ARBackend.prompt_ids) followed by the v
 on the output only. Uses training rows only (never the test split).
 
     python scripts/spec_data.py --model checkpoints/sql-ar-qwen25-coder-0.5b-ar --n 30000 --out data.jsonl
+
+--extra adds rows from a {prompt, context} JSONL (e.g. scripts/vague_prompts.py), answered the same way.
 """
 
 import argparse
@@ -22,6 +24,7 @@ def main():
     ap.add_argument("--n", type=int, default=30000)
     ap.add_argument("--offset", type=int, default=0, help="first train row")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--extra", help="JSONL of {prompt, context} rows to add")
     ap.add_argument("--max-new-tokens", type=int, default=130)
     args = ap.parse_args()
 
@@ -46,6 +49,10 @@ def main():
         return bos + [tid["<PROMPT>"]] + p + [tid["</PROMPT>"], tid["<CONTEXT>"]] + c + [tid["</CONTEXT>"], tid["<SQL>"]]
 
     prompts = [prompt_ids(ex["sql_prompt"], ex["sql_context"] or "") for ex in ds]
+    if args.extra:
+        extra = [json.loads(line) for line in open(args.extra)]
+        prompts += [prompt_ids(r["prompt"], r["context"]) for r in extra]
+        print(f"+ {len(extra)} rows from {args.extra}")
     llm = LLM(model=args.model, dtype="bfloat16", gpu_memory_utilization=float(os.environ.get("VLLM_GPU_UTIL", "0.4")))
     params = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens,
                             stop_token_ids=[tid["</SQL>"], tok.eos_token_id])

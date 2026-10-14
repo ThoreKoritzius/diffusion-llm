@@ -5,14 +5,14 @@ diffusion drafter, and a 1.5B verifier that is more accurate than Qwen2.5-0.5B a
 
 | Step | What | Est. time | GPU |
 |---|---|---:|---|
-| setup | venvs (uv, parallel), prefetch Qwen2.5-Coder-1.5B + data, checkpoint upload | ~10 min | idle |
+| setup | venvs (uv, parallel), prefetch Qwen2.5-Coder-1.5B, Qwen2.5-7B-Instruct + data, checkpoint upload | ~10 min | idle |
 | `sweep` | acceptance + draft length of the session-2 drafters on Qwen2.5-0.5B: DFlash k ∈ {3, 5, 7, 11, 15}, EAGLE-3 k ∈ {2, 4, 6, 8}, 300 queries each | ~25 min | alone |
-| `train` | in parallel: (a) EAGLE-3 + DFlash for Qwen2.5-0.5B on all ~100k train prompts, 3 epochs; (b) Qwen2.5-Coder-1.5B SFT (1 epoch), then its EAGLE-3 + DFlash (50k prompts) | ~2.5–3 h | shared |
+| `train` | in parallel: (a) 40k vague rewrites of train questions (Qwen2.5-7B-Instruct, ~10 min), then EAGLE-3 + DFlash for Qwen2.5-0.5B on all ~100k train prompts + the vague ones, 3 epochs; (b) Qwen2.5-Coder-1.5B SFT (1 epoch), then its EAGLE-3 + DFlash (50k prompts) | ~2.5–3 h | shared |
 | `bench` | n=1000 at the best k: Qwen2.5-0.5B plain / session-2 / big drafters; Qwen2.5-1.5B plain / EAGLE-3 / DFlash | ~40 min | alone |
 
 Every speculative run records acceptance (`spec` in its summary: mean accepted tokens per draft, rate per position).
 `results/gpu-session-3/summary.md` has the table; `ALL_DONE` marks the end. Cut time with `QWEN15_EPOCHS`,
-`SPEC_N_BIG`, `SPEC_N_15`, `DRAFT_EPOCHS`, or `STEPS="sweep"` for a ~35 min session.
+`SPEC_N_BIG`, `SPEC_N_15`, `VAGUE_N` (0 = no vague prompts), `DRAFT_EPOCHS`, or `STEPS="sweep"` for a ~35 min session.
 
 ## On the box
 
@@ -30,8 +30,9 @@ rsync -avP sql-ar-qwen25-coder-0.5b-ar spec-qwen25 <user>@<host>:diffusion-llm/c
   && ssh <user>@<host> touch diffusion-llm/checkpoints/.uploaded
 ```
 
-Copy back `results/gpu-session-3/`, `checkpoints/sql-ar-qwen25-coder-1.5b-ar` and the `checkpoints/spec-*/{eagle3,dflash}`
-drafters before terminating (hidden states are deleted after each drafter run).
+Copy back `results/gpu-session-3/`, `checkpoints/vague_prompts.jsonl`, `checkpoints/sql-ar-qwen25-coder-1.5b-ar` and the `checkpoints/spec-*/{eagle3,dflash}`
+drafters before terminating (hidden states are deleted after each drafter run). Locally,
+`scripts/drafter_probe.py` measures the new drafters on vague prompts (`bench/prompts/vague_50.jsonl`) vs the test set.
 
 ## Known issues handled by the script
 

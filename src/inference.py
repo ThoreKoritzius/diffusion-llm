@@ -261,6 +261,7 @@ configure_torch_cpu_threads()
 QWEN_MODEL_DIR = os.environ.get("QWEN_MODEL_DIR", "checkpoints/sql-ar-qwen25-coder-0.5b-ar")
 QWEN_DRAFTER_DIR = os.environ.get("QWEN_DRAFTER_DIR", "checkpoints/spec-qwen25/dflash")
 QWEN_SPEC_TOKENS = env_int("QWEN_SPEC_TOKENS", 15)
+QWEN_DRAFT_CANDIDATES = env_int("QWEN_DRAFT_CANDIDATES", 1)  # blocks verified per pass (qwen_engines.py)
 QWEN_MAX_NEW_TOKENS = env_int("QWEN_MAX_NEW_TOKENS", 128)
 QWEN_ENGINE_CACHE: Dict = {}
 ENGINE_LABELS = {
@@ -1899,7 +1900,8 @@ def run_qwen_generation_callback(prompt_text: str, context_text: str, speculativ
     ev = None
     drafted_total = accepted_total = 0
     for ev in engine.generate(prompt_text, context_text, speculative=speculative, max_new_tokens=QWEN_MAX_NEW_TOKENS,
-                              num_speculative_tokens=QWEN_SPEC_TOKENS, should_stop=should_stop):
+                              num_speculative_tokens=QWEN_SPEC_TOKENS, candidates=QWEN_DRAFT_CANDIDATES,
+                              should_stop=should_stop):
         start = len(ev["tokens"]) - len(ev["new"])
         kept = ev["p_slots"][: len(ev["new"])]
         drafted_total += len(ev["drafted"])
