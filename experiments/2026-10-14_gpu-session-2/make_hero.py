@@ -127,9 +127,9 @@ def main():
 
     fig.text(LEFT_X, 0.955, "Diffusion makes text-to-SQL faster, two ways", fontsize=18.5, fontweight="bold",
              color=INK, va="top")
-    fig.text(LEFT_X, 0.905, "As the model at matched size, or as a drafter for a larger AR model  ·  up and right is better",
+    fig.text(LEFT_X, 0.905, "Accuracy vs. latency on one H100  ·  up and right is better",
              fontsize=11, color=INK_2, va="top")
-    fig.text(LEFT_X, 0.05, "H100 PCIe, batch 1, mean latency  ·  execution accuracy on 1,000 test queries\n"
+    fig.text(LEFT_X, 0.05, "H100 PCIe, batch 1, mean latency  ·  1,000 test queries\n"
              "AR on vLLM  ·  diffusion on CUDA graphs  ·  drafters (EAGLE-3, DFlash) trained with Speculators", fontsize=7.8, color=MUTED,
              va="bottom", linespacing=1.6)
     fig.text(LEFT_X, 0.018, REPO, fontsize=7.8, color=INK_2, va="bottom")
