@@ -28,6 +28,7 @@ BENCH_N="${BENCH_N:-1000}"
 EPOCHS_MORE="${EPOCHS_MORE:-10}"
 RL_STEPS="${RL_STEPS:-1000}"
 RL_AFTER_EPOCHS="${RL_AFTER_EPOCHS:-1}"
+SPEC_VERIFIER="${SPEC_VERIFIER:-}"
 SPEC_N="${SPEC_N:-30000}"           # on-policy rows for the drafters
 DFLASH_LAYERS="${DFLASH_LAYERS:-3}" # draft depth; the 8B recipe uses 5, a 0.5B target wants a cheaper drafter
 DFLASH_BLOCK="${DFLASH_BLOCK:-16}"
@@ -200,16 +201,19 @@ drafter() {  # drafter <verifier> <eagle3|dflash>
 }
 
 track_spec() {
-  train qwen3-0.6b-ar "$PY" train_ar.py MODEL_NAME=Qwen/Qwen3-0.6B-Base NUM_EPOCHS=3 \
-    || log "!! qwen3 SFT failed: verifier stays Qwen2.5"
-  # verifier = the better Qwen SFT on 1000 test queries (quality only; latency comes later, alone)
-  local v=sql-ar-qwen25-coder-0.5b-ar
-  if done_ckpt qwen3-0.6b-ar; then
-    VLLM_GPU_UTIL=0.2 bench "$PYV" q-qwen25 --arm ar --engine vllm --model checkpoints/sql-ar-qwen25-coder-0.5b-ar
-    VLLM_GPU_UTIL=0.2 bench "$PYV" q-qwen3 --arm ar --engine vllm --model checkpoints/qwen3-0.6b-ar
-    local a b; a=$(exec_of "$SESSION_DIR/bench/q-qwen25.summary.json"); b=$(exec_of "$SESSION_DIR/bench/q-qwen3.summary.json")
-    "$PY" -c "import sys;sys.exit(0 if float('$b')>float('$a') else 1)" && v=qwen3-0.6b-ar
-    log "verifier: $v (exec qwen2.5 $a, qwen3 $b)"
+  local v="${SPEC_VERIFIER:-}"  # set it to skip the Qwen3 SFT and use that checkpoint as the verifier
+  if [ -z "$v" ]; then
+    train qwen3-0.6b-ar "$PY" train_ar.py MODEL_NAME=Qwen/Qwen3-0.6B-Base NUM_EPOCHS=3 \
+      || log "!! qwen3 SFT failed: verifier stays Qwen2.5"
+    # verifier = the better Qwen SFT on 1000 test queries (quality only; latency comes later, alone)
+    v=sql-ar-qwen25-coder-0.5b-ar
+    if done_ckpt qwen3-0.6b-ar; then
+      VLLM_GPU_UTIL=0.2 bench "$PYV" q-qwen25 --arm ar --engine vllm --model checkpoints/sql-ar-qwen25-coder-0.5b-ar
+      VLLM_GPU_UTIL=0.2 bench "$PYV" q-qwen3 --arm ar --engine vllm --model checkpoints/qwen3-0.6b-ar
+      local a b; a=$(exec_of "$SESSION_DIR/bench/q-qwen25.summary.json"); b=$(exec_of "$SESSION_DIR/bench/q-qwen3.summary.json")
+      "$PY" -c "import sys;sys.exit(0 if float('$b')>float('$a') else 1)" && v=qwen3-0.6b-ar
+      log "verifier: $v (exec qwen2.5 $a, qwen3 $b)"
+    fi
   fi
   echo "$v" > "$SESSION_DIR/verifier"
   [ -x "$PYS" ] || { log "!! no .venv-spec, skipping drafters"; return 1; }
