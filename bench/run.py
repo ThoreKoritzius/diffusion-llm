@@ -122,6 +122,9 @@ def main():
         "lat_mean_ms": statistics.mean(lat), "lat_p50_ms": lat[len(lat) // 2], "lat_p95_ms": lat[int(len(lat) * 0.95) - 1],
         "settings": {k: v for k, v in vars(args).items() if k not in ("out", "name")},
     }
+    spec = getattr(backend, "spec_stats", lambda: None)()  # vLLM drafter: acceptance (warm-up runs included)
+    if spec:
+        summary["spec"] = {"config": json.loads(os.environ["VLLM_SPEC"]), **spec}
     model = getattr(backend, "model", None)
     if isinstance(model, torch.nn.Module):
         summary["params_m"] = round(sum(p.numel() for p in model.parameters()) / 1e6, 1)

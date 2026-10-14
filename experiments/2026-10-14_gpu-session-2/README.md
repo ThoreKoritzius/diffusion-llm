@@ -48,9 +48,10 @@ states dumped once from vLLM): 30,000 training prompts answered greedily by Qwen
 LR 3e-4) trained in 14 min each. W&B project `sql-diffusion`.
 
 - **EAGLE-3 is exactly lossless here:** 1,000/1,000 predictions identical to plain Qwen.
-- **DFlash is not quite:** 957/1,000 identical, with unchanged accuracy (exec −0.1, valid +0.4). Most likely bf16
-  numerics of verifying 16-token blocks flipping near-tied tokens (the differences are reordered conditions or a
-  different column choice early on, after which the outputs diverge); not verified.
+- **DFlash is lossless up to bf16 rounding:** 957/1,000 identical, accuracy unchanged (exec −0.1, valid +0.4). At
+  the first differing token of the other 43, Qwen in float32 (CPU) puts the two tokens within 0.31 log-prob of each
+  other (median 0.03), and its argmax agrees with DFlash's token more often than with plain Qwen's (26 vs 17): bf16
+  near-ties that verifying 16-token blocks resolves differently, not drafter errors.
 - **n-gram is 2× slower than no speculation** on vLLM 0.31: it disables async scheduling and falls back to the V1
   model runner.
 - **Speculators bug:** DFlash training crashes for verifiers whose config has no `head_dim` (Qwen2/2.5):
