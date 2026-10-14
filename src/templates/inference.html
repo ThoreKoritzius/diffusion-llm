@@ -483,6 +483,145 @@
       color: var(--color-accent);
     }
 
+    /* ---- Draft trace (Qwen + diffusion drafter): one row per verifier pass ---- */
+    #tlTabDrafts,
+    .lg-dr,
+    .timeline-drafts {
+      display: none;
+    }
+
+    .timeline[data-has-drafts="1"] #tlTabDrafts {
+      display: inline-block;
+    }
+
+    .timeline[data-view="drafts"] .timeline-plot {
+      height: auto;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .timeline[data-view="drafts"] .timeline-drafts {
+      display: flex;
+    }
+
+    .timeline[data-view="drafts"] .timeline-svg,
+    .timeline[data-view="drafts"] .timeline-heat,
+    .timeline[data-view="drafts"] .timeline-playhead,
+    .timeline[data-view="drafts"] .timeline-range,
+    .timeline[data-view="drafts"] .timeline-empty,
+    .timeline[data-view="drafts"] .lg:not(.lg-dr) {
+      display: none;
+    }
+
+    .timeline[data-view="drafts"] .lg-dr {
+      display: inline-flex;
+    }
+
+    .timeline-drafts {
+      flex-direction: column;
+      gap: 2px;
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .dr-row {
+      display: grid;
+      grid-template-columns: 52px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 3px 0;
+      border-bottom: 1px solid var(--color-border-soft);
+      animation: dr-in 260ms ease both;
+      transition: opacity 140ms ease;
+    }
+
+    .dr-row:last-child {
+      border-bottom: 0;
+    }
+
+    .dr-row.dr-future {
+      opacity: 0.25;
+    }
+
+    @keyframes dr-in {
+      from { opacity: 0; transform: translateY(-3px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .dr-pass {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--color-muted);
+    }
+
+    .dr-chips {
+      display: flex;
+      flex-wrap: wrap;
+      row-gap: 3px;
+      column-gap: 1px;
+      min-width: 0;
+    }
+
+    .dr-chip.dr-sp {
+      margin-left: 6px;
+    }
+
+    .dr-chip {
+      white-space: pre;
+      padding: 1px 3px;
+      line-height: 1.5;
+    }
+
+    .dr-acc {
+      background: rgba(42, 120, 214, 0.13);
+      color: #1d5fae;
+    }
+
+    .dr-fix {
+      background: rgba(235, 104, 52, 0.16);
+      color: #a8431a;
+      font-weight: 700;
+    }
+
+    .dr-drop {
+      color: #a3abb8;
+      text-decoration: line-through;
+      text-decoration-color: rgba(163, 171, 184, 0.8);
+    }
+
+    .dr-drop.dr-miss {
+      color: #c2524a;
+      text-decoration-color: rgba(194, 82, 74, 0.7);
+    }
+
+    .dr-gap {
+      width: 10px;
+    }
+
+    .dr-kept {
+      font-family: var(--sans);
+      font-size: 11px;
+      color: var(--color-muted);
+      white-space: nowrap;
+    }
+
+    .dr-kept b {
+      color: #1d5fae;
+    }
+
+    .timeline .lg-dr::before {
+      width: 10px;
+      height: 10px;
+      border-top: 0;
+      flex-shrink: 0;
+    }
+
+    .timeline .lg-dr-acc::before { background: rgba(42, 120, 214, 0.35); }
+    .timeline .lg-dr-fix::before { background: rgba(235, 104, 52, 0.45); }
+    .timeline .lg-dr-drop::before { background: #d5dae2; }
+
     /* Hide the switcher until a run produced per-token telemetry */
     .timeline[data-has-grid="0"] .tl-tabs {
       display: none;
@@ -1058,6 +1197,37 @@
       min-height: 84px;
     }
 
+    .model-select {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-xs);
+      background: #fff;
+      color: var(--color-text);
+      font-size: 14px;
+      font-family: var(--sans);
+      padding: 10px 12px;
+      transition: border-color 140ms ease, box-shadow 140ms ease;
+    }
+
+    .model-select:focus {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.14);
+      outline: none;
+    }
+
+    .model-hint {
+      font-size: 12px;
+      color: var(--color-muted);
+      line-height: 1.4;
+    }
+
+    /* the denoising controls only apply to the diffusion model */
+    #runForm[data-engine="qwen"] .diffusion-only,
+    #runForm[data-engine="qwen_dflash"] .diffusion-only {
+      display: none;
+    }
+
     .field-wrap {
       display: grid;
       gap: 4px;
@@ -1563,7 +1733,7 @@
           </div>
 
           <div class="timeline" id="timeline" data-state="idle" data-has-conf="0" data-has-stop="0" data-has-grid="0"
-            data-view="curves">
+            data-has-drafts="0" data-view="curves">
             <div class="timeline-head">
               <span class="timeline-title-wrap">
                 <span class="timeline-title">Token confidence</span>
@@ -1591,6 +1761,8 @@
                     aria-pressed="true">Curves</button>
                   <button type="button" class="tl-tab" id="tlTabHeat" data-tlview="heat"
                     aria-pressed="false">Tokens</button>
+                  <button type="button" class="tl-tab" id="tlTabDrafts" data-tlview="drafts"
+                    aria-pressed="false">Drafts</button>
                 </span>
               </span>
               <span class="timeline-readout" id="timelineReadout">—</span>
@@ -1599,6 +1771,7 @@
               <svg class="timeline-svg" id="timelineSvg" viewBox="0 0 1000 140" preserveAspectRatio="none"
                 aria-hidden="true"></svg>
               <canvas class="timeline-heat" id="timelineHeat" aria-hidden="true"></canvas>
+              <div class="timeline-drafts" id="timelineDrafts"></div>
               <div class="timeline-playhead" id="timelinePlayhead">
                 <span class="timeline-dot" id="timelineDot"></span>
               </div>
@@ -1614,6 +1787,9 @@
                 <span class="lg lg-conf">masked · low → high</span>
                 <span class="lg lg-commit">committed</span>
                 <span class="lg lg-stop" id="lgStop">early-stop</span>
+                <span class="lg lg-dr lg-dr-acc">drafted by diffusion, kept</span>
+                <span class="lg lg-dr lg-dr-fix">written by Qwen</span>
+                <span class="lg lg-dr lg-dr-drop">drafted, discarded</span>
               </div>
               <div class="timeline-actions">
                 <button type="button" id="exportGifBtn" class="gif-btn" disabled aria-label="Export animation as GIF">
@@ -1627,7 +1803,19 @@
 
         <aside class="console" aria-label="Input controls">
           <div class="console-scroll">
-            <form id="runForm" autocomplete="off">
+            <form id="runForm" autocomplete="off" data-engine="diffusion">
+              {% if engines|length > 1 %}
+              <div class="field-wrap">
+                <label class="field-label" for="engine">Model</label>
+                <select class="model-select" name="engine" id="engine">
+                  {% for value, label in engines %}
+                  <option value="{{ value }}">{{ label }}</option>
+                  {% endfor %}
+                </select>
+                <span class="model-hint" id="engineHint"></span>
+              </div>
+              {% endif %}
+
               <div class="field-wrap">
                 <div class="field-header">
                   <label class="field-label" for="prompt">Prompt</label>
@@ -1666,7 +1854,7 @@
                     </div>
                   </div>
 
-                  <label class="toggle-row" for="early_stop">
+                  <label class="toggle-row diffusion-only" for="early_stop">
                     <input type="checkbox" id="early_stop" name="early_stop" checked />
                     <span class="toggle-text">
                       <span class="toggle-title">Adaptive early stop</span>
@@ -1675,7 +1863,7 @@
                     </span>
                   </label>
 
-                  <div class="controls-grid">
+                  <div class="controls-grid diffusion-only">
                     <div class="ctrl-row">
                       <div class="ctrl-header">
                         <label class="field-label" for="steps">Steps</label>

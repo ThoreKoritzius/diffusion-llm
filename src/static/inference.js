@@ -56,6 +56,8 @@ const timelinePlot = document.getElementById('timelinePlot');
 const timelineHeat = document.getElementById('timelineHeat');
 const tlTabCurves = document.getElementById('tlTabCurves');
 const tlTabHeat = document.getElementById('tlTabHeat');
+const tlTabDrafts = document.getElementById('tlTabDrafts');
+const timelineDrafts = document.getElementById('timelineDrafts');
 const snapSlider = document.getElementById('snapSlider');
 const queueChip = document.getElementById('queueChip');
 const exportGifBtn = document.getElementById('exportGifBtn');
@@ -118,6 +120,7 @@ function buildRunSignature(form) {
     'top_k',
     'top_p',
     'early_stop',
+    'engine',
   ];
   const data = {};
   fields.forEach((k) => {
@@ -954,6 +957,20 @@ function exportGifInBrowser() {
   return blob.size;
 }
 
+// Diffusion runs count denoising steps out of a cap; the Qwen engines count verifier passes (one token each for
+// plain AR, an accepted draft plus one token for the diffusion drafter).
+function stepLabel(snap) {
+  if (!snap) return '';
+  const ms = Number(snap.elapsed_ms);
+  const time = Number.isFinite(ms) && ms > 0 ? ` · ${ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`}` : '';
+  if (!snap.engine || snap.engine === 'diffusion') return `Step ${snap.step} / ${snap.total_steps}${time}`;
+  const tokens = Number(snap.n_tokens) || 0;
+  if (snap.engine === 'qwen_dflash' && Number(snap.drafted)) {
+    return `Pass ${snap.step} · ${tokens} tokens · kept ${snap.accepted}/${snap.drafted} drafted${time}`;
+  }
+  return `Pass ${snap.step} · ${tokens} tokens${time}`;
+}
+
 function isTerminalSnapshot(snap) {
   if (!snap) return false;
   const step = Number(snap.step);
@@ -1004,8 +1021,31 @@ function setEfficiencyIdle() {
   if (effInfoDyn) effInfoDyn.textContent = 'Run a generation to see this run’s step savings.';
 }
 
+function updateEfficiencyReadoutAr(last) {
+  const passes = Number(last.step) || 1;
+  const tokens = Number(last.n_tokens) || passes;
+  const r = tokens / passes;
+  if (last.engine === 'qwen_dflash') {
+    if (effText) effText.textContent = `${r.toFixed(1)}× fewer passes vs AR`;
+    effPill.dataset.state = r >= 1.05 ? 'good' : 'neutral';
+    if (effInfoDyn) {
+      effInfoDyn.textContent = `This run: the diffusion drafter proposed blocks of tokens and Qwen verified each block `
+        + `in one pass, keeping ${tokens} tokens in ${passes} passes; plain autoregressive decoding needs one pass `
+        + `per token (${tokens} here). Same output as plain Qwen.`;
+    }
+  } else {
+    if (effText) effText.textContent = `${passes} passes (1 per token)`;
+    effPill.dataset.state = 'neutral';
+    if (effInfoDyn) {
+      effInfoDyn.textContent = `This run: autoregressive decoding, one forward pass per token (${tokens} tokens).`;
+    }
+  }
+}
+
 function updateEfficiencyReadout() {
   if (!effPill) return;
+  const last = historySnapshots.length ? historySnapshots[historySnapshots.length - 1] : null;
+  if (last && last.engine && last.engine !== 'diffusion') { updateEfficiencyReadoutAr(last); return; }
   const eff = computeEfficiency();
   if (!eff) { setEfficiencyIdle(); return; }
   const r = eff.ratio;
@@ -1076,6 +1116,8 @@ function setTimelineIdle() {
     snapSlider.max = '0';
   }
   tlHeatActiveStep = null;
+  tlDraftStep = null;
+  if (timelineDrafts) timelineDrafts.replaceChildren();
   if (lgStop) lgStop.textContent = 'early-stop';
   if (timelineSvg) timelineSvg.replaceChildren();
   if (timelineHeat) {
@@ -1087,6 +1129,7 @@ function setTimelineIdle() {
     timeline.dataset.hasConf = '0';
     timeline.dataset.hasStop = '0';
     timeline.dataset.hasGrid = '0';
+    timeline.dataset.hasDrafts = '0';
     applyTlView();
   }
   if (timelineReadout) timelineReadout.textContent = '—';
@@ -1461,7 +1504,10 @@ function syncScrubberToView() {
 // View preference persists across runs; the heatmap only activates when the
 // current run actually carries per-position telemetry.
 let tlViewPref = 'curves';
-try { if (localStorage.getItem('tlView') === 'heat') tlViewPref = 'heat'; } catch (e) { /* no-op */ }
+try {
+  const saved = localStorage.getItem('tlView');
+  if (saved === 'heat' || saved === 'drafts') tlViewPref = saved;
+} catch (e) { /* no-op */ }
 
 // Redraw the heatmap on every frame across the plot's height transition
 // (CSS `transition: height 180ms`). The canvas is a raster: a single draw
@@ -1484,17 +1530,20 @@ let tlViewCurrent = null;
 function applyTlView() {
   if (!timeline) return;
   const hasGrid = timeline.dataset.hasGrid === '1';
-  const eff = tlViewPref === 'heat' && hasGrid ? 'heat' : 'curves';
+  const hasDrafts = timeline.dataset.hasDrafts === '1';
+  const eff = tlViewPref === 'drafts' && hasDrafts ? 'drafts' : (tlViewPref === 'heat' && hasGrid ? 'heat' : 'curves');
   const enteringHeat = eff === 'heat' && tlViewCurrent !== 'heat';
   timeline.dataset.view = eff;
   tlViewCurrent = eff;
-  [tlTabCurves, tlTabHeat].forEach((btn) => {
+  [tlTabCurves, tlTabHeat, tlTabDrafts].forEach((btn) => {
     if (!btn) return;
-    const active = btn.dataset.tlview === tlViewPref;
+    const active = btn.dataset.tlview === eff;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
-  if (eff === 'heat' && timelineData) {
+  if (eff === 'drafts') {
+    renderDrafts(timelineData);
+  } else if (eff === 'heat' && timelineData) {
     if (enteringHeat) animateHeatIn();               // smooth across the height grow
     else requestAnimationFrame(() => renderHeatTimeline(timelineData));
     requestAnimationFrame(syncScrubberToView);
@@ -1504,7 +1553,7 @@ function applyTlView() {
 }
 
 function setTlView(v) {
-  tlViewPref = v === 'heat' ? 'heat' : 'curves';
+  tlViewPref = v === 'heat' || v === 'drafts' ? v : 'curves';
   try { localStorage.setItem('tlView', tlViewPref); } catch (e) { /* no-op */ }
   applyTlView();
 }
@@ -1512,13 +1561,86 @@ function setTlView(v) {
 function syncTimelineGridState(data) {
   if (!timeline) return;
   const hasGrid = !!(data && data.stats && data.stats.some((s) => s && Array.isArray(s.pos) && s.pos.length));
+  const hasDrafts = !!(data && data.stats && data.stats.some((s) => s && Array.isArray(s.draft)));
   timeline.dataset.hasGrid = hasGrid ? '1' : '0';
+  timeline.dataset.hasDrafts = hasDrafts ? '1' : '0';
   applyTlView();
 }
 
 function renderTimelineView(data) {
   renderTimeline(data); // SVG curves stay warm so switching back is instant
   if (timeline && timeline.dataset.view === 'heat') renderHeatTimeline(data);
+  if (timeline && timeline.dataset.view === 'drafts') renderDrafts(data);
+}
+
+// Draft trace for Qwen + diffusion drafter: one row per verifier pass. Blue = tokens the diffusion drafter
+// proposed and Qwen accepted, orange = Qwen's own token (its correction at the first disagreement, or the token
+// after a fully accepted block), struck = drafted tokens thrown away (red: the one Qwen disagreed with).
+function draftChip(text, cls) {
+  // a token's leading space becomes a gap between chips, so a row reads like the SQL it adds
+  const el = document.createElement('span');
+  const spaced = /^\s/.test(text);
+  el.className = `dr-chip ${cls}${spaced ? ' dr-sp' : ''}`;
+  el.textContent = spaced ? text.trimStart() || '␣' : text;
+  return el;
+}
+
+function draftTokensThrough(step) {
+  const stats = timelineData && Array.isArray(timelineData.stats) ? timelineData.stats : [];
+  return stats.filter((st) => st && Array.isArray(st.draft) && Number(st.step) <= step)
+    .reduce((n, st) => n + (Number(st.kept) || 0) + 1, 0);
+}
+
+function renderDrafts(data) {
+  if (!timelineDrafts) return;
+  const stats = (data && Array.isArray(data.stats) ? data.stats : [])
+    .filter((st) => st && Array.isArray(st.draft))
+    .sort((a, b) => Number(a.step) - Number(b.step));
+  const rows = stats.map((st) => {
+    const row = document.createElement('div');
+    row.className = 'dr-row';
+    row.dataset.step = String(st.step);
+    const pass = document.createElement('span');
+    pass.className = 'dr-pass';
+    pass.textContent = `pass ${st.step}`;
+    const chips = document.createElement('span');
+    chips.className = 'dr-chips';
+    const kept = Math.max(0, Number(st.kept) || 0);
+    st.draft.slice(0, kept).forEach((t) => chips.appendChild(draftChip(t, 'dr-acc')));
+    chips.appendChild(draftChip(st.fix != null ? st.fix : '', 'dr-fix'));
+    const dropped = st.draft.slice(kept);
+    if (dropped.length) {
+      const gap = document.createElement('span');
+      gap.className = 'dr-gap';
+      chips.appendChild(gap);
+      // runs of the same discarded token (typically end markers past the end of the SQL) collapse to one chip
+      for (let i = 0; i < dropped.length;) {
+        let j = i + 1;
+        while (i > 0 && j < dropped.length && dropped[j] === dropped[i]) j += 1;
+        const chip = draftChip(dropped[i], i === 0 ? 'dr-drop dr-miss' : 'dr-drop');
+        if (j - i > 1) chip.textContent += ` ×${j - i}`;
+        chips.appendChild(chip);
+        i = j;
+      }
+    }
+    const summary = document.createElement('span');
+    summary.className = 'dr-kept';
+    summary.innerHTML = st.draft.length
+      ? `<b>${kept}</b>/${st.draft.length} kept · +${kept + 1}`
+      : 'first token · +1';
+    row.append(pass, chips, summary);
+    return row;
+  });
+  timelineDrafts.replaceChildren(...rows);
+  markDraftRows(data && data.live ? null : tlDraftStep);
+}
+
+let tlDraftStep = null;
+function markDraftRows(step) {
+  if (!timelineDrafts) return;
+  timelineDrafts.querySelectorAll('.dr-row').forEach((row) => {
+    row.classList.toggle('dr-future', step != null && Number(row.dataset.step) > step);
+  });
 }
 
 function updateTimelinePlayhead(stepVal) {
@@ -1529,6 +1651,10 @@ function updateTimelinePlayhead(stepVal) {
     // heat view: the scrubbed step is a highlighted row, redrawn on the canvas
     tlHeatActiveStep = step;
     queueHeatRepaint();
+  } else if (timeline && timeline.dataset.view === 'drafts') {
+    // drafts view: passes after the scrubbed one fade out (none while the run is live)
+    tlDraftStep = timelineData.live ? null : step;
+    markDraftRows(tlDraftStep);
   } else {
     timelinePlayhead.style.left = `${cap <= 0 ? 50 : (step / cap) * 100}%`;
   }
@@ -1539,7 +1665,11 @@ function updateTimelinePlayhead(stepVal) {
     timelineDot.style.top = `${(tlYVB(gate) / TL_VB_H) * 100}%`;
   }
 
-  if (timelineReadout) {
+  if (timelineReadout && timeline && timeline.dataset.view === 'drafts') {
+    const tokens = draftTokensThrough(step);
+    timelineReadout.innerHTML = `<span class="ro-step">Pass ${step} / ${cap}</span> · ${tokens} tokens`
+      + (step > 0 ? ` · <span class="ro-gate">${(tokens / step).toFixed(1)}</span> per pass` : '');
+  } else if (timelineReadout) {
     if (step > used) {
       timelineReadout.innerHTML =
         `<span class="ro-step">Step ${step} / ${cap}</span> · early-stopped at ${used}`;
@@ -1690,7 +1820,7 @@ function applySnapshotAnimated(snap) {
     ? sanitizeFinalSql(snapshotText(snap))
     : snapshotText(snap);
   updateTokenDisplay(text);
-  stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
+  stepBox.textContent = stepLabel(snap);
   appendLiveTimeline(snap);
 }
 
@@ -1700,7 +1830,7 @@ function applySnapshotImmediate(snap) {
     ? sanitizeFinalSql(snapshotText(snap))
     : snapshotText(snap);
   updateTokenDisplay(text);
-  stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
+  stepBox.textContent = stepLabel(snap);
 }
 
 function ensurePlayback() {
@@ -1737,7 +1867,12 @@ function replayAllOnceAndFinalize() {
   const resolvedTerminalText = terminalSqlText || (terminalFromHistory ? sanitizeFinalSql(snapshotText(terminalFromHistory)) : '');
   if (resolvedTerminalText) {
     if (!terminalSqlText) terminalSqlText = resolvedTerminalText;
+    // keep the engine fields (Qwen runs: passes, tokens, drafts) for the step label and efficiency readout
+    const lastSnap = terminalFromHistory || historySnapshots[historySnapshots.length - 1] || {};
+    const engineFields = {};
+    ['engine', 'n_tokens', 'drafted', 'accepted', 'elapsed_ms'].forEach((k) => { if (lastSnap[k] != null) engineFields[k] = lastSnap[k]; });
     pendingSnapshots.push({
+      ...engineFields,
       step: Number.isFinite(terminalStep) ? terminalStep : 0,
       total_steps: Number.isFinite(terminalTotal) ? terminalTotal : (Number.isFinite(terminalStep) ? terminalStep : 0),
       sql_only: resolvedTerminalText,
@@ -2118,6 +2253,31 @@ runForm.addEventListener('submit', async (ev) => {
   }
 });
 
+const engineSelect = document.getElementById('engine');
+const engineHint = document.getElementById('engineHint');
+const ENGINE_HINTS = {
+  diffusion: 'Fills the whole SQL window in parallel over a few denoising steps.',
+  qwen: 'Writes the SQL one token per forward pass.',
+  qwen_dflash: 'A small diffusion model drafts blocks of tokens; Qwen checks each block in one pass. Same output as Qwen alone.',
+};
+function syncEngine() {
+  const engine = engineSelect ? engineSelect.value : 'diffusion';
+  runForm.dataset.engine = engine;
+  if (engineHint) engineHint.textContent = ENGINE_HINTS[engine] || '';
+  try { localStorage.setItem('engine', engine); } catch (_) { /* storage unavailable */ }
+}
+if (engineSelect) {
+  try {
+    const saved = localStorage.getItem('engine');
+    if (saved && Array.from(engineSelect.options).some((o) => o.value === saved)) engineSelect.value = saved;
+  } catch (_) { /* storage unavailable */ }
+  engineSelect.addEventListener('change', () => {
+    syncEngine();
+    if (engineSelect.value === 'qwen_dflash') setTlView('drafts');
+  });
+  syncEngine();
+}
+
 snapSlider.addEventListener('input', () => {
   if (!timelineData) return;
   const step = parseInt(snapSlider.value, 10);
@@ -2126,7 +2286,7 @@ snapSlider.addEventListener('input', () => {
 
   if (terminalSqlText && step >= timelineData.used) {
     updateTokenDisplay(terminalSqlText);
-    stepBox.textContent = `Step ${snap.step} / ${snap.total_steps}`;
+    stepBox.textContent = stepLabel(snap);
   } else {
     applySnapshotImmediate(snap);
   }
@@ -2135,7 +2295,7 @@ snapSlider.addEventListener('input', () => {
 });
 
 // --- Heatmap view wiring ------------------------------------------------------
-[tlTabCurves, tlTabHeat].forEach((btn) => {
+[tlTabCurves, tlTabHeat, tlTabDrafts].forEach((btn) => {
   if (btn) btn.addEventListener('click', () => setTlView(btn.dataset.tlview));
 });
 applyTlView();

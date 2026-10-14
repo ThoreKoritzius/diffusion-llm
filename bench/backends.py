@@ -398,12 +398,27 @@ class ARBackend:
             # VLLM_SPEC: speculative-decoding config as JSON, e.g. '{"method": "ngram", "num_speculative_tokens": 8,
             # "prompt_lookup_max": 4}' or '{"method": "dflash", "model": "<drafter dir>", "num_speculative_tokens": 15}'
             spec = os.environ.get("VLLM_SPEC")
+            # stats on only with a drafter, for the acceptance numbers in spec_stats()
             self.model = LLM(model=model_dir, dtype="bfloat16", enforce_eager=False,
                              gpu_memory_utilization=float(os.environ.get("VLLM_GPU_UTIL", "0.9")),
-                             **({"speculative_config": json.loads(spec)} if spec else {}))
+                             **({"speculative_config": json.loads(spec), "disable_log_stats": False} if spec else {}))
             self.params = SamplingParams(temperature=0.0, max_tokens=max_new_tokens, stop_token_ids=self.stop_ids)
         else:
             raise ValueError(engine)
+
+    def spec_stats(self) -> Optional[dict]:
+        """Speculative decoding in vLLM: drafts, mean accepted tokens per draft, acceptance per draft position."""
+        if self.engine != "vllm" or not os.environ.get("VLLM_SPEC"):
+            return None
+        m = {x.name: x for x in self.model.get_metrics()}
+        get = lambda name: getattr(m.get(name), "value", 0)  # noqa: E731
+        drafts, drafted = get("vllm:spec_decode_num_drafts"), get("vllm:spec_decode_num_draft_tokens")
+        accepted = get("vllm:spec_decode_num_accepted_tokens")
+        per_pos = getattr(m.get("vllm:spec_decode_num_accepted_tokens_per_pos"), "values", [])
+        return {"drafts": drafts, "draft_tokens": drafted, "accepted_tokens": accepted,
+                "mean_accepted": round(accepted / drafts, 3) if drafts else None,
+                "acceptance_rate": round(accepted / drafted, 3) if drafted else None,
+                "accept_per_pos": [round(v / drafts, 3) for v in per_pos] if drafts else []}
 
     def prompt_ids(self, prompt: str, context: str) -> List[int]:
         """Same layout as src/train_ar.py: [BOS] <PROMPT> p </PROMPT> <CONTEXT> c </CONTEXT> <SQL>"""

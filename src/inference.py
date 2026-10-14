@@ -255,6 +255,38 @@ def configure_torch_cpu_threads() -> None:
 
 configure_torch_cpu_threads()
 
+# Model dropdown: the diffusion model (DEFAULT_MODEL_DIR) or an autoregressive Qwen, alone or with a DFlash
+# (block-diffusion) drafter for speculative decoding (src/qwen_engines.py). Qwen options appear when their
+# checkpoints exist.
+QWEN_MODEL_DIR = os.environ.get("QWEN_MODEL_DIR", "checkpoints/sql-ar-qwen25-coder-0.5b-ar")
+QWEN_DRAFTER_DIR = os.environ.get("QWEN_DRAFTER_DIR", "checkpoints/spec-qwen25/dflash")
+QWEN_SPEC_TOKENS = env_int("QWEN_SPEC_TOKENS", 15)
+QWEN_MAX_NEW_TOKENS = env_int("QWEN_MAX_NEW_TOKENS", 128)
+QWEN_ENGINE_CACHE: Dict = {}
+ENGINE_LABELS = {
+    "diffusion": "Diffusion",
+    "qwen": "Qwen2.5-0.5B (autoregressive)",
+    "qwen_dflash": "Qwen2.5-0.5B + diffusion drafter",
+}
+
+
+def available_engines() -> List[str]:
+    engines = ["diffusion"]
+    if os.path.isfile(os.path.join(QWEN_MODEL_DIR, "config.json")):
+        engines.append("qwen")
+        if os.path.isfile(os.path.join(QWEN_DRAFTER_DIR, "model.safetensors")):
+            engines.append("qwen_dflash")
+    return engines
+
+
+def get_qwen_engine():
+    if "engine" not in QWEN_ENGINE_CACHE:
+        from qwen_engines import QwenEngine
+
+        drafter = QWEN_DRAFTER_DIR if "qwen_dflash" in available_engines() else None
+        QWEN_ENGINE_CACHE["engine"] = QwenEngine(QWEN_MODEL_DIR, drafter_dir=drafter)
+    return QWEN_ENGINE_CACHE["engine"]
+
 
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
@@ -467,7 +499,10 @@ def redis_get_snapshot_delta(run_id: str, after_idx: int) -> tuple[int, List[Dic
 
 
 def cache_signature_payload(payload: Dict) -> Dict:
+    engine = payload.get("engine", "diffusion")
     return {
+        # only the Qwen engines add a key, so existing diffusion cache entries keep their hashes
+        **({"engine": engine} if engine != "diffusion" else {}),
         "version": RESULT_CACHE_VERSION,
         "prompt": payload.get("prompt", ""),
         "context": payload.get("context", ""),
@@ -998,22 +1033,33 @@ def process_run(run_id: str) -> None:
                 update_metric_average("avg_first_frame", "first_frame_count", first_frame_elapsed)
             redis_append_snapshot(run_id, snapshot_obj)
 
-        res = run_denoising_generation_callback(
-            payload["prompt"],
-            payload["context"],
-            payload["model_dir"],
-            n_steps=payload["steps"],
-            max_len=payload["max_len"],
-            top_k=payload["top_k"],
-            top_p=payload["top_p"],
-            sql_len_request=payload["sql_len"],
-            animate=True,
-            on_snapshot=on_snapshot_callback,
-            status_cb=status_cb,
-            deterministic_seed=DEFAULT_SEED,
-            should_stop=should_stop,
-            confidence_stop=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) else None),
-        )
+        engine = payload.get("engine", "diffusion")
+        if engine != "diffusion":
+            res = run_qwen_generation_callback(
+                payload["prompt"],
+                payload["context"],
+                speculative=(engine == "qwen_dflash"),
+                on_snapshot=on_snapshot_callback,
+                status_cb=status_cb,
+                should_stop=should_stop,
+            )
+        else:
+            res = run_denoising_generation_callback(
+                payload["prompt"],
+                payload["context"],
+                payload["model_dir"],
+                n_steps=payload["steps"],
+                max_len=payload["max_len"],
+                top_k=payload["top_k"],
+                top_p=payload["top_p"],
+                sql_len_request=payload["sql_len"],
+                animate=True,
+                on_snapshot=on_snapshot_callback,
+                status_cb=status_cb,
+                deterministic_seed=DEFAULT_SEED,
+                should_stop=should_stop,
+                confidence_stop=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) else None),
+            )
         final_sql = strip_final_masks(res.get("sql_only", ""))
         redis_update_run(
             run_id,
@@ -1022,7 +1068,7 @@ def process_run(run_id: str) -> None:
             step_stats=res.get("step_stats", []),
             window_tokens=res.get("window_tokens", []),
             steps_used=int(res.get("steps_used", 0) or 0),
-            max_steps_cap=int(payload.get("steps", 0) or 0),
+            max_steps_cap=int(res.get("max_steps_cap") or payload.get("steps", 0) or 0),
             confidence_threshold=(CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else ""),
         )
 
@@ -1053,7 +1099,7 @@ def process_run(run_id: str) -> None:
                 "step_stats": res.get("step_stats", []),
                 "window_tokens": res.get("window_tokens", []),
                 "steps_used": int(res.get("steps_used", 0) or 0),
-                "max_steps_cap": int(payload.get("steps", 0) or 0),
+                "max_steps_cap": int(res.get("max_steps_cap") or payload.get("steps", 0) or 0),
                 "confidence_threshold": (CONFIDENCE_STOP if int(payload.get("early_stop", 1)) and CONFIDENCE_STOP else None),
             })
     except TimeoutError:
@@ -1785,7 +1831,8 @@ def run_denoising_generation_callback(
     if animate:
         s_clean_final = replace_sql_section(snapshot_text(), final_sql_only)
         snapshots.append(with_step_telemetry(with_conf(
-            {"text": s_clean_final, "sql_only": final_sql_only, "step": steps_used, "total_steps": total_steps},
+            {"text": s_clean_final, "sql_only": final_sql_only, "step": steps_used, "total_steps": total_steps,
+             "elapsed_ms": round((time.time() - t0) * 1000, 1)},
             step_stats[-1] if step_stats else None,
         )))
         if on_snapshot:
@@ -1825,6 +1872,70 @@ def run_denoising_generation_callback(
         "step_stats": step_stats,
         "window_tokens": window_tokens,
     }
+
+def run_qwen_generation_callback(prompt_text: str, context_text: str, speculative: bool, on_snapshot=None,
+                                 status_cb=None, should_stop=None) -> Dict:
+    """Qwen token by token, or with the DFlash drafter: one snapshot per verifier pass, in the same format as the
+    diffusion run so the live SQL box, confidence chart and step trace work unchanged. Per pass, `pos` are the
+    positions the verifier checked (1 for plain AR, the drafted block for speculative), `pos_p` its confidence at
+    each, and `commit_pos` the tokens it kept."""
+    engine = get_qwen_engine()
+    name = "qwen_dflash" if speculative else "qwen"
+    if status_cb:
+        status_cb(f"{ENGINE_LABELS[name]}: generating")
+    snapshots: List[Dict] = []
+    step_stats: List[Dict] = []
+    pending = None  # each snapshot is emitted when the next arrives, so the last one can be marked terminal
+
+    def emit(snap: Dict, terminal: bool) -> None:
+        snap["total_steps"] = snap["step"] if terminal else snap["step"] + 1
+        snapshots.append(snap)
+        if on_snapshot:
+            on_snapshot(snap)
+
+    def token_text(t: int) -> str:
+        return "⏎" if t in engine.stop_ids else engine.tok.decode([t])
+
+    ev = None
+    drafted_total = accepted_total = 0
+    for ev in engine.generate(prompt_text, context_text, speculative=speculative, max_new_tokens=QWEN_MAX_NEW_TOKENS,
+                              num_speculative_tokens=QWEN_SPEC_TOKENS, should_stop=should_stop):
+        start = len(ev["tokens"]) - len(ev["new"])
+        kept = ev["p_slots"][: len(ev["new"])]
+        drafted_total += len(ev["drafted"])
+        accepted_total += ev["accepted"]
+        stat = {
+            "step": ev["forward"],
+            "pos": list(range(start, start + len(ev["p_slots"]))),
+            "pos_p": [round(p, 4) for p in ev["p_slots"]],
+            "commit_pos": list(range(start, start + len(ev["new"]))),
+            "min_p": min(kept), "mean_p": sum(kept) / len(kept),
+            "drafted": len(ev["drafted"]), "accepted": ev["accepted"],
+        }
+        if speculative:  # for the draft trace: what the drafter proposed, how much Qwen kept, and Qwen's own token
+            stat.update(draft=[token_text(t) for t in ev["drafted"]], kept=min(ev["accepted"], len(ev["new"]) - 1),
+                        fix=token_text(ev["new"][-1]))
+        step_stats.append(stat)
+        sql = engine.decode(ev["tokens"])
+        if pending:
+            emit(pending, terminal=False)
+        pending = {"text": sql, "sql_only": sql, "step": ev["forward"], "engine": name, "n_tokens": len(ev["tokens"]),
+                   "drafted": len(ev["drafted"]), "accepted": ev["accepted"], "min_p": stat["min_p"],
+                   "mean_p": stat["mean_p"], "stats_delta": [stat], "content_end": len(ev["tokens"]),
+                   "elapsed_ms": round(ev["elapsed"] * 1000, 1)}
+        if status_cb:
+            status_cb(f"step {ev['forward']}/{ev['forward']}")
+    if pending:
+        emit(pending, terminal=True)
+    tokens = ev["tokens"] if ev else []
+    sql = engine.decode(tokens)
+    window_tokens = [engine.tok.decode([t]) for t in tokens if t not in engine.stop_ids]
+    if status_cb and ev:
+        extra = f", {accepted_total}/{drafted_total} drafted tokens accepted" if speculative else ""
+        status_cb(f"{len(tokens)} tokens in {ev['forward']} passes, {ev['elapsed'] * 1000:.0f} ms{extra}")
+    return {"snapshots": snapshots, "sql_only": sql, "display": sql, "steps_used": ev["forward"] if ev else 0,
+            "max_steps_cap": ev["forward"] if ev else 0, "step_stats": step_stats, "window_tokens": window_tokens}
+
 
 # -------------------------
 # Flask endpoints
@@ -1919,6 +2030,7 @@ def index():
         inference_backend_requested=INFERENCE_BACKEND,
         inference_backend_runtime=runtime_backend_display(),
         static_version=static_version,
+        engines=[(e, ENGINE_LABELS[e]) for e in available_engines()],
     )
 
 
@@ -1928,7 +2040,10 @@ def start_run():
     form = request.form
     prompt = form.get("prompt", "").strip()
     context = form.get("context", "").strip()
-    model_dir = DEFAULT_MODEL_DIR
+    engine = form.get("engine", "diffusion").strip() or "diffusion"
+    if engine not in available_engines():
+        return jsonify({"error": "invalid_input", "message": f"Model not available: {engine}"}), 400
+    model_dir = DEFAULT_MODEL_DIR if engine == "diffusion" else QWEN_MODEL_DIR
     gif_size_text = form.get("gif_size", "").strip()
     early_stop = form.get("early_stop", "1").strip().lower() not in ("0", "false", "off", "no", "")
     try:
@@ -1994,7 +2109,8 @@ def start_run():
         "top_p": top_p,
         "model_dir": model_dir,
         "gif_size_text": gif_size_text,
-        "early_stop": 1 if early_stop else 0,
+        "early_stop": 1 if early_stop and engine == "diffusion" else 0,
+        "engine": engine,
     }
     cached = read_result_cache(payload)
     if cached:
@@ -2012,7 +2128,7 @@ def start_run():
             "queue_token": run_id,
         })
 
-    model_ok, model_msg = validate_model_dir(model_dir)
+    model_ok, model_msg = validate_model_dir(model_dir) if engine == "diffusion" else (True, "")
     if not model_ok:
         return jsonify({"error": "invalid_model", "message": model_msg}), 400
 
