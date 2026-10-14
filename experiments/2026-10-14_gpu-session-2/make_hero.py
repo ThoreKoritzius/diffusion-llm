@@ -21,8 +21,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "2026-10-12_gpu-session"))
 from make_headline_chart import COLOR, GRID, INK, INK_2, MUTED, SURFACE  # noqa: E402
 
 HERO_AR, HERO_DIFF = "ettin150-ar-10ep-vllm-pr61276", "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs"
-HERO = [("Autoregressive", "Ettin-150M decoder", "ar", HERO_AR),
-        ("Diffusion", "Ettin-150M encoder", "diffusion", HERO_DIFF)]
+HERO = [("Ettin-150M AR", "ar", HERO_AR), ("Ettin-150M diffusion", "diffusion", HERO_DIFF)]
 QWEN, EAGLE, DFLASH = ("sql-ar-qwen25-coder-0.5b-ar-vllm", "sql-ar-qwen25-coder-0.5b-ar-vllm-eagle3",
                        "sql-ar-qwen25-coder-0.5b-ar-vllm-dflash")
 DIFF_400 = "ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs"
@@ -54,7 +53,7 @@ def label(ax, xy, name, metrics, where, big=False):
 
 def metrics(name):
     x, y = point(name)
-    return f"{x:.0f} ms  ·  {y:.0f}% exec"
+    return f"{x:.0f} ms  ·  {y:.0f}%"
 
 
 def dot(ax, name, color, size, ring=None):
@@ -82,13 +81,13 @@ def main():
     ax.annotate("", xy=(xf, yf), xytext=(xq, yq), zorder=2, arrowprops=dict(
         arrowstyle="-|>", color=INK, lw=1.5, shrinkA=9, shrinkB=12, mutation_scale=14,
         connectionstyle="arc3,rad=-0.28"))
-    ax.annotate(f"{xq / xf:.1f}× faster", ((xq * xf) ** 0.5, yq), xytext=(0, 50), textcoords="offset points",
+    ax.annotate(f"{xq / xf:.1f}× faster", ((xq * xf) ** 0.5, yq), xytext=(0, 46), textcoords="offset points",
                 ha="center", va="bottom", fontsize=14, fontweight="bold", color=INK)
-    ax.annotate("same model, diffusion drafter", ((xq * xf) ** 0.5, yq), xytext=(0, 35),
-                textcoords="offset points", ha="center", va="bottom", fontsize=9, color=INK_2)
+    ax.annotate("same model", ((xq * xf) ** 0.5, yq), xytext=(0, 32), textcoords="offset points", ha="center",
+                va="bottom", fontsize=9.5, color=INK_2)
     label(ax, (xq, yq), "Qwen2.5-0.5B AR", metrics(QWEN), "left")
-    label(ax, point(EAGLE), "+ EAGLE-3 drafter", metrics(EAGLE), "below")
-    label(ax, (xf, yf), "+ DFlash drafter", metrics(DFLASH), "right")
+    label(ax, point(EAGLE), "+ AR drafter", metrics(EAGLE), "below")
+    label(ax, (xf, yf), "+ diffusion drafter", metrics(DFLASH), "right")
 
     dot(ax, DIFF_400, COLOR["diffusion"], 170)
     label(ax, point(DIFF_400), "Ettin-400M diffusion", metrics(DIFF_400), "right")
@@ -98,13 +97,13 @@ def main():
     ax.annotate("", xy=(xd, yd), xytext=(xa, ya), zorder=2, arrowprops=dict(
         arrowstyle="-|>", color=INK, lw=2.2, shrinkA=17, shrinkB=17, mutation_scale=20))
     mid = ((xa * xd) ** 0.5, (ya + yd) / 2)
-    ax.annotate(f"{xa / xd:.1f}× faster", mid, xytext=(0, -16), textcoords="offset points", ha="center",
-                va="top", fontsize=22, fontweight="bold", color=INK)
-    ax.annotate("same size, tied accuracy", mid, xytext=(0, -46), textcoords="offset points", ha="center",
-                va="top", fontsize=10.5, color=INK_2)
-    for title, model, arm, name in HERO:
+    ax.annotate(f"{xa / xd:.1f}× faster", mid, xytext=(-34, 26), textcoords="offset points", ha="center",
+                va="bottom", fontsize=22, fontweight="bold", color=INK)
+    ax.annotate("same size, tied accuracy", mid, xytext=(-34, 10), textcoords="offset points", ha="center",
+                va="bottom", fontsize=10.5, color=INK_2)
+    for title, arm, name in HERO:
         dot(ax, name, COLOR[arm], 440)
-        label(ax, point(name), title, f"{model}\n{metrics(name)}", "below", big=True)
+        label(ax, point(name), title, metrics(name), "below", big=True)
 
     ax.set_xticks([100, 70, 50, 30, 20])
     ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g} ms"))
@@ -119,19 +118,19 @@ def main():
     ax.tick_params(colors=INK_2, labelsize=9.5, length=0, which="both", pad=6)
     handles = [plt.Line2D([], [], marker="o", linestyle="", markersize=9, color=COLOR["diffusion"],
                           label="diffusion"),
-               plt.Line2D([], [], marker="o", linestyle="", markersize=9, color=COLOR["ar"], label="autoregressive"),
+               plt.Line2D([], [], marker="o", linestyle="", markersize=9, color=COLOR["ar"], label="autoregressive (AR)"),
                plt.Line2D([], [], marker="o", linestyle="", markersize=7, markerfacecolor=COLOR["ar"],
                           markeredgecolor=COLOR["diffusion"], markeredgewidth=2.5,
-                          label="autoregressive + diffusion drafter")]
+                          label="AR + diffusion drafter")]
     ax.legend(handles=handles, loc="upper left", frameon=False, fontsize=9, labelcolor=INK_2, handletextpad=0.4,
               borderaxespad=0.2)
 
     fig.text(LEFT_X, 0.955, "Diffusion makes text-to-SQL faster, two ways", fontsize=18.5, fontweight="bold",
              color=INK, va="top")
-    fig.text(LEFT_X, 0.905, f"Same-size diffusion model: {xa / xd:.1f}× faster   ·   Qwen2.5 with a diffusion drafter: {xq / xf:.1f}× faster",
+    fig.text(LEFT_X, 0.905, "As the model at matched size, or as a drafter for a larger AR model  ·  up and right is better",
              fontsize=11, color=INK_2, va="top")
-    fig.text(LEFT_X, 0.05, "AR on vLLM, diffusion on CUDA graphs; drafters trained on Qwen's own outputs (Speculators)\n"
-             "H100 PCIe, batch 1, mean latency  ·  exec accuracy on 1,000 test queries", fontsize=7.8, color=MUTED,
+    fig.text(LEFT_X, 0.05, "H100 PCIe, batch 1, mean latency  ·  execution accuracy on 1,000 test queries\n"
+             "AR on vLLM  ·  diffusion on CUDA graphs  ·  drafters (EAGLE-3, DFlash) trained with Speculators", fontsize=7.8, color=MUTED,
              va="bottom", linespacing=1.6)
     fig.text(LEFT_X, 0.018, REPO, fontsize=7.8, color=INK_2, va="bottom")
     fig.subplots_adjust(left=0.12, right=0.96, bottom=0.2, top=0.85)
