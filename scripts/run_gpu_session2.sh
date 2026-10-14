@@ -131,6 +131,8 @@ prefetch() {  # the downloads training would otherwise wait for
 prefetch &
 wait
 for d in .venv-gpu .venv-vllm; do [ -f "$d/.ok" ] || { log "!! $d missing, stopping"; exit 1; }; done
+# FlashInfer (vLLM's sampler) JIT-compiles kernels on first use and needs ninja on PATH, not just in the venv
+mkdir -p "$HOME/.local/bin" && ln -sf "$REPO_DIR/.venv-vllm/bin/ninja" "$HOME/.local/bin/ninja"
 "$PY" -c "import torch;print('torch', torch.__version__, torch.cuda.get_device_name(0))" | tee -a "$L"
 
 # --------------------------------------------------------------------------------------------------- vLLM PR (GPU, ~15 min)
