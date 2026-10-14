@@ -8,7 +8,7 @@ A masked diffusion language model (LLaDA-style) for text-to-SQL generation, buil
 
 ## Results at a glance
 
-![Diffusion vs autoregressive on H100](experiments/2026-10-12_gpu-session/plots/gpu_square.png)
+![Diffusion makes text-to-SQL faster, two ways](experiments/2026-10-14_gpu-session-2/plots/hero.png)
 
 ModernBERT-base (150M), 10 epochs on [`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql), confidence decoding with adaptive early stop at 0.9. Evaluated on the first 256 filtered test rows:
 
@@ -29,7 +29,8 @@ Compared with an autoregressive (AR) model fine-tuned on the same data ([Qwen ex
 
 Findings so far:
 
-- **Matched size, diffusion is 2.7× faster at similar accuracy.** Ettin-150M encoder (diffusion) vs. decoder (AR), same data, 10 epochs, 1,000 test queries: exec 0.559 vs 0.574 (−1.5 ± 1.8, a tie), exact match 0.279 vs 0.238 (+4.1 ± 1.2). Batch-1 latency on H100: 25 ms (CUDA graphs) vs 67 ms (vLLM). The 3× larger Qwen2.5-0.5B AR is still more accurate (0.730, 63 ms); diffusion's gap is invalid SQL, not wrong logic. See the [GPU session](experiments/2026-10-12_gpu-session/README.md).
+- **Matched size, diffusion is 2.6× faster at tied accuracy.** Ettin-150M encoder (diffusion) vs. decoder (AR), same data, 10 epochs, 1,000 test queries on one H100: 25 ms (CUDA graphs) vs 67 ms (vLLM), exec 0.564 vs 0.580 (−1.7 ± 3.5, a tie), exact match 0.277 vs 0.239 (+3.8 ± 2.3). Diffusion's gap is invalid SQL (−10 points), mostly closed by one verify pass (exec 0.591, 42 ms). See [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) and [session 1](experiments/2026-10-12_gpu-session/README.md).
+- **A diffusion drafter makes the larger AR model 2.0× faster.** Qwen2.5-0.5B (exec 0.735) on vLLM with a DFlash block-diffusion drafter for speculative decoding: 28 ms instead of 57 ms, at unchanged accuracy, and 1.3× faster than an EAGLE-3 drafter trained on the same data (37 ms). Above 150M, diffusion as the drafter beats diffusion as the model: Ettin-400M diffusion takes 32 ms at exec 0.606.
 
 - **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
 - **More steps can hurt.** Accuracy peaks around 11 steps (threshold 0.9) and falls ~10 points when decoding runs to a 0.99 threshold (~19 steps).
