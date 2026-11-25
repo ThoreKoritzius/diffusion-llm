@@ -1,0 +1,398 @@
+{
+ "ar_step_ms": 13.116568826921466,
+ "created_utc": "2026-11-22T11:05:45Z",
+ "law": {
+  "dflash": {
+   "cost": 1.2057189129528343,
+   "w": [
+    0.0853243592834247,
+    0.18626794218667728,
+    0.4186023585962916
+   ]
+  },
+  "draft7": {
+   "cost": 2.1852320498788678,
+   "w": [
+    0.13596394698480002,
+    0.17013441249619796,
+    0.25263265083153047
+   ]
+  },
+  "eagle7": {
+   "cost": 1.3106640016079723,
+   "w": [
+    0.209914661187113,
+    0.2584298670647325,
+    0.4719705417856024
+   ]
+  },
+  "ngram15": {
+   "cost": 0.9924884638942334,
+   "w": [
+    0.12112466292665369,
+    0.8222719919825238,
+    1.2618535203235242
+   ]
+  },
+  "ngram31": {
+   "cost": 1.0288994819531305,
+   "w": [
+    0.08544011389930635,
+    0.8243409951173984,
+    1.4406938250880794
+   ]
+  },
+  "ngram7": {
+   "cost": 0.9849856805528643,
+   "w": [
+    0.18274033316477417,
+    0.8053329081603812,
+    1.1215863003264694
+   ]
+  }
+ },
+ "law_source": "A100 Qwen3-8B edit261, reference-diff structure",
+ "predictions": {
+  "llama31-8b/ceb150": {
+   "dflash": {
+    "speedup_a100_costs": 7.29,
+    "tokens_per_call": 9.74
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.07,
+    "tokens_per_call": 6.94
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.29,
+    "tokens_per_call": 4.47
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.085,
+   "ngram15": {
+    "speedup_a100_costs": 4.59,
+    "tokens_per_call": 4.83
+   },
+   "ngram31": {
+    "speedup_a100_costs": 5.1,
+    "tokens_per_call": 5.6
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.75,
+    "tokens_per_call": 3.86
+   }
+  },
+  "llama31-8b/diff104": {
+   "dflash": {
+    "speedup_a100_costs": 5.31,
+    "tokens_per_call": 7.25
+   },
+   "draft7": {
+    "speedup_a100_costs": 2.74,
+    "tokens_per_call": 6.29
+   },
+   "eagle7": {
+    "speedup_a100_costs": 2.92,
+    "tokens_per_call": 4.04
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.329,
+   "ngram15": {
+    "speedup_a100_costs": 2.37,
+    "tokens_per_call": 2.44
+   },
+   "ngram31": {
+    "speedup_a100_costs": 2.37,
+    "tokens_per_call": 2.53
+   },
+   "ngram7": {
+    "speedup_a100_costs": 2.23,
+    "tokens_per_call": 2.28
+   }
+  },
+  "llama31-8b/edit261": {
+   "dflash": {
+    "speedup_a100_costs": 7.14,
+    "tokens_per_call": 9.54
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.06,
+    "tokens_per_call": 6.91
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.27,
+    "tokens_per_call": 4.45
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.112,
+   "ngram15": {
+    "speedup_a100_costs": 4.26,
+    "tokens_per_call": 4.45
+   },
+   "ngram31": {
+    "speedup_a100_costs": 4.66,
+    "tokens_per_call": 5.09
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.55,
+    "tokens_per_call": 3.64
+   }
+  },
+  "qwen3-4b/ceb150": {
+   "dflash": {
+    "speedup_a100_costs": 7.31,
+    "tokens_per_call": 9.74
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.08,
+    "tokens_per_call": 6.94
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.29,
+    "tokens_per_call": 4.47
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.085,
+   "ngram15": {
+    "speedup_a100_costs": 4.6,
+    "tokens_per_call": 4.83
+   },
+   "ngram31": {
+    "speedup_a100_costs": 5.11,
+    "tokens_per_call": 5.6
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.75,
+    "tokens_per_call": 3.86
+   }
+  },
+  "qwen3-4b/diff104": {
+   "dflash": {
+    "speedup_a100_costs": 5.33,
+    "tokens_per_call": 7.25
+   },
+   "draft7": {
+    "speedup_a100_costs": 2.75,
+    "tokens_per_call": 6.29
+   },
+   "eagle7": {
+    "speedup_a100_costs": 2.92,
+    "tokens_per_call": 4.04
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.328,
+   "ngram15": {
+    "speedup_a100_costs": 2.37,
+    "tokens_per_call": 2.44
+   },
+   "ngram31": {
+    "speedup_a100_costs": 2.37,
+    "tokens_per_call": 2.53
+   },
+   "ngram7": {
+    "speedup_a100_costs": 2.24,
+    "tokens_per_call": 2.28
+   }
+  },
+  "qwen3-4b/edit261": {
+   "dflash": {
+    "speedup_a100_costs": 7.16,
+    "tokens_per_call": 9.54
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.06,
+    "tokens_per_call": 6.91
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.28,
+    "tokens_per_call": 4.45
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.112,
+   "ngram15": {
+    "speedup_a100_costs": 4.27,
+    "tokens_per_call": 4.46
+   },
+   "ngram31": {
+    "speedup_a100_costs": 4.67,
+    "tokens_per_call": 5.1
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.56,
+    "tokens_per_call": 3.65
+   }
+  },
+  "qwen3-8b/ceb150": {
+   "dflash": {
+    "speedup_a100_costs": 7.31,
+    "tokens_per_call": 9.74
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.08,
+    "tokens_per_call": 6.94
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.29,
+    "tokens_per_call": 4.47
+   },
+   "kind": "same target",
+   "new_code_share": 0.085,
+   "ngram15": {
+    "speedup_a100_costs": 4.6,
+    "tokens_per_call": 4.83
+   },
+   "ngram31": {
+    "speedup_a100_costs": 5.11,
+    "tokens_per_call": 5.6
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.75,
+    "tokens_per_call": 3.86
+   }
+  },
+  "qwen3-8b/diff104": {
+   "dflash": {
+    "speedup_a100_costs": 5.33,
+    "tokens_per_call": 7.25
+   },
+   "draft7": {
+    "speedup_a100_costs": 2.75,
+    "tokens_per_call": 6.29
+   },
+   "eagle7": {
+    "speedup_a100_costs": 2.92,
+    "tokens_per_call": 4.04
+   },
+   "kind": "same target",
+   "new_code_share": 0.328,
+   "ngram15": {
+    "speedup_a100_costs": 2.37,
+    "tokens_per_call": 2.44
+   },
+   "ngram31": {
+    "speedup_a100_costs": 2.37,
+    "tokens_per_call": 2.53
+   },
+   "ngram7": {
+    "speedup_a100_costs": 2.24,
+    "tokens_per_call": 2.28
+   }
+  },
+  "qwen3-8b/edit261": {
+   "dflash": {
+    "speedup_a100_costs": 7.16,
+    "tokens_per_call": 9.54
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.06,
+    "tokens_per_call": 6.91
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.28,
+    "tokens_per_call": 4.45
+   },
+   "kind": "same target",
+   "new_code_share": 0.112,
+   "ngram15": {
+    "speedup_a100_costs": 4.27,
+    "tokens_per_call": 4.46
+   },
+   "ngram31": {
+    "speedup_a100_costs": 4.67,
+    "tokens_per_call": 5.1
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.56,
+    "tokens_per_call": 3.65
+   }
+  },
+  "qwen3coder-30b/ceb150": {
+   "dflash": {
+    "speedup_a100_costs": 7.31,
+    "tokens_per_call": 9.74
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.08,
+    "tokens_per_call": 6.94
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.29,
+    "tokens_per_call": 4.47
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.085,
+   "ngram15": {
+    "speedup_a100_costs": 4.6,
+    "tokens_per_call": 4.83
+   },
+   "ngram31": {
+    "speedup_a100_costs": 5.11,
+    "tokens_per_call": 5.6
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.76,
+    "tokens_per_call": 3.86
+   }
+  },
+  "qwen3coder-30b/diff104": {
+   "dflash": {
+    "speedup_a100_costs": 5.28,
+    "tokens_per_call": 7.17
+   },
+   "draft7": {
+    "speedup_a100_costs": 2.74,
+    "tokens_per_call": 6.27
+   },
+   "eagle7": {
+    "speedup_a100_costs": 2.91,
+    "tokens_per_call": 4.02
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.342,
+   "ngram15": {
+    "speedup_a100_costs": 2.32,
+    "tokens_per_call": 2.38
+   },
+   "ngram31": {
+    "speedup_a100_costs": 2.31,
+    "tokens_per_call": 2.47
+   },
+   "ngram7": {
+    "speedup_a100_costs": 2.19,
+    "tokens_per_call": 2.23
+   }
+  },
+  "qwen3coder-30b/edit261": {
+   "dflash": {
+    "speedup_a100_costs": 7.17,
+    "tokens_per_call": 9.54
+   },
+   "draft7": {
+    "speedup_a100_costs": 3.06,
+    "tokens_per_call": 6.91
+   },
+   "eagle7": {
+    "speedup_a100_costs": 3.28,
+    "tokens_per_call": 4.45
+   },
+   "kind": "cross-target (exploratory)",
+   "new_code_share": 0.112,
+   "ngram15": {
+    "speedup_a100_costs": 4.27,
+    "tokens_per_call": 4.46
+   },
+   "ngram31": {
+    "speedup_a100_costs": 4.67,
+    "tokens_per_call": 5.1
+   },
+   "ngram7": {
+    "speedup_a100_costs": 3.56,
+    "tokens_per_call": 3.65
+   }
+  }
+ },
+ "prefill_ms": [
+  0.05345031113526495,
+  30.314768895525443
+ ],
+ "sha256": "f29757a0d707a8db128cf94e5f5508d8965e1c05d64895a9a2f34efc0f898c00"
+}

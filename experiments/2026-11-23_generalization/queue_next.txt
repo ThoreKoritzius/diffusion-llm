@@ -1,0 +1,19 @@
+VLLM_BATCH_INVARIANT=1 COHORTS=edit261 LIMIT=60 ./run_vllm_suite.sh qwen3-4b ar_bi copyflash63_bi; .venv-torch/bin/python cf_check.py qwen3-4b edit261 --methods ar_bi copyflash63_bi > results/batch_invariant_qwen3-4b.txt
+COHORTS=apply100 ./run_vllm_suite.sh qwen3-8b ar ngram31 ngram63 dflash copyflash63; .venv-torch/bin/python cf_check.py qwen3-8b apply100 --methods ngram31 ngram63 dflash copyflash63 > results/cf63_apply_qwen3-8b.txt
+COHORTS="edit261 ceb150 diff104" ./run_vllm_suite.sh qwen3-8b ngram63
+./run_vllm_suite.sh qwen3coder-30b ar
+./run_vllm_suite.sh qwen3coder-30b dflash
+./run_vllm_suite.sh qwen3coder-30b copyflash63; .venv-torch/bin/python cf_check.py qwen3coder-30b --methods dflash copyflash63 > results/cf63_qwen3coder-30b.txt
+./run_vllm_suite.sh llama31-8b ar
+./run_vllm_suite.sh llama31-8b dflash
+./run_vllm_suite.sh llama31-8b copyflash63; .venv-torch/bin/python cf_check.py llama31-8b --methods dflash copyflash63 > results/cf63_llama31-8b.txt
+./run_all.sh concurrency
+COHORTS=apply100 ./run_vllm_suite.sh qwen3-4b ar ngram63 dflash copyflash63
+./run_vllm_suite.sh qwen3coder-30b ngram31
+./run_vllm_suite.sh llama31-8b ngram31
+./run_vllm_suite.sh llama31-8b eagle7
+./run_vllm_suite.sh qwen3-4b ngram31
+./run_vllm_suite.sh qwen3-4b draft7
+./run_vllm_suite.sh qwen3coder-30b draft7
+./run_vllm_suite.sh llama31-8b draft7
+.venv-torch/bin/python summarize.py > /dev/null; echo PRIORITY_DONE

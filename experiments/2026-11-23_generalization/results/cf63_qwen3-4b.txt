@@ -1,0 +1,21 @@
+
+qwen3-4b edit261: 261 paired requests
+        method   vs AR        95% CI  tok/call  same as AR
+        ngram7   3.35x  3.15- 3.55x      3.66        99%
+        dflash   6.61x  6.32- 6.88x      9.48        99%
+   copyflash63   8.81x  8.11- 9.55x     13.74        91%
+  copyflash63 vs dflash (paired): 1.334x (95% CI 1.279-1.392)
+
+qwen3-4b ceb150: 150 paired requests
+        method   vs AR        95% CI  tok/call  same as AR
+        ngram7   2.44x  2.25- 2.66x      2.62       100%
+        dflash   7.11x  6.81- 7.40x     10.19       100%
+   copyflash63   7.61x  7.17- 8.10x     11.51        91%
+  copyflash63 vs dflash (paired): 1.071x (95% CI 1.025-1.124)
+
+qwen3-4b diff104: 104 paired requests
+        method   vs AR        95% CI  tok/call  same as AR
+        ngram7   2.98x  2.75- 3.21x      3.22       100%
+        dflash   5.50x  5.21- 5.80x      7.67       100%
+   copyflash63   6.01x  5.55- 6.53x      9.03        89%
+  copyflash63 vs dflash (paired): 1.093x (95% CI 1.060-1.132)

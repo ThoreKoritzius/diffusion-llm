@@ -1,0 +1,8 @@
+.venv-*/
+logs/
+__pycache__/
+raw/
+box_state/
+queue_init.txt
+# rebuilt by prepare_apply.py (full third-party source files, mixed licences; not redistributed)
+data/apply100.json

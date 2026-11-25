@@ -1,0 +1,682 @@
+[
+ {
+  "id": "cie-file-105",
+  "config": "dflash15",
+  "k": 324,
+  "ar_token": 95930,
+  "spec_token": 29644,
+  "ar_token_str": "_derivative",
+  "spec_token_str": "_second",
+  "one_token": {
+   "top1": 95930,
+   "top2": 29644,
+   "l1": 33.5,
+   "l2": 33.0,
+   "margin": 0.5,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 95930,
+   "top2": 29644,
+   "l1": 33.5,
+   "l2": 33.25,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 95930,
+   "top2": 29644,
+   "l1": 33.75,
+   "l2": 33.25,
+   "margin": 0.5,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-106",
+  "config": "dflash15",
+  "k": 393,
+  "ar_token": 1482,
+  "spec_token": 2779,
+  "ar_token_str": " current",
+  "spec_token_str": " cell",
+  "one_token": {
+   "top1": 2779,
+   "top2": 1482,
+   "l1": 50.0,
+   "l2": 49.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 2779,
+   "top2": 1482,
+   "l1": 50.0,
+   "l2": 49.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 2779,
+   "top2": 1482,
+   "l1": 50.0,
+   "l2": 49.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-110",
+  "config": "dflash15",
+  "k": 555,
+  "ar_token": 198,
+  "spec_token": 220,
+  "ar_token_str": "\n",
+  "spec_token_str": " ",
+  "one_token": {
+   "top1": 220,
+   "top2": 198,
+   "l1": 50.0,
+   "l2": 49.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 220,
+   "top2": 198,
+   "l1": 50.0,
+   "l2": 49.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 220,
+   "top2": 198,
+   "l1": 49.75,
+   "l2": 49.75,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-113",
+  "config": "dflash15",
+  "k": 268,
+  "ar_token": 8645,
+  "spec_token": 279,
+  "ar_token_str": " challenge",
+  "spec_token_str": " the",
+  "one_token": {
+   "top1": 8645,
+   "top2": 279,
+   "l1": 35.25,
+   "l2": 35.25,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 8645,
+   "top2": 279,
+   "l1": 35.5,
+   "l2": 35.25,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 8645,
+   "top2": 279,
+   "l1": 35.5,
+   "l2": 35.5,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-120",
+  "config": "dflash15",
+  "k": 329,
+  "ar_token": 861,
+  "spec_token": 366,
+  "ar_token_str": " >",
+  "spec_token_str": " <",
+  "one_token": {
+   "top1": 861,
+   "top2": 366,
+   "l1": 56.75,
+   "l2": 56.5,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 861,
+   "top2": 366,
+   "l1": 56.5,
+   "l2": 56.5,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 861,
+   "top2": 366,
+   "l1": 56.75,
+   "l2": 56.5,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-13",
+  "config": "dflash15",
+  "k": 708,
+  "ar_token": 48000,
+  "spec_token": 282,
+  "ar_token_str": " frontier",
+  "spec_token_str": " f",
+  "one_token": {
+   "top1": 48000,
+   "top2": 282,
+   "l1": 41.25,
+   "l2": 41.25,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 282,
+   "top2": 48000,
+   "l1": 41.25,
+   "l2": 40.75,
+   "margin": 0.5,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 48000,
+   "top2": 282,
+   "l1": 41.75,
+   "l2": 41.5,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-21",
+  "config": "dflash15",
+  "k": 172,
+  "ar_token": 17884,
+  "spec_token": 67585,
+  "ar_token_str": " Bell",
+  "spec_token_str": " Relax",
+  "one_token": {
+   "top1": 67585,
+   "top2": 17884,
+   "l1": 38.0,
+   "l2": 38.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 67585,
+   "top2": 17884,
+   "l1": 38.0,
+   "l2": 38.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 67585,
+   "top2": 17884,
+   "l1": 38.0,
+   "l2": 38.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-37",
+  "config": "dflash15",
+  "k": 410,
+  "ar_token": 10619,
+  "spec_token": 39639,
+  "ar_token_str": " priority",
+  "spec_token_str": " pq",
+  "one_token": {
+   "top1": 10619,
+   "top2": 39639,
+   "l1": 41.0,
+   "l2": 40.75,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 39639,
+   "top2": 10619,
+   "l1": 41.0,
+   "l2": 41.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 10619,
+   "top2": 39639,
+   "l1": 41.0,
+   "l2": 40.75,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-50",
+  "config": "dflash15",
+  "k": 237,
+  "ar_token": 47604,
+  "spec_token": 671,
+  "ar_token_str": " syll",
+  "spec_token_str": " #",
+  "one_token": {
+   "top1": 47604,
+   "top2": 671,
+   "l1": 39.75,
+   "l2": 39.25,
+   "margin": 0.5,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 47604,
+   "top2": 671,
+   "l1": 40.0,
+   "l2": 39.75,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 47604,
+   "top2": 671,
+   "l1": 39.5,
+   "l2": 39.25,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-54",
+  "config": "dflash15",
+  "k": 252,
+  "ar_token": 2802,
+  "spec_token": 600,
+  "ar_token_str": " row",
+  "spec_token_str": " i",
+  "one_token": {
+   "top1": 2802,
+   "top2": 600,
+   "l1": 40.5,
+   "l2": 40.25,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 2802,
+   "top2": 600,
+   "l1": 40.0,
+   "l2": 40.0,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 2802,
+   "top2": 600,
+   "l1": 40.0,
+   "l2": 39.75,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-57",
+  "config": "dflash15",
+  "k": 6,
+  "ar_token": 671,
+  "spec_token": 4244,
+  "ar_token_str": " #",
+  "spec_token_str": " words",
+  "one_token": {
+   "top1": 671,
+   "top2": 4244,
+   "l1": 45.25,
+   "l2": 45.0,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 671,
+   "top2": 4244,
+   "l1": 45.5,
+   "l2": 45.25,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 671,
+   "top2": 4244,
+   "l1": 45.25,
+   "l2": 45.0,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-66",
+  "config": "dflash15",
+  "k": 384,
+  "ar_token": 304,
+  "spec_token": 369,
+  "ar_token_str": " in",
+  "spec_token_str": " for",
+  "one_token": {
+   "top1": 369,
+   "top2": 304,
+   "l1": 53.0,
+   "l2": 53.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 369,
+   "top2": 304,
+   "l1": 53.0,
+   "l2": 53.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 369,
+   "top2": 304,
+   "l1": 53.0,
+   "l2": 53.0,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-67",
+  "config": "dflash15",
+  "k": 339,
+  "ar_token": 31056,
+  "spec_token": 289,
+  "ar_token_str": " hasattr",
+  "spec_token_str": " w",
+  "one_token": {
+   "top1": 289,
+   "top2": 31056,
+   "l1": 50.25,
+   "l2": 49.75,
+   "margin": 0.5,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 289,
+   "top2": 31056,
+   "l1": 50.0,
+   "l2": 49.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 289,
+   "top2": 31056,
+   "l1": 49.75,
+   "l2": 49.5,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-70",
+  "config": "dflash15",
+  "k": 50,
+  "ar_token": 271,
+  "spec_token": 220,
+  "ar_token_str": "\n\n",
+  "spec_token_str": " ",
+  "one_token": {
+   "top1": 271,
+   "top2": 220,
+   "l1": 47.0,
+   "l2": 47.0,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 271,
+   "top2": 220,
+   "l1": 47.25,
+   "l2": 47.25,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 271,
+   "top2": 220,
+   "l1": 47.25,
+   "l2": 47.0,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-73",
+  "config": "dflash15",
+  "k": 219,
+  "ar_token": 1790,
+  "spec_token": 279,
+  "ar_token_str": " next",
+  "spec_token_str": " the",
+  "one_token": {
+   "top1": 1790,
+   "top2": 279,
+   "l1": 55.0,
+   "l2": 55.0,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 279,
+   "top2": 1790,
+   "l1": 55.0,
+   "l2": 54.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 1790,
+   "top2": 279,
+   "l1": 54.75,
+   "l2": 54.75,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-80",
+  "config": "dflash15",
+  "k": 111,
+  "ar_token": 279,
+  "spec_token": 1509,
+  "ar_token_str": " the",
+  "spec_token_str": " item",
+  "one_token": {
+   "top1": 279,
+   "top2": 1509,
+   "l1": 55.0,
+   "l2": 54.75,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 279,
+   "top2": 1509,
+   "l1": 55.25,
+   "l2": 55.0,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 1509,
+   "top2": 279,
+   "l1": 55.25,
+   "l2": 55.25,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-86",
+  "config": "dflash15",
+  "k": 94,
+  "ar_token": 345,
+  "spec_token": 11,
+  "ar_token_str": ",\n",
+  "spec_token_str": ",",
+  "one_token": {
+   "top1": 345,
+   "top2": 11,
+   "l1": 45.25,
+   "l2": 45.0,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 345,
+   "top2": 11,
+   "l1": 45.0,
+   "l2": 45.0,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 345,
+   "top2": 11,
+   "l1": 44.5,
+   "l2": 44.5,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-9",
+  "config": "dflash15",
+  "k": 134,
+  "ar_token": 600,
+  "spec_token": 308,
+  "ar_token_str": " i",
+  "spec_token_str": " n",
+  "one_token": {
+   "top1": 600,
+   "top2": 308,
+   "l1": 58.0,
+   "l2": 58.0,
+   "margin": 0.0,
+   "agrees_with": "ar"
+  },
+  "block16": {
+   "top1": 600,
+   "top2": 308,
+   "l1": 58.25,
+   "l2": 58.0,
+   "margin": 0.25,
+   "agrees_with": "ar"
+  },
+  "full": {
+   "top1": 308,
+   "top2": 600,
+   "l1": 58.25,
+   "l2": 58.0,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-file-97",
+  "config": "dflash15",
+  "k": 1052,
+  "ar_token": 198,
+  "spec_token": 320,
+  "ar_token_str": "\n",
+  "spec_token_str": " (",
+  "one_token": {
+   "top1": 320,
+   "top2": 198,
+   "l1": 42.25,
+   "l2": 42.0,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 320,
+   "top2": 198,
+   "l1": 42.0,
+   "l2": 41.75,
+   "margin": 0.25,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 369,
+   "top2": 320,
+   "l1": 42.25,
+   "l2": 42.25,
+   "margin": 0.0,
+   "agrees_with": "neither"
+  },
+  "ar_repeat_identical": true
+ },
+ {
+  "id": "cie-func-114",
+  "config": "dflash15",
+  "k": 86,
+  "ar_token": 660,
+  "spec_token": 4432,
+  "ar_token_str": "']",
+  "spec_token_str": "']\n",
+  "one_token": {
+   "top1": 4432,
+   "top2": 660,
+   "l1": 36.75,
+   "l2": 36.75,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "block16": {
+   "top1": 4432,
+   "top2": 660,
+   "l1": 36.75,
+   "l2": 36.75,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "full": {
+   "top1": 4432,
+   "top2": 660,
+   "l1": 36.75,
+   "l2": 36.75,
+   "margin": 0.0,
+   "agrees_with": "spec"
+  },
+  "ar_repeat_identical": true
+ }
+]

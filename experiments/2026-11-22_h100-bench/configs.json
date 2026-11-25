@@ -1,0 +1,68 @@
+{
+  "Qwen/Qwen3-8B": {
+    "ar": null,
+    "ngram7": {
+      "method": "ngram",
+      "num_speculative_tokens": 7,
+      "prompt_lookup_min": 2,
+      "prompt_lookup_max": 5
+    },
+    "ngram15": {
+      "method": "ngram",
+      "num_speculative_tokens": 15,
+      "prompt_lookup_min": 2,
+      "prompt_lookup_max": 5
+    },
+    "ngram31": {
+      "method": "ngram",
+      "num_speculative_tokens": 31,
+      "prompt_lookup_min": 2,
+      "prompt_lookup_max": 5
+    },
+    "draft06b7": {
+      "method": "draft_model",
+      "model": "Qwen/Qwen3-0.6B",
+      "num_speculative_tokens": 7
+    },
+    "draft17b7": {
+      "method": "draft_model",
+      "model": "Qwen/Qwen3-1.7B",
+      "num_speculative_tokens": 7
+    },
+    "eagle3_3": {
+      "method": "eagle3",
+      "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+      "num_speculative_tokens": 3
+    },
+    "eagle3_7": {
+      "method": "eagle3",
+      "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+      "num_speculative_tokens": 7
+    },
+    "dflash15": {
+      "method": "dflash",
+      "model": "z-lab/Qwen3-8B-DFlash-b16",
+      "num_speculative_tokens": 15
+    },
+    "ar_repeat": null
+  },
+  "Qwen/Qwen3-4B": {
+    "ar": null,
+    "ngram31": {
+      "method": "ngram",
+      "num_speculative_tokens": 31,
+      "prompt_lookup_min": 2,
+      "prompt_lookup_max": 5
+    },
+    "draft06b7": {
+      "method": "draft_model",
+      "model": "Qwen/Qwen3-0.6B",
+      "num_speculative_tokens": 7
+    },
+    "dflash15": {
+      "method": "dflash",
+      "model": "z-lab/Qwen3-4B-DFlash-b16",
+      "num_speculative_tokens": 15
+    }
+  }
+}
