@@ -299,8 +299,78 @@ def arch_drafter():
     return svg(W, H, ''.join(b))
 
 
+def sql_chart():
+    """Accuracy vs. latency on one H100 (GPU session 2): diffusion as the model and as the drafter. Data: bench summaries."""
+    import json
+    import math
+    bench = HERE.parent.parent / 'experiments' / '2026-10-14_gpu-session-2' / 'data' / 'bench'
+    pt = lambda n: (lambda r: (r['lat_mean_ms'], 100 * r['exec']))(json.loads((bench / f'{n}.summary.json').read_text()))
+    AR_C, DIFF_C = '#e8743b', BLUE
+    W, H = 1200, 700
+    x0, x1, y0, y1 = 120, 1150, 150, 600           # plot box
+    lo, hi = math.log(18), math.log(100)           # reversed log axis: faster to the right
+    X = lambda ms: x0 + (hi - math.log(ms)) / (hi - lo) * (x1 - x0)
+    Y = lambda acc: y1 - (acc - 49) / (82 - 49) * (y1 - y0)
+    b = [markers(INK)]
+    b.append(t(40, 52, 'Diffusion makes text-to-SQL faster, two ways', 26, INK, 700))
+    b.append(t(40, 84, 'Accuracy vs. latency on one H100, batch 1, 1,000 test queries  ·  up and to the right is better', 15, MUTED))
+    b.append(r(x0, y0, x1 - x0, y1 - y0, CARD, LINE))
+    for acc in range(50, 85, 5):
+        if acc <= 80:
+            b.append(f'<line x1="{x0}" y1="{Y(acc):.1f}" x2="{x1}" y2="{Y(acc):.1f}" stroke="#e8edf5" stroke-width="1"/>')
+            b.append(t(x0 - 12, Y(acc) + 5, f'{acc}%', 13, MUTED, anchor='end'))
+    for ms in (100, 70, 50, 30, 20):
+        b.append(f'<line x1="{X(ms):.1f}" y1="{y0}" x2="{X(ms):.1f}" y2="{y1}" stroke="#e8edf5" stroke-width="1"/>')
+        b.append(t(X(ms), y1 + 24, f'{ms} ms', 13, MUTED, anchor='middle'))
+    b.append(t((x0 + x1) / 2, y1 + 52, 'latency per query  →  faster', 14, INK2, 600, anchor='middle'))
+    b.append(f'<text x="52" y="{(y0 + y1) / 2}" font-family="{SANS}" font-size="14" font-weight="600" fill="{INK2}" '
+             f'text-anchor="middle" transform="rotate(-90 52 {(y0 + y1) / 2})">execution accuracy</text>')
+
+    def dot(name, color, rad, ring=None):
+        x, y = pt(name)
+        if ring:
+            b.append(f'<rect x="{X(x) - rad - 5:.1f}" y="{Y(y) - rad - 5:.1f}" width="{2 * rad + 10}" height="{2 * rad + 10}" '
+                     f'fill="{CARD}" stroke="{ring}" stroke-width="3"/>')
+        b.append(f'<rect x="{X(x) - rad:.1f}" y="{Y(y) - rad:.1f}" width="{2 * rad}" height="{2 * rad}" fill="{color}"/>')
+        return X(x), Y(y), x, y
+
+    def label(px, py, name, ms, acc, dx, dy, anchor='start', big=False):
+        b.append(t(px + dx, py + dy, name, 17 if big else 14, INK, 700, anchor=anchor))
+        b.append(t(px + dx, py + dy + (21 if big else 18), f'{ms:.0f} ms  ·  {acc:.0f}%', 14 if big else 13, MUTED, anchor=anchor))
+
+    qx, qy, qms, qa = dot('sql-ar-qwen25-coder-0.5b-ar-vllm', AR_C, 9)
+    ex, ey, ems, ea = dot('sql-ar-qwen25-coder-0.5b-ar-vllm-eagle3', AR_C, 7)
+    fx, fy, fms, fa = dot('sql-ar-qwen25-coder-0.5b-ar-vllm-dflash', AR_C, 8, ring=DIFF_C)
+    ax_, ay, ams, aa = dot('ettin150-ar-10ep-vllm-pr61276', AR_C, 13)
+    dx_, dy_, dms, da = dot('ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs', DIFF_C, 13)
+    fx4, fy4, f4ms, f4a = dot('ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs', DIFF_C, 9)
+    label(qx, qy, 'Qwen2.5-0.5B AR', qms, qa, -16, -8, 'end')
+    label(ex, ey, '+ AR drafter (EAGLE-3)', ems, ea, 0, 32, 'middle')
+    label(fx, fy, '+ diffusion drafter', fms, fa, 20, -8)
+    label(ax_, ay, 'Ettin-150M AR', ams, aa, 0, 44, 'middle', big=True)
+    label(dx_, dy_, 'Ettin-150M diffusion', dms, da, 0, 44, 'middle', big=True)
+    label(fx4, fy4, 'Ettin-400M diffusion', f4ms, f4a, 18, -6)
+    # arrows: same model with a diffusion drafter; same size as a diffusion model
+    b.append(f'<path d="M{qx + 16:.1f},{qy - 10:.1f} Q{(qx + fx) / 2:.1f},{qy - 90:.1f} {fx - 18:.1f},{fy - 12:.1f}" fill="none" '
+             f'stroke="{INK}" stroke-width="2.2" marker-end="url(#ah{INK[1:]})"/>')
+    b.append(t((qx + fx) / 2, qy - 84, f'{qms / fms:.1f}× faster', 22, INK, 700, anchor='middle'))
+    b.append(t((qx + fx) / 2, qy - 62, 'same model, same outputs', 13.5, MUTED, anchor='middle'))
+    b.append(arrow(ax_ + 22, ay + 2, dx_ - 24, dy_ + 2, INK, 2.6))
+    b.append(t((ax_ + dx_) / 2, (ay + dy_) / 2 - 34, f'{ams / dms:.1f}× faster', 30, INK, 700, anchor='middle'))
+    b.append(t((ax_ + dx_) / 2, (ay + dy_) / 2 - 12, 'same size, tied accuracy', 14, MUTED, anchor='middle'))
+    # legend
+    lx, ly = x0 + 20, y0 + 22
+    b.append(r(lx, ly - 10, 12, 12, DIFF_C)); b.append(t(lx + 22, ly + 1, 'diffusion', 13.5, INK2))
+    b.append(r(lx, ly + 14, 12, 12, AR_C)); b.append(t(lx + 22, ly + 25, 'autoregressive (AR)', 13.5, INK2))
+    b.append(r(lx - 2, ly + 36, 16, 16, CARD, DIFF_C, 2.5)); b.append(r(lx + 2, ly + 40, 8, 8, AR_C))
+    b.append(t(lx + 22, ly + 49, 'AR + diffusion drafter', 13.5, INK2))
+    b.append(t(40, H - 18, 'H100 PCIe, mean latency. AR on vLLM, diffusion on CUDA graphs; drafters (EAGLE-3, DFlash) trained with '
+               'Speculators. Data: experiments/2026-10-14_gpu-session-2.', 12.5, MUTED))
+    return svg(W, H, ''.join(b))
+
+
 def main():
-    out = {'hero.svg': hero(), 'arch_model.svg': arch_model(), 'arch_drafter.svg': arch_drafter()}
+    out = {'hero.svg': hero(), 'arch_model.svg': arch_model(), 'arch_drafter.svg': arch_drafter(), 'sql_results.svg': sql_chart()}
     for name, s in out.items():
         (HERE / name).write_text(s)
         print(name, f'{len(s.encode()) / 1024:.1f} KB')

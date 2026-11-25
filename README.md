@@ -27,7 +27,34 @@ index is [`experiments/README.md`](experiments/README.md).
 
 ## 1. Diffusion as the model: text-to-SQL
 
+![Diffusion makes text-to-SQL faster, two ways: at the same size a diffusion model is 2.6× faster at tied accuracy, and a diffusion drafter makes the same AR model 2.0× faster](docs/assets/sql_results.svg)
+
+Two results on one H100 with the same 1,000 test queries: a diffusion model is **2.6× faster than an autoregressive
+model of the same size** at tied accuracy (bottom arrow), and a diffusion drafter makes a **larger AR model 2.0×
+faster** without changing its answers (top arrow; see [section 2](#2-diffusion-as-the-drafter-lossless-speculative-decoding)).
+Details: [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md).
+
+How a diffusion model writes SQL:
+
 ![Diffusion as the model: a bidirectional encoder fills a masked SQL window in a few parallel steps](docs/assets/arch_model.svg)
+
+### Models we trained
+
+Every model below was trained in this repo on [`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql);
+recipes and runbooks are linked.
+
+| Model | Starting point | What we did | Result |
+|---|---|---|---|
+| **ModernBERT diffusion** (runs the [live demo](https://diffusion.lethonium.com/)) | `answerdotai/ModernBERT-base`, 150M | Masked diffusion training (LLaDA-style, 1/t-weighted ELBO), 10 epochs; later prompt isolation and step distillation | 0.50 semantic accuracy in 11.8 denoising steps ([how it works](#how-the-diffusion-model-works)) |
+| **Ettin-150M diffusion / AR pair** | `jhu-clsp/ettin-encoder-150m` and `ettin-decoder-150m` (same pretraining data) | Same SQL data and 10 epochs for both: the encoder as a masked diffusion model (prompt mask, step distillation), the decoder as causal SFT | Diffusion 25 ms vs AR 67 ms at tied accuracy (exec 0.564 vs 0.580) ([session 1](experiments/2026-10-12_gpu-session/README.md), [session 2](experiments/2026-10-14_gpu-session-2/README.md)) |
+| **Ettin-400M diffusion** | `jhu-clsp/ettin-encoder-400m` | 10 epochs + step distillation | Exec 0.606 at 32 ms |
+| **Qwen2.5-Coder-0.5B, AR and diffusion** | `Qwen/Qwen2.5-Coder-0.5B` | AR SFT, and the same base adapted to masked diffusion (attention patched to bidirectional, causal→bidirectional annealing) | AR 0.645 semantic; the adapted diffusion model only 0.191: bidirectional pretraining matters more than size ([experiment](experiments/2026-07-05_qwen-ar-diffusion/README.md)) |
+| **DFlash and EAGLE-3 drafters** for Qwen2.5-0.5B | trained with [Speculators](https://github.com/vllm-project/speculators) on 30,000 prompts answered by Qwen itself | 5 epochs, 14 min each; DFlash = 3-layer block-diffusion drafter (16-token blocks) | 2.0× (DFlash) and 1.5× (EAGLE-3) faster, same answers ([session 2](experiments/2026-10-14_gpu-session-2/README.md#drafters)) |
+
+We also added vLLM support for the Ettin decoders ([`vllm_plugin/`](vllm_plugin/), submitted upstream as
+[vllm#61276](https://github.com/vllm-project/vllm/pull/61276)) so the AR baseline runs on its best engine.
+
+### The ModernBERT model in numbers
 
 The SQL window starts fully masked. Each step, the encoder predicts every masked position at once and commits the most
 confident tokens; easy queries stop early. ModernBERT-base (150M), 10 epochs on
