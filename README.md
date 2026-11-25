@@ -1,16 +1,38 @@
+<p align="center">
+  <a href="https://diffusion.lethonium.com/"><img src="docs/assets/hero.svg" width="100%" alt="The playground denoising &quot;What is the highest car price for each model?&quot; into SELECT model, MAX(price) FROM cars GROUP BY model; in 5 parallel steps instead of 17 autoregressive ones"></a>
+</p>
+
 # Diffusion-LLM
 
-A masked diffusion language model (LLaDA-style) for text-to-SQL generation, built on ModernBERT. Instead of writing SQL left to right, the model starts from a fully masked SQL window and fills it in over a few parallel denoising steps. This repo includes training, evaluation experiments, and a web playground.
+Diffusion can make language models faster in two ways, and this repo studies both:
 
-**Live demo: [diffusion.lethonium.com](https://diffusion.lethonium.com/)**
+1. **As the model.** A masked diffusion language model (ModernBERT, LLaDA-style) writes a whole SQL query in a few
+   parallel denoising steps instead of one token at a time.
+2. **As the drafter.** A small diffusion drafter proposes a block of tokens in one pass, and a regular LLM checks the
+   whole block at once. The output stays exactly what the LLM would have written; on code edits it arrives 9× faster.
 
-![Diffusion Example](examples/diffusion_example.gif)
+**Live demo: [diffusion.lethonium.com](https://diffusion.lethonium.com/)**: type a question and a schema, and watch the
+SQL denoise step by step, with token confidence and early stop.
 
 ## Results at a glance
 
-![Diffusion makes text-to-SQL faster, two ways](experiments/2026-10-14_gpu-session-2/plots/hero.png)
+| | Setup | Result | Write-up |
+|---|---|---|---|
+| Diffusion as the model | Ettin-150M encoder (diffusion) vs. the matching Ettin-150M decoder (AR), text-to-SQL, H100 | **2.6× faster** at tied accuracy | [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) |
+| Diffusion as the drafter, SQL | Qwen2.5-0.5B + DFlash drafter in vLLM | **2.0× faster**, same accuracy; 1.3× faster than an EAGLE-3 drafter | [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) |
+| Diffusion as the drafter, code edits | Qwen3-8B + copy + DFlash router (vLLM plugin), H100 | **9.0× faster** than plain decoding (95% CI 8.4–9.7), 1.34× faster than DFlash alone | [Code-edit study](experiments/2026-11-23_generalization/README.md) |
 
-ModernBERT-base (150M), 10 epochs on [`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql), confidence decoding with adaptive early stop at 0.9. Evaluated on the first 256 filtered test rows:
+All speeds are measured end to end at batch 1. Every experiment folder has its scripts, raw data and plots; the
+index is [`experiments/README.md`](experiments/README.md).
+
+## 1. Diffusion as the model: text-to-SQL
+
+![Diffusion as the model: a bidirectional encoder fills a masked SQL window in a few parallel steps](docs/assets/arch_model.svg)
+
+The SQL window starts fully masked. Each step, the encoder predicts every masked position at once and commits the most
+confident tokens; easy queries stop early. ModernBERT-base (150M), 10 epochs on
+[`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql), confidence
+decoding with adaptive early stop at 0.9, first 256 filtered test rows:
 
 | Metric | Value |
 |---|---|
@@ -27,16 +49,39 @@ Compared with an autoregressive (AR) model fine-tuned on the same data ([Qwen ex
 | Diffusion: ModernBERT-base (this repo's main model) | 150M | 0.500 | 11.8 |
 | Diffusion: Qwen2.5-Coder-0.5B adapted to masked diffusion | 500M | 0.191 | 11.8 |
 
-Findings so far:
-
 - **Matched size, diffusion is 2.6× faster at tied accuracy.** Ettin-150M encoder (diffusion) vs. decoder (AR), same data, 10 epochs, 1,000 test queries on one H100: 25 ms (CUDA graphs) vs 67 ms (vLLM), exec 0.564 vs 0.580 (−1.7 ± 3.5, a tie), exact match 0.277 vs 0.239 (+3.8 ± 2.3). Diffusion's gap is invalid SQL (−10 points), mostly closed by one verify pass (exec 0.591, 42 ms). See [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) and [session 1](experiments/2026-10-12_gpu-session/README.md).
-- **A diffusion drafter makes the larger AR model 2.0× faster.** Qwen2.5-0.5B (exec 0.735) on vLLM with a DFlash block-diffusion drafter for speculative decoding: 28 ms instead of 57 ms, at unchanged accuracy, and 1.3× faster than an EAGLE-3 drafter trained on the same data (37 ms). Above 150M, diffusion as the drafter beats diffusion as the model: Ettin-400M diffusion takes 32 ms at exec 0.606.
-
 - **Adaptive early stop is the main speed lever.** It cuts forward passes 1.8–3× with no quality loss (see [Decoding efficiency](#decoding-efficiency-steps-vs-autoregressive)).
 - **More steps can hurt.** Accuracy peaks around 11 steps (threshold 0.9) and falls ~10 points when decoding runs to a 0.99 threshold (~19 steps).
 - **PAPL fine-tuning only saves steps.** It gives ~7% fewer steps at equal accuracy ([PAPL A/B](experiments/2026-06-30_papl-ab/README.md)).
 - **On CPU (the hosted setup), AR is still the better trade.** Cheap changes make diffusion 2.1× faster, but a 3.3× larger AR model matches its fp32 latency at higher accuracy ([fair CPU benchmark](experiments/2026-10-09_fair-cpu-benchmark/README.md), [roadmap](docs/roadmap.md)).
 - **Dependency-ordered decoding (DOS) does not beat confidence ordering** on this model (see [below](#commit-ordering-confidence-vs-dependency-dos)).
+
+## 2. Diffusion as the drafter: lossless speculative decoding
+
+![Diffusion as the drafter: copy from the input or draft with DFlash, then the LLM verifies the whole block in one pass](docs/assets/arch_drafter.svg)
+
+Speculative decoding keeps a regular LLM as the authority: a cheap proposer guesses the next tokens, the LLM checks
+all of them in one forward pass and keeps exactly the prefix it agrees with, plus one token of its own. With greedy
+decoding the output is the LLM's own output; only the number of LLM passes changes. A block-diffusion drafter
+([DFlash](https://github.com/z-lab/dflash)) guesses 16 tokens in a single pass, which is what makes it cheap.
+
+- **Text-to-SQL: 2.0× faster at unchanged accuracy.** Qwen2.5-0.5B (exec 0.735) on vLLM with a 3-layer DFlash drafter: 28 ms instead of 57 ms, and 1.3× faster than an EAGLE-3 drafter trained on the same data (37 ms). Above 150M, diffusion as the drafter beats diffusion as the model: Ettin-400M diffusion takes 32 ms at exec 0.606. ([GPU session 2](experiments/2026-10-14_gpu-session-2/README.md))
+- **Code edits: 9.0× faster with the same output.** Most of an edited file is unchanged. A router copies it straight
+  from the input when the current text matches the old code (up to 63 tokens per pass) and lets DFlash draft only the
+  new code. Built as a vLLM plugin ([`copyflash_plugin/`](experiments/2026-11-23_generalization/copyflash_plugin/)); on
+  Qwen3-8B and 261 real edits it runs 9.0× faster than plain decoding, 1.34× faster than DFlash alone, and held up
+  on Qwen3-4B (8.8×) with the settings fixed.
+
+![Speed-up over standard decoding on code edits: copy + DFlash 9.0×, DFlash 6.8×, copy only 4.4×, EAGLE-3 3.1×, small draft model 2.4×](experiments/2026-11-23_generalization/figures/social_qwen3-8b.png)
+
+The gain depends on how much of the file an edit leaves unchanged: from 6× when under half the output is old code to
+about 19× when almost all of it is ([curves](experiments/2026-11-23_generalization/figures/curves_qwen3-8b.png)). On
+bug fixes in short programs and on diff-style output it adds little over DFlash (1.02× and 1.10×). Details, caveats
+and the path from Mac audits to the H100 runs:
+[copy audit](experiments/2026-11-21_copy-audit/README.md) →
+[DFlash on edits](experiments/2026-11-21_dflash-mlx/README.md) →
+[A100 benchmark](experiments/2026-11-22_h100-bench/README.md) →
+[vLLM router, H100](experiments/2026-11-23_generalization/README.md).
 
 ## Repository layout
 
@@ -48,14 +93,15 @@ src/
   gradio_inference.py   minimal local Gradio UI
   finetune_papl.py, bench_papl.py, dump_predictions.py, compare_strategies.py, sql_repair.py, augment.py
 bench/                  fair diffusion-vs-AR benchmark (quality + latency, same engine)
-docs/roadmap.md         research roadmap
+experiments/            dated write-ups with scripts, data, predictions and plots (index: experiments/README.md)
+  2026-11-23_generalization/copyflash_plugin/   copy + DFlash router as a vLLM speculative-decoding plugin
+docs/                   roadmap, GPU session runbooks, deployment, README graphics (docs/assets)
 scripts/                GPU training / A/B launch scripts, qualitative eval
-experiments/            dated experiment write-ups with data, predictions and plots
 docker/, Dockerfile, docker-compose.yml   CPU deployment (web + worker + redis)
 checkpoints/            model weights (gitignored)
 ```
 
-## How It Works
+## How the diffusion model works
 
 ### Training (`src/train.py`)
 
@@ -213,114 +259,10 @@ python src/gradio_inference.py --model-dir checkpoints/diffusion-sql-modernbert 
 
 Both old (roberta) and new (ModernBERT) checkpoints load via the Auto classes.
 
-## Docker Deployment (CPU-safe public playground)
+## Deployment
 
-### Build image
-
-```bash
-docker build -t diffusion-llm:latest .
-```
-
-### Run container (equivalent to local `python src/inference.py ...`)
-
-```bash
-docker run --rm -p 7860:7860 \
-  -v /host/model:/models/model:ro \
-  diffusion-llm:latest \
-  --model-dir /models/model --host 0.0.0.0 --no-open
-```
-
-### Run with compose
-
-Set model location:
-
-```bash
-export MODEL_DIR=/host/model
-```
-
-Start web + worker + redis:
-
-```bash
-docker compose up -d --build
-```
-
-Web service listens on `:7860` and is designed to be put behind Caddy/Nginx.
-
-## Production Runtime Defaults
-
-- Global request limit: `60/minute` per IP.
-- `/start` limit: `5/minute` and `30/hour` per IP.
-- Max concurrent runs: `1`.
-- Max queued runs: `3`.
-- Timeout per run: `90s`.
-- Max prompt chars: `1000`.
-- Max context chars: `8000`.
-- Max steps: `64`.
-- Max max_len: `512`.
-- Max sql_len: `256`.
-- Adaptive early-stop threshold (`CONFIDENCE_STOP`): `0.9` (on; `0` disables).
-- Run TTL cleanup: `900s`.
-- GIF generation: disabled unless `--enable-gif` is set.
-
-## Public API Behavior
-
-- `POST /start`
-  - `200` with `{run_id, state, queue_position, eta_seconds, queue_token}` when accepted.
-  - `400` for validation errors.
-  - `429` when rate-limited.
-  - `503` when queue is full.
-- `GET /run/<run_id>?after=<n>`
-  - Incremental run state + snapshot deltas.
-- `GET /queue/<run_id>`
-  - Queue position and ETA info.
-- `GET /stream/<run_id>`
-  - Server-sent events: `snapshot`, `status`, `done`.
-- `POST /stop/<run_id>`
-  - Requests cooperative cancellation.
-- `GET /healthz`
-  - Liveness/readiness info.
-
-## Relevant CLI Options (`src/inference.py`)
-
-- `--public` (bind `0.0.0.0`, disable browser auto-open)
-- `--max-concurrent-runs`
-- `--max-queued-runs`
-- `--request-timeout-seconds`
-- `--max-prompt-chars`
-- `--max-context-chars`
-- `--max-steps`
-- `--max-max-len`
-- `--max-sql-len`
-- `--confidence-stop` (adaptive early-stop threshold; default `0.9`, `0` disables)
-- `--enable-gif`
-- `--run-ttl-seconds`
-- `--worker`
-- `--redis-url`
-
-## CPU Tuning Notes
-
-The container sets:
-
-- `TORCH_NUM_THREADS=1`
-- `OMP_NUM_THREADS=1`
-- `MKL_NUM_THREADS=1`
-- `PYTHONUNBUFFERED=1`
-
-This is intentional for predictable CPU load on a Linux CPU host.
-
-For a faster profile (roughly ~2x on many CPU-only hosts), increase worker CPU/threads in `.env`:
-
-```bash
-TORCH_NUM_THREADS=4
-OMP_NUM_THREADS=4
-MKL_NUM_THREADS=4
-WORKER_CPUS=3.0
-WORKER_MEM_LIMIT=4g
-```
-
-Adaptive early-stopping already cuts average steps automatically; for further
-speedups lower the step cap in requests (for example `steps=8`) at a small
-quality cost.
+The public playground runs on CPU behind a queue (web + worker + Redis). Docker and compose setup, runtime limits,
+the public API, CLI options and CPU tuning: [docs/deployment.md](docs/deployment.md).
 
 ## License
 
