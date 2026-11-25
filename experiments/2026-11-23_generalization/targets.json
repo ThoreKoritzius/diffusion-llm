@@ -1,0 +1,14 @@
+{
+  "qwen3-8b": {"model": "Qwen/Qwen3-8B", "dflash": "z-lab/Qwen3-8B-DFlash-b16", "dflash_k": 15,
+               "draft": "Qwen/Qwen3-0.6B", "eagle": "RedHatAI/Qwen3-8B-speculator.eagle3", "gated": false, "gpu_gb": 40,
+               "note": "re-measured on the new GPU: hardware transfer of the A100 results"},
+  "qwen3-4b": {"model": "Qwen/Qwen3-4B", "dflash": "z-lab/Qwen3-4B-DFlash-b16", "dflash_k": 15,
+               "draft": "Qwen/Qwen3-0.6B", "eagle": null, "gated": false, "gpu_gb": 24,
+               "note": "size axis within the Qwen3 family; Mac MLX numbers exist for cross-checking"},
+  "llama31-8b": {"model": "meta-llama/Llama-3.1-8B-Instruct", "dflash": "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat", "dflash_k": 9,
+               "draft": "meta-llama/Llama-3.2-1B-Instruct", "eagle": "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
+               "gated": true, "gpu_gb": 40, "note": "family axis; gated: needs HF_TOKEN with Llama 3.1 and 3.2 access"},
+  "qwen3coder-30b": {"model": "Qwen/Qwen3-Coder-30B-A3B-Instruct", "dflash": "z-lab/Qwen3-Coder-30B-A3B-DFlash", "dflash_k": 15,
+               "draft": "Qwen/Qwen3-0.6B", "eagle": null, "gated": false, "gpu_gb": 80,
+               "note": "code-specialised MoE (3B active); bf16 weights about 61 GB, needs an 80 GB GPU"}
+}

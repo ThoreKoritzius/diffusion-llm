@@ -1,0 +1,462 @@
+[
+ {
+  "cohort": "edit261",
+  "id": "cie-file-106",
+  "k": 335,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " #",
+  "method_tok": " for"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-11",
+  "k": 158,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " #",
+  "method_tok": " state"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-113",
+  "k": 251,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " challenge",
+  "method_tok": " return"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-116",
+  "k": 447,
+  "gap_ar_minus_method": -0.125,
+  "top2_margin": 0.125,
+  "top1_is": "method",
+  "ar_tok": " \")",
+  "method_tok": " \";"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-35",
+  "k": 84,
+  "gap_ar_minus_method": 1.0,
+  "top2_margin": 1.0,
+  "top1_is": "ar",
+  "ar_tok": "\n\n",
+  "method_tok": "\n"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-46",
+  "k": 151,
+  "gap_ar_minus_method": 1.25,
+  "top2_margin": 1.25,
+  "top1_is": "ar",
+  "ar_tok": " if",
+  "method_tok": " #"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-47",
+  "k": 82,
+  "gap_ar_minus_method": -1.0,
+  "top2_margin": 1.0,
+  "top1_is": "method",
+  "ar_tok": "):\n",
+  "method_tok": ")"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-56",
+  "k": 605,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " A",
+  "method_tok": " C"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-61",
+  "k": 140,
+  "gap_ar_minus_method": 0.375,
+  "top2_margin": 0.375,
+  "top1_is": "ar",
+  "ar_tok": " np",
+  "method_tok": " ["
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-66",
+  "k": 316,
+  "gap_ar_minus_method": 0.0,
+  "top2_margin": 0.0,
+  "top1_is": "ar",
+  "ar_tok": " the",
+  "method_tok": " average"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-70",
+  "k": 17,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " []\n\n",
+  "method_tok": " []\n"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-73",
+  "k": 289,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " matching",
+  "method_tok": " match"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-94",
+  "k": 323,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " Find",
+  "method_tok": " Return"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-file-96",
+  "k": 378,
+  "gap_ar_minus_method": 0.75,
+  "top2_margin": 0.75,
+  "top1_is": "ar",
+  "ar_tok": ".c",
+  "method_tok": ".pi"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-func-103",
+  "k": 51,
+  "gap_ar_minus_method": 0.0,
+  "top2_margin": 0.0,
+  "top1_is": "ar",
+  "ar_tok": " processing",
+  "method_tok": " parsing"
+ },
+ {
+  "cohort": "edit261",
+  "id": "cie-func-105",
+  "k": 109,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " grad",
+  "method_tok": " df"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-018f8e7c7c",
+  "k": 19,
+  "gap_ar_minus_method": 0.5,
+  "top2_margin": 0.5,
+  "top1_is": "ar",
+  "ar_tok": " return",
+  "method_tok": " payload"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-45c4f2455b",
+  "k": 62,
+  "gap_ar_minus_method": 0.0,
+  "top2_margin": 0.0,
+  "top1_is": "method",
+  "ar_tok": " exception",
+  "method_tok": " error"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-62c9322cf1",
+  "k": 83,
+  "gap_ar_minus_method": 0.5,
+  "top2_margin": 0.5,
+  "top1_is": "ar",
+  "ar_tok": "ticket",
+  "method_tok": "t"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-bad2fea8a3",
+  "k": 108,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " Ki",
+  "method_tok": " KB"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-bdda5e5659",
+  "k": 7,
+  "gap_ar_minus_method": 0.0,
+  "top2_margin": 0.0,
+  "top1_is": "ar",
+  "ar_tok": " path",
+  "method_tok": " page"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-c1fbc761e1",
+  "k": 30,
+  "gap_ar_minus_method": 0.5,
+  "top2_margin": 0.5,
+  "top1_is": "ar",
+  "ar_tok": ".int",
+  "method_tok": ".float"
+ },
+ {
+  "cohort": "edit261",
+  "id": "epf-f81ddc6297",
+  "k": 42,
+  "gap_ar_minus_method": 0.5,
+  "top2_margin": 0.5,
+  "top1_is": "ar",
+  "ar_tok": " a",
+  "method_tok": " at"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2592",
+  "k": 306,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " value",
+  "method_tok": " result"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2598",
+  "k": 42,
+  "gap_ar_minus_method": 0.375,
+  "top2_margin": 0.375,
+  "top1_is": "ar",
+  "ar_tok": " unused",
+  "method_tok": " not"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2618",
+  "k": 4,
+  "gap_ar_minus_method": 1.0,
+  "top2_margin": 1.0,
+  "top1_is": "ar",
+  "ar_tok": "#include",
+  "method_tok": "using"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2720",
+  "k": 120,
+  "gap_ar_minus_method": -0.5,
+  "top2_margin": 0.5,
+  "top1_is": "method",
+  "ar_tok": " (",
+  "method_tok": " i"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2758",
+  "k": 115,
+  "gap_ar_minus_method": -1.0,
+  "top2_margin": 1.0,
+  "top1_is": "method",
+  "ar_tok": " N",
+  "method_tok": " stones"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2856",
+  "k": 72,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " the",
+  "method_tok": " LIS"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2885",
+  "k": 100,
+  "gap_ar_minus_method": 1.0,
+  "top2_margin": 1.0,
+  "top1_is": "ar",
+  "ar_tok": " //",
+  "method_tok": " return"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-cpp-2898",
+  "k": 200,
+  "gap_ar_minus_method": -2.25,
+  "top2_margin": 2.25,
+  "top1_is": "method",
+  "ar_tok": " j",
+  "method_tok": " int"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-java-2993",
+  "k": 124,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " {\n",
+  "method_tok": " {\n\n"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-java-3152",
+  "k": 102,
+  "gap_ar_minus_method": -0.5,
+  "top2_margin": 0.5,
+  "top1_is": "method",
+  "ar_tok": " par",
+  "method_tok": " this"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-java-3200",
+  "k": 156,
+  "gap_ar_minus_method": 0.0,
+  "top2_margin": 0.0,
+  "top1_is": "method",
+  "ar_tok": " }\n\n",
+  "method_tok": " }\n"
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-python3-2233",
+  "k": 96,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": "0",
+  "method_tok": " "
+ },
+ {
+  "cohort": "ceb150",
+  "id": "ceb-python3-2558",
+  "k": 51,
+  "gap_ar_minus_method": -1.0,
+  "top2_margin": 1.0,
+  "top1_is": "method",
+  "ar_tok": "class",
+  "method_tok": "from"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-107",
+  "k": 41,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " with",
+  "method_tok": " using"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-11",
+  "k": 212,
+  "gap_ar_minus_method": 2.5,
+  "top2_margin": 2.5,
+  "top1_is": "ar",
+  "ar_tok": " self",
+  "method_tok": " "
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-19",
+  "k": 153,
+  "gap_ar_minus_method": 0.5,
+  "top2_margin": 0.5,
+  "top1_is": "ar",
+  "ar_tok": "(city",
+  "method_tok": "_intersection"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-22",
+  "k": 587,
+  "gap_ar_minus_method": -0.5,
+  "top2_margin": 0.5,
+  "top1_is": "method",
+  "ar_tok": " for",
+  "method_tok": " build"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-26",
+  "k": 105,
+  "gap_ar_minus_method": 0.25,
+  "top2_margin": 0.25,
+  "top1_is": "ar",
+  "ar_tok": " return",
+  "method_tok": " kl"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-29",
+  "k": 201,
+  "gap_ar_minus_method": -0.75,
+  "top2_margin": 0.75,
+  "top1_is": "method",
+  "ar_tok": " next",
+  "method_tok": " child"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-33",
+  "k": 142,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.75,
+  "top1_is": "other",
+  "ar_tok": " if",
+  "method_tok": " while"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-44",
+  "k": 115,
+  "gap_ar_minus_method": 0.5,
+  "top2_margin": 0.5,
+  "top1_is": "ar",
+  "ar_tok": "](",
+  "method_tok": "]"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-47",
+  "k": 103,
+  "gap_ar_minus_method": -0.25,
+  "top2_margin": 0.25,
+  "top1_is": "method",
+  "ar_tok": " is",
+  "method_tok": " are"
+ },
+ {
+  "cohort": "diff104",
+  "id": "diff-50",
+  "k": 130,
+  "gap_ar_minus_method": -1.75,
+  "top2_margin": 1.75,
+  "top1_is": "method",
+  "ar_tok": "\n        \n",
+  "method_tok": "\n"
+ }
+]

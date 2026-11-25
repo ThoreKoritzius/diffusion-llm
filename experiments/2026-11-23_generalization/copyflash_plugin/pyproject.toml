@@ -1,0 +1,15 @@
+[project]
+name = "copyflash"
+version = "0.1.0"
+description = "vLLM plugin: copy + DFlash router speculator (method 'copyflash')"
+requires-python = ">=3.10"
+
+[project.entry-points."vllm.general_plugins"]
+copyflash = "copyflash:register"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["copyflash"]

@@ -1,0 +1,8 @@
+
+qwen3-8b edit261: 261 paired requests
+        method   vs AR        95% CI  tok/call  same as AR
+        dflash   6.76x  6.46- 7.05x      9.25        87%
+     copyflash   8.25x  7.74- 8.77x     11.71        88%
+   copyflash47   8.67x  8.07- 9.32x     12.60        90%
+   copyflash63   9.04x  8.38- 9.75x     13.21        88%
+  copyflash vs dflash (paired): 1.221x (95% CI 1.190-1.254)
