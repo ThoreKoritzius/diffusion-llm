@@ -12,6 +12,20 @@ MAX_MODEL_LEN = 8192
 DIFF_HEAD = '<<<<<<< SEARCH\n'
 
 
+# Text-to-SQL drafters for Qwen3-8B (README: "Text-to-SQL on Qwen3-8B"). name -> (dir in spec-sql8b/, method, k).
+# The *_conv / *_l1 / causal entries are the diagnosis of the causal-mask bug; dflash_sql_nc and eagle_sql are the
+# results. Layer ids are hidden_states indices (0 = embeddings), the convention of Speculators and vLLM.
+SQL_DRAFTERS = {
+    'dflash_conv': ('zlab', 'dflash', 15),            # z-lab drafter converted to Speculators format: served causal
+    'dflash_conv_l1': ('zlab_l1', 'dflash', 15),      # same, aux layer ids [1 9 17 25 33]
+    'dflash_conv_nc': ('zlab_nc', 'dflash', 15),      # same weights, sliding_window_non_causal=true: bidirectional
+    'dflash_sql': ('drafter', 'dflash', 15),          # SQL fine-tune, served as converted (causal, ids [2 10 ..])
+    'dflash_sql_l1': ('drafter_l1', 'dflash', 15),    # SQL fine-tune, causal, on its training layers [1 9 ..]
+    'dflash_sql_nc': ('drafter_nc', 'dflash', 15),    # SQL fine-tune, bidirectional, training layers: the result
+    'eagle_sql': ('eagle', 'eagle3', 7),              # RedHatAI EAGLE-3 fine-tuned on the same data and recipe
+}
+
+
 def targets():
     return json.loads((HERE / 'targets.json').read_text())
 
@@ -26,6 +40,12 @@ def vllm_configs(key, extra=False):
     if t.get('eagle'):
         cfg['eagle7'] = {'method': 'eagle3', 'model': t['eagle'], 'num_speculative_tokens': 7}
     cfg['dflash'] = {'method': 'dflash', 'model': t['dflash'], 'num_speculative_tokens': t['dflash_k']}
+    if key == 'qwen3-8b':  # text-to-SQL drafters built by train_sql_drafters.sh (only listed once they exist)
+        for name, (sub, method, k) in SQL_DRAFTERS.items():
+            p = HERE / 'spec-sql8b' / sub
+            if p.exists():
+                ck = p / 'checkpoint_best' if (p / 'checkpoint_best').exists() else p
+                cfg[name] = {'method': method, 'model': str(ck.resolve()), 'num_speculative_tokens': k}
     if extra:  # copy + DFlash router in vLLM (plugin ./copyflash_plugin), and DFlash padded to the same verify width
         opts = {'dflash_k': t['dflash_k'], 'router_min': 8, 'max_n': 24}
         cfg['copyflash'] = {'method': 'copyflash', 'model': t['dflash'], 'num_speculative_tokens': 31,

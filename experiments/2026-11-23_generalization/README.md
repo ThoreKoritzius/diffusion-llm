@@ -138,3 +138,65 @@ changed. Prompt = original file + edit snippet (changed regions, "... existing c
 0.99 line similarity), 98–99% copied. Queued in `queue_next.txt` for Qwen3-8B with ar / ngram31 / ngram63 / dflash /
 copyflash63 (~30 min, AR dominates) and for Qwen3-4B. ngram63 (= copy-only at the same window) is the baseline to
 beat here: this is the regime where "speculative edits" style copying is strongest.
+
+## Text-to-SQL on Qwen3-8B (2026-11-27): a large off-the-shelf target, SQL-trained drafters
+
+Does a diffusion drafter also speed up a large general model on a short-output task, and does training the drafter
+on the task help? Target: Qwen3-8B, zero-shot (thinking off), on the same 1,000 text-to-SQL test queries as GPU
+session 2 (`sqlbench.py`, `data/sql1000.json`: the first 1,000 rows of `gretelai/synthetic_text_to_sql` test, 777 of
+them checkable by execution). One H100 PCIe, vLLM, batch 1, greedy, mean latency per query over HTTP.
+
+| Qwen3-8B, 1,000 queries | tokens / call | mean latency | vs plain | exec (strict / lenient) | output = plain |
+|---|---:|---:|---:|---:|---:|
+| plain decoding | 1 | 378.3 ms | 1.00× | 74.4% / 80.3% | |
+| EAGLE-3 drafter (RedHatAI), 7 tokens | 2.88 | 199.2 ms | 1.90× | 74.4% / 80.3% | 100% |
+| DFlash drafter (z-lab), 15 tokens | 4.85 | 129.3 ms | 2.93× | 74.4% / 80.3% | 100% |
+| copy + DFlash router (`copyflash63`) | 4.82 | 135.4 ms | 2.79× | 74.6% / 80.6% | 94% |
+| **EAGLE-3, fine-tuned on SQL** | 4.61 | 161.0 ms | 2.35× | 74.4% / 80.3% | 100% |
+| **DFlash, fine-tuned on SQL** | **6.26** | **108.5 ms** | **3.49×** | 74.4% / 80.3% | 100% |
+
+- **The diffusion drafter wins at both stages.** Off the shelf, DFlash is 1.54× faster than EAGLE-3; with the same SQL
+  fine-tune (12k rows, 3 epochs, best checkpoint by validation) EAGLE-3 gains more from training (2.88 → 4.61 tokens/call) but DFlash stays **1.48× faster** (108.5 vs 161.0 ms).
+- **Short outputs cap the gain.** Answers average 34 tokens, so the fixed per-query cost (prompt, one partial block)
+  weighs more than on code edits (6.8× for DFlash there). Off the shelf: 2.1× under 20 tokens, 3.2× at 40+.
+- **Copying does not help here** (2.79×): SQL reuses only short names from the schema, below the router's 8-token match.
+- **Qwen3-8B zero-shot ties our fine-tuned 0.5B on accuracy** (74.4% vs 73.5% strict), but runs 6.6× slower without a
+  drafter; on this task the small fine-tuned model plus its drafter (28 ms) stays the better trade-off.
+- **Strict vs lenient accuracy.** The strict metric (GPU session 2) requires the exact result table of the synthetic
+  gold query; of the 8B's 199 misses, 46 are the right rows with extra/missing columns, another row order, or rounding.
+  `score_lenient` forgives exactly those three (DML states and broken golds stay wrong); `rescore_lenient.py` applies
+  it to every SQL model in the repo: all gain 4–6 points and the ranking is unchanged
+  (`results/lenient_scores.json`). Many remaining misses are wrong gold queries (synthetic dataset).
+
+**Prediction vs. result.** Written before any fine-tuned drafter was benchmarked (`predictions_sql8b.json`): DFlash
+6.5–7.5 tokens/call, 3.7–4.2×; EAGLE-3 3.5–4.5, 2.4–2.8×. Measured: DFlash 6.26 and 3.49× (just below the range;
+the fine-tune added less than expected), EAGLE-3 4.61 tokens/call (above the range) and 2.35× (just below).
+
+### The causal-mask trap (cost one day, worth knowing)
+
+The first SQL-trained DFlash looked useless: 4.92 tokens/call vs 4.85 off the shelf, although validation acceptance
+rose to 7.1. Cause: `speculators convert --algorithm dflash` writes `"sliding_window_non_causal": false`, and vLLM's
+Speculators loader (`vllm/transformers_utils/configs/speculators/algos.py`) then serves the drafter with a **causal**
+mask inside the draft block, while DFlash is bidirectional and Speculators also *trains* it bidirectionally. Weights
+are bit-identical to z-lab's; only serving changes. Diagnosis on the first 300 queries (`train_sql_drafters.sh`,
+step 5):
+
+| drafter (first 300 queries) | layer ids | block mask | tokens / call |
+|---|---|---|---:|
+| z-lab, original format | (z-lab) | bidirectional | 4.98 |
+| z-lab, converted (`dflash_conv`) | 2 10 18 26 34 | causal | 3.96 |
+| same, other layer ids (`dflash_conv_l1`) | 1 9 17 25 33 | causal | 3.89 |
+| same, `sliding_window_non_causal: true` (`dflash_conv_nc`) | 2 10 18 26 34 | bidirectional | **4.98** |
+| SQL fine-tune as converted (`dflash_sql`, all 1,000) | 2 10 18 26 34 | causal | 4.92 |
+| SQL fine-tune on its training layers (`dflash_sql_l1`) | 1 9 17 25 33 | causal | 4.97 |
+| **SQL fine-tune, bidirectional (`dflash_sql_nc`, all 1,000)** | 1 9 17 25 33 | bidirectional | **6.26** |
+
+So the conversion alone costs ~1 token/call, and fine-tuning had only been winning that back. Fix: set
+`"sliding_window_non_causal": true` in the converted `config.json`. Layer ids are hidden-state indices (0 =
+embeddings; z-lab's `[1 9 17 25 33]` corresponds to `[2 10 18 26 34]`); the SQL drafter was trained on activations
+from `[1 9 17 25 33]` and is served on the same ids, so training and serving match. A one-layer offset costs little
+(3.96 vs 3.89, 4.92 vs 4.97).
+
+Reproduce: `ONLY_KEYS="qwen3-8b" ./setup.sh`, the plugin install, then `./train_sql_drafters.sh` (~2.5 h on one
+H100: data, conversion, hidden states, both fine-tunes, all benchmarks). Training curves and the benchmark table are
+also in the W&B project `sql-diffusion` (`wandb_sync.py` replays the logs from the GPU box).

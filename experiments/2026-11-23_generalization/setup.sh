@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time setup on the GPU box (1x H100 80GB or A100 80GB; Ubuntu; >= 300 GB disk). ~45-60 min, mostly downloads (~115 GB).
 # Llama targets are gated: export HF_TOKEN=... (account with Llama 3.1 and 3.2 licences accepted) before running,
-# or SKIP_LLAMA=1 to leave them out.
+# or SKIP_LLAMA=1 to leave them out. ONLY_KEYS="qwen3-8b" downloads just those targets (~35 GB).
 set -euo pipefail
 cd "$(dirname "$0")"
 command -v uv >/dev/null || python3 -m pip install --user uv
@@ -23,7 +23,10 @@ from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
 T = json.load(open('targets.json'))
 skip_llama = os.environ.get('SKIP_LLAMA') == '1'
 ids = []
+only = os.environ.get('ONLY_KEYS', '').split()
 for key, t in T.items():
+    if only and key not in only:
+        continue
     if t['gated'] and skip_llama:
         print('skipping gated target', key); continue
     ids += [t['model'], t['dflash'], t['draft']] + ([t['eagle']] if t.get('eagle') else [])

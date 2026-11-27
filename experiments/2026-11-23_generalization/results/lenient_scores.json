@@ -1,0 +1,67 @@
+{
+ "ettin150-ar-10ep-vllm-pr61276": {
+  "n_exec": 777,
+  "exec": 0.5804375804375804,
+  "exec_lenient": 0.6267696267696268
+ },
+ "ettin150-diffusion-iso-10ep-distilled-bf16-cudagraphs": {
+  "n_exec": 777,
+  "exec": 0.5637065637065637,
+  "exec_lenient": 0.6023166023166023
+ },
+ "ettin400-diffusion-iso-10ep-distilled-bf16-cudagraphs": {
+  "n_exec": 777,
+  "exec": 0.6061776061776062,
+  "exec_lenient": 0.6447876447876448
+ },
+ "sql-ar-qwen25-coder-0.5b-ar-vllm": {
+  "n_exec": 777,
+  "exec": 0.7348777348777349,
+  "exec_lenient": 0.7799227799227799
+ },
+ "sql-ar-qwen25-coder-0.5b-ar-vllm-dflash": {
+  "n_exec": 777,
+  "exec": 0.7335907335907336,
+  "exec_lenient": 0.7773487773487774
+ },
+ "sql-ar-qwen25-coder-0.5b-ar-vllm-eagle3": {
+  "n_exec": 777,
+  "exec": 0.7348777348777349,
+  "exec_lenient": 0.7799227799227799
+ },
+ "qwen3-8b ar": {
+  "n_exec": 777,
+  "exec": 0.7438867438867439,
+  "exec_lenient": 0.803088803088803
+ },
+ "qwen3-8b copyflash63": {
+  "n_exec": 777,
+  "exec": 0.7464607464607464,
+  "exec_lenient": 0.8056628056628057
+ },
+ "qwen3-8b dflash": {
+  "n_exec": 777,
+  "exec": 0.7438867438867439,
+  "exec_lenient": 0.803088803088803
+ },
+ "qwen3-8b dflash_sql": {
+  "n_exec": 777,
+  "exec": 0.7438867438867439,
+  "exec_lenient": 0.803088803088803
+ },
+ "qwen3-8b dflash_sql_nc": {
+  "n_exec": 777,
+  "exec": 0.7438867438867439,
+  "exec_lenient": 0.803088803088803
+ },
+ "qwen3-8b eagle7": {
+  "n_exec": 777,
+  "exec": 0.7438867438867439,
+  "exec_lenient": 0.803088803088803
+ },
+ "qwen3-8b eagle_sql": {
+  "n_exec": 777,
+  "exec": 0.7438867438867439,
+  "exec_lenient": 0.803088803088803
+ }
+}

@@ -6,3 +6,6 @@ box_state/
 queue_init.txt
 # rebuilt by prepare_apply.py (full third-party source files, mixed licences; not redistributed)
 data/apply100.json
+# SQL drafter checkpoints and target hidden states (~250 GB), rebuilt by train_sql_drafters.sh
+spec-sql8b/
+.speculators/
