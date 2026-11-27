@@ -18,8 +18,9 @@ SQL denoise step by step, with token confidence and early stop.
 
 | | Setup | Result | Write-up |
 |---|---|---|---|
-| Diffusion as the model | Ettin-150M encoder (diffusion) vs. the matching Ettin-150M decoder (AR), text-to-SQL, H100 | **2.6× faster** at tied accuracy | [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) |
+| Diffusion as the model | Ettin-150M encoder (diffusion) vs. the matching Ettin-150M decoder (AR), text-to-SQL, H100 | **2.6× faster** at similar accuracy | [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) |
 | Diffusion as the drafter, SQL | Qwen2.5-0.5B + DFlash drafter in vLLM | **2.0× faster**, same accuracy; 1.3× faster than an EAGLE-3 drafter | [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md) |
+| Diffusion as the drafter, SQL, 8B | Qwen3-8B (zero-shot) + DFlash drafter fine-tuned on SQL, vLLM, H100 | **3.5× faster**, identical outputs; 1.48× faster than an EAGLE-3 drafter trained the same way | [Qwen3-8B SQL](experiments/2026-11-23_generalization/README.md#text-to-sql-on-qwen3-8b-2026-11-27-a-large-off-the-shelf-target-sql-trained-drafters) |
 | Diffusion as the drafter, code edits | Qwen3-8B + copy + DFlash router (vLLM plugin), H100 | **9.0× faster** than plain decoding (95% CI 8.4–9.7), 1.34× faster than DFlash alone | [Code-edit study](experiments/2026-11-23_generalization/README.md) |
 
 All speeds are measured end to end at batch 1. Every experiment folder has its scripts, raw data and plots; the
@@ -27,12 +28,15 @@ index is [`experiments/README.md`](experiments/README.md).
 
 ## 1. Diffusion as the model: text-to-SQL
 
-![Diffusion makes text-to-SQL faster, two ways: at the same size a diffusion model is 2.6× faster at tied accuracy, and a diffusion drafter makes the same AR model 2.0× faster](docs/assets/sql_results.svg)
+![Text-to-SQL latency vs. accuracy: a 150M diffusion model is 2.6× faster than the same-size AR model at similar accuracy; diffusion drafters make Qwen2.5-0.5B 2.0× and Qwen3-8B 3.5× faster with identical outputs](docs/assets/sql_results.svg)
 
-Two results on one H100 with the same 1,000 test queries: a diffusion model is **2.6× faster than an autoregressive
-model of the same size** at tied accuracy (bottom arrow), and a diffusion drafter makes a **larger AR model 2.0×
-faster** without changing its answers (top arrow; see [section 2](#2-diffusion-as-the-drafter-lossless-speculative-decoding)).
-Details: [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md).
+On one H100 with the same 1,000 test queries: a diffusion model is **2.6× faster than an autoregressive model of the
+same size** at similar accuracy (bottom arrow), and diffusion drafters make AR models **2.0× (Qwen2.5-0.5B) and 3.5×
+(Qwen3-8B) faster** without changing their answers (top arrows; see [section 2](#2-diffusion-as-the-drafter-lossless-speculative-decoding)).
+In both drafter pairs the diffusion drafter beats an autoregressive EAGLE-3 drafter trained on the same data.
+Accuracy is execution match, ignoring row order and extra columns, with one rule for every model
+([why](experiments/2026-11-23_generalization/README.md#text-to-sql-on-qwen3-8b-2026-11-27-a-large-off-the-shelf-target-sql-trained-drafters)).
+Details: [GPU session 2](experiments/2026-10-14_gpu-session-2/README.md), [Qwen3-8B](experiments/2026-11-23_generalization/README.md#text-to-sql-on-qwen3-8b-2026-11-27-a-large-off-the-shelf-target-sql-trained-drafters).
 
 How a diffusion model writes SQL:
 
@@ -93,6 +97,7 @@ decoding the output is the LLM's own output; only the number of LLM passes chang
 ([DFlash](https://github.com/z-lab/dflash)) guesses 16 tokens in a single pass, which is what makes it cheap.
 
 - **Text-to-SQL: 2.0× faster at unchanged accuracy.** Qwen2.5-0.5B (exec 0.735) on vLLM with a 3-layer DFlash drafter: 28 ms instead of 57 ms, and 1.3× faster than an EAGLE-3 drafter trained on the same data (37 ms). Above 150M, diffusion as the drafter beats diffusion as the model: Ettin-400M diffusion takes 32 ms at exec 0.606. ([GPU session 2](experiments/2026-10-14_gpu-session-2/README.md))
+- **Text-to-SQL on a large model: 3.5×, identical outputs.** Qwen3-8B zero-shot (exec 0.744 strict, 0.803 lenient) with z-lab's DFlash drafter fine-tuned on 12k of its own SQL answers: 108.5 ms instead of 378.3 ms, 6.26 tokens per call. EAGLE-3 fine-tuned the same way: 161.0 ms (2.35×), so DFlash is 1.48× faster. Off the shelf: 2.93× vs 1.90×. Short answers (34 tokens) cap the gain. Pitfall found on the way: converted DFlash drafters are served with a causal block mask unless `sliding_window_non_causal` is set, which costs ~1 token per call. ([Qwen3-8B SQL](experiments/2026-11-23_generalization/README.md#text-to-sql-on-qwen3-8b-2026-11-27-a-large-off-the-shelf-target-sql-trained-drafters))
 - **Code edits: 9.0× faster with the same output.** Most of an edited file is unchanged. A router copies it straight
   from the input when the current text matches the old code (up to 63 tokens per pass) and lets DFlash draft only the
   new code. Built as a vLLM plugin ([`copyflash_plugin/`](experiments/2026-11-23_generalization/copyflash_plugin/)); on
